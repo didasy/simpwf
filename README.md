@@ -314,7 +314,6 @@ dead-letters (the definition configures a transport the deployment lacks).
 | POST       | `/v1/workflow/definition`                          | create workflow definition (immutable)                          |
 | GET        | `/v1/workflow/definition`                          | list (paged, `latest_only`, ...)                                  |
 | GET/DELETE | `/v1/workflow/definition/{id}`                     | get / delete                                                    |
-| POST       | `/v1/workflow/definition/{id}/materialize`         | materialized node tree                                          |
 | POST       | `/v1/workflow/instance`                            | create instance (202)                                           |
 | GET        | `/v1/workflow/instance`                            | list (paged, `id`/`workflow_definition_id`/`status` filters)          |
 | GET        | `/v1/workflow/instance/{id}/status`                | status + counters + cursor + audit actors                       |
