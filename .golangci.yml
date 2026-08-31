@@ -1,0 +1,26 @@
+version: "2"
+
+run:
+  # The repository targets Go 1.26 (ariga.io/atlas requires >= 1.26.4), but
+  # some linter builds ship compiled with Go 1.25. Pinning the analysis
+  # language version keeps golangci-lint usable across toolchains.
+  go: "1.25"
+
+linters:
+  default: standard
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+  disable:
+    - depguard
+    - gochecknoglobals
+    - gochecknoinits
+    - cyclop
+    - funlen
+    - gocognit
+    - maintidx
+    - nestif
+    - lll
+    - wsl

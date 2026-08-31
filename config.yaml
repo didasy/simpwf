@@ -1,0 +1,74 @@
+# SimpWF workflow engine configuration.
+#
+# The app reads this file when it exists in the working directory (or when
+# started with -config). Without a config file, the same keys are read from
+# environment variables prefixed SIMPWF_ (e.g. SIMPWF_INFRA_POSTGRESQL_DSN).
+# Redis and RabbitMQ are optional: leave their DSNs empty for HTTP-only
+# operation. A configured but unreachable broker fails startup.
+
+infra:
+  http:
+    host: "localhost:9999"
+    swagger_enabled: true
+  postgresql:
+    dsn: "host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable TimeZone=Asia/Jakarta"
+  # Optional Redis (pub/sub input, output, and status channels). Set the DSN
+  # (e.g. redis://localhost:6379/0) to enable.
+  redis:
+    dsn: ""
+  # Optional RabbitMQ (durable input/output/status queues). Set the DSN
+  # (e.g. amqp://simpwf:simpwf@localhost:5672/) to enable; the queue names
+  # default to the values below.
+  rabbitmq:
+    dsn: ""
+    input_queue: "simpwf.input"
+    output_queue: "simpwf.output"
+    status_queue: "simpwf.status"
+
+# github.com/panjf2000/ants/v2 worker pool for node transitions.
+worker:
+  pool:
+    size: 100
+  expiry_duration: 5m
+  max_blocking_tasks: 16
+  pre_alloc: false
+  non_blocking: false
+  disable_purge: false
+
+# Engine limits. Node timeouts are parsed as Go duration strings; scripts and
+# external calls default to default_node_timeout and are capped by
+# max_node_timeout. Condition evaluation and input validation always run at
+# condition_timeout. Set http_allowlist to "*" to allow any target (dev only;
+# the engine logs a warning).
+engine:
+  default_node_timeout: 30s
+  max_node_timeout: 5m
+  condition_timeout: 5s
+  max_per_node_executions: 100
+  max_total_executions: 1000
+  lease_duration: 30s
+  claim_batch_size: 10
+  max_output_bytes: 1048576
+  max_redirects: 5
+  http_allowlist:
+    - "127.0.0.1:8080"
+    - "api.example.com"
+    - "jsonplaceholder.typicode.com"
+  exec_allowlist:
+    - "echo"
+    - "ls"
+
+# Optional API token authentication. When enabled, every /v1 endpoint
+# requires the X-Api-Token header; /health/* stays public. The token
+# may also be set via the SIMPWF_API_TOKEN environment variable when no
+# config file is present.
+auth:
+  enabled: false
+  api_token: ""
+
+# The configured system user is the audit actor for engine and service
+# side effects.
+system:
+  user_id: "00000000-0000-7000-8000-000000000001"
+  name: "system"
+  email: "system@localhost.local"

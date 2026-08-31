@@ -1,0 +1,1072 @@
+basePath: /
+definitions:
+  internal_workflow_handler.CreateInstanceRequest:
+    properties:
+      context:
+        items:
+          type: integer
+        type: array
+      workflow_definition_id:
+        type: string
+    type: object
+  internal_workflow_handler.CreateInstanceResponse:
+    properties:
+      id:
+        type: string
+      status:
+        type: string
+    type: object
+  internal_workflow_handler.CreateNodeDefinitionRequest:
+    properties:
+      content:
+        type: object
+      name:
+        type: string
+      previous_version_id:
+        type: string
+      type:
+        type: string
+    type: object
+  internal_workflow_handler.CreateWorkflowDefinitionRequest:
+    properties:
+      content:
+        type: object
+      name:
+        type: string
+      previous_version_id:
+        type: string
+    type: object
+  internal_workflow_handler.InputDeliveryResponse:
+    properties:
+      accepted:
+        type: boolean
+      error:
+        type: string
+    type: object
+  internal_workflow_handler.InstanceContextResponse:
+    properties:
+      context:
+        items:
+          type: integer
+        type: array
+      id:
+        type: string
+    type: object
+  internal_workflow_handler.InstanceStatusResponse:
+    properties:
+      attempt:
+        type: integer
+      counters:
+        items:
+          type: integer
+        type: array
+      created_at:
+        type: string
+      created_by:
+        type: string
+      current_group_id:
+        type: string
+      current_node_id:
+        type: string
+      current_node_instance_id:
+        type: string
+      error:
+        type: string
+      finished_at:
+        type: string
+      id:
+        type: string
+      pause_requested:
+        type: boolean
+      started_at:
+        type: string
+      status:
+        type: string
+      termination_pending:
+        type: boolean
+      updated_at:
+        type: string
+      updated_by:
+        type: string
+      waiting_reason:
+        type: string
+      workflow_definition_id:
+        type: string
+    type: object
+  internal_workflow_handler.InstanceSummaryResponse:
+    properties:
+      created_at:
+        type: string
+      created_by:
+        type: string
+      error:
+        type: string
+      finished_at:
+        type: string
+      id:
+        type: string
+      pause_requested:
+        type: boolean
+      started_at:
+        type: string
+      status:
+        type: string
+      termination_pending:
+        type: boolean
+      updated_at:
+        type: string
+      updated_by:
+        type: string
+      waiting_reason:
+        type: string
+      workflow_definition_id:
+        type: string
+    type: object
+  internal_workflow_handler.ListResponse-internal_workflow_handler_InstanceSummaryResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.InstanceSummaryResponse'
+        type: array
+      page:
+        type: integer
+      per_page:
+        type: integer
+      total:
+        type: integer
+      total_pages:
+        type: integer
+    type: object
+  internal_workflow_handler.ListResponse-internal_workflow_handler_NodeDefinitionResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.NodeDefinitionResponse'
+        type: array
+      page:
+        type: integer
+      per_page:
+        type: integer
+      total:
+        type: integer
+      total_pages:
+        type: integer
+    type: object
+  internal_workflow_handler.ListResponse-internal_workflow_handler_WorkflowDefinitionResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.WorkflowDefinitionResponse'
+        type: array
+      page:
+        type: integer
+      per_page:
+        type: integer
+      total:
+        type: integer
+      total_pages:
+        type: integer
+    type: object
+  internal_workflow_handler.NodeDebugResponse:
+    properties:
+      attempt_count:
+        type: integer
+      cancelled:
+        type: boolean
+      context_after:
+        items:
+          type: integer
+        type: array
+      context_before:
+        items:
+          type: integer
+        type: array
+      created_at:
+        type: string
+      duration_ms:
+        type: integer
+      error:
+        type: string
+      finished_at:
+        type: string
+      input:
+        items:
+          type: integer
+        type: array
+      latest_attempt:
+        type: integer
+      name:
+        type: string
+      occurrence_id:
+        type: string
+      output:
+        items:
+          type: integer
+        type: array
+      recovery_policy:
+        type: string
+      recovery_result:
+        type: string
+      selected_attempt:
+        type: integer
+      source_node_definition_id:
+        type: string
+      started_at:
+        type: string
+      status:
+        type: string
+      stopped_at:
+        type: string
+      type:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  internal_workflow_handler.NodeDefinitionResponse:
+    properties:
+      content:
+        type: object
+      created_at:
+        type: string
+      created_by:
+        type: string
+      id:
+        type: string
+      lineage_id:
+        type: string
+      name:
+        type: string
+      previous_version_id:
+        type: string
+      type:
+        type: string
+      updated_at:
+        type: string
+      updated_by:
+        type: string
+      version:
+        type: integer
+    type: object
+  internal_workflow_handler.PauseResponse:
+    properties:
+      pause_requested:
+        type: boolean
+      status:
+        type: string
+    type: object
+  internal_workflow_handler.Problem:
+    properties:
+      detail:
+        type: string
+      instance:
+        type: string
+      status:
+        type: integer
+      title:
+        type: string
+      type:
+        type: string
+    type: object
+  internal_workflow_handler.ResumeResponse:
+    properties:
+      status:
+        type: string
+    type: object
+  internal_workflow_handler.StopResponse:
+    properties:
+      status:
+        type: string
+      termination_pending:
+        type: boolean
+    type: object
+  internal_workflow_handler.WorkflowDefinitionResponse:
+    properties:
+      content:
+        type: object
+      created_at:
+        type: string
+      created_by:
+        type: string
+      id:
+        type: string
+      lineage_id:
+        type: string
+      name:
+        type: string
+      previous_version_id:
+        type: string
+      updated_at:
+        type: string
+      updated_by:
+        type: string
+      version:
+        type: integer
+    type: object
+info:
+  contact: {}
+  description: Workflow definition and execution API.
+  title: SimpWF API
+  version: "1.0"
+paths:
+  /health/live:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness probe
+      tags:
+      - health
+  /health/ready:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Readiness probe
+      tags:
+      - health
+  /v1/node/definition:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Items per page
+        in: query
+        name: per_page
+        type: integer
+      - description: Sort order
+        in: query
+        name: order
+        type: string
+      - collectionFormat: csv
+        description: Definition IDs
+        in: query
+        items:
+          type: string
+        name: ids
+        type: array
+      - description: Name filter
+        in: query
+        name: name
+        type: string
+      - description: Lineage ID
+        in: query
+        name: lineage_id
+        type: string
+      - description: Version
+        in: query
+        name: version
+        type: integer
+      - description: Only latest versions
+        in: query
+        name: latest_only
+        type: boolean
+      - description: Node type
+        in: query
+        name: type
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ListResponse-internal_workflow_handler_NodeDefinitionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: List node definitions
+      tags:
+      - node-definitions
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Node definition
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_workflow_handler.CreateNodeDefinitionRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.NodeDefinitionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Create node definition
+      tags:
+      - node-definitions
+  /v1/node/definition/{id}:
+    delete:
+      parameters:
+      - description: Definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Delete node definition
+      tags:
+      - node-definitions
+    get:
+      parameters:
+      - description: Definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.NodeDefinitionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get node definition
+      tags:
+      - node-definitions
+  /v1/workflow/definition:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Items per page
+        in: query
+        name: per_page
+        type: integer
+      - description: Sort order
+        in: query
+        name: order
+        type: string
+      - collectionFormat: csv
+        description: Definition IDs
+        in: query
+        items:
+          type: string
+        name: ids
+        type: array
+      - description: Name filter
+        in: query
+        name: name
+        type: string
+      - description: Lineage ID
+        in: query
+        name: lineage_id
+        type: string
+      - description: Version
+        in: query
+        name: version
+        type: integer
+      - description: Only latest versions
+        in: query
+        name: latest_only
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ListResponse-internal_workflow_handler_WorkflowDefinitionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: List workflow definitions
+      tags:
+      - workflow-definitions
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workflow definition
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_workflow_handler.CreateWorkflowDefinitionRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.WorkflowDefinitionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Create workflow definition
+      tags:
+      - workflow-definitions
+  /v1/workflow/definition/{id}:
+    delete:
+      parameters:
+      - description: Definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Delete workflow definition
+      tags:
+      - workflow-definitions
+    get:
+      parameters:
+      - description: Definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.WorkflowDefinitionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get workflow definition
+      tags:
+      - workflow-definitions
+  /v1/workflow/instance:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Items per page
+        in: query
+        name: per_page
+        type: integer
+      - description: Sort order
+        in: query
+        name: order
+        type: string
+      - collectionFormat: csv
+        description: Instance IDs
+        in: query
+        items:
+          type: string
+        name: id
+        type: array
+      - description: Workflow definition ID
+        in: query
+        name: workflow_definition_id
+        type: string
+      - collectionFormat: csv
+        description: Statuses
+        in: query
+        items:
+          type: string
+        name: status
+        type: array
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ListResponse-internal_workflow_handler_InstanceSummaryResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: List workflow instances
+      tags:
+      - workflow-instances
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workflow instance
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_workflow_handler.CreateInstanceRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.CreateInstanceResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Create workflow instance
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/context:
+    get:
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.InstanceContextResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get workflow instance context
+      tags:
+      - workflow-instances
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Audit reason
+        in: header
+        name: X-Context-Update-Reason
+        type: string
+      - description: Full replacement context
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.InstanceContextResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Replace workflow instance context
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/input:
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Idempotency key
+        in: header
+        name: Idempotency-Key
+        required: true
+        type: string
+      - description: Input payload
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.InputDeliveryResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Deliver input to workflow instance
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/pause:
+    post:
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.PauseResponse'
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.PauseResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Pause workflow instance
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/resume:
+    post:
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ResumeResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Resume workflow instance
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/status:
+    get:
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.InstanceStatusResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get workflow instance status
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/status/node/{node_id}:
+    get:
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Node occurrence ID
+        in: path
+        name: node_id
+        required: true
+        type: string
+      - description: Attempt number
+        in: query
+        name: attempt
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.NodeDebugResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get workflow node debug detail
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/stop:
+    post:
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.StopResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Stop workflow instance
+      tags:
+      - workflow-instances
+schemes:
+- http
+securityDefinitions:
+  ApiKeyAuth:
+    description: API token authentication via the X-Api-Token header. Enabled when
+      auth.enabled is true.
+    in: header
+    name: X-Api-Token
+    type: apiKey
+swagger: "2.0"

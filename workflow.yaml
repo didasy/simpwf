@@ -1,0 +1,262 @@
+# SimpWF workflow definition sample.
+#
+# This YAML is the source a workflow builder would save as the workflow
+# definition content (JSON). Every node id is a UUIDv7 and must be unique.
+# Accepted node types: script, conditions, input, group, output,
+# external_call (http_config or execution_config), and poller (one of
+# http, redis, or rabbitmq).
+#
+# Node links:
+#   - script, input, output, group, external_call and poller may carry
+#     next_node; an empty next_node ends the current group/workflow.
+#   - each workflow/group may define keys that map names to sibling node ids;
+#     conditions select those names through conditions[].key.
+#   - a missing/null/blank condition key, or a key mapped to null/empty,
+#     ends the current group/workflow.
+#   - conditions nodes must NOT carry next_node or output_property.
+#   - scripts write their return value to output_property (default: the node
+#     id); external calls write a result object; output nodes write a
+#     {channel,destination,message_id} receipt; conditions and input nodes
+#     do not write output.
+#   - input nodes park the instance with waiting reason "input"; clients
+#     deliver a payload with an Idempotency-Key. The channel picks the
+#     transport: "http" -> PUT /v1/workflow/instance/{id}/input,
+#     "redis" -> publish {"idempotency_key","payload"} to
+#     workflow:input:<instance_id>, "rabbitmq" -> publish the raw JSON body
+#     to the configured input_queue with NodeInstanceId + IdempotencyKey
+#     headers (AMQP message_id is the idempotency fallback). The delivering
+#     transport must match the node's channel.
+#   - output nodes publish the exact JSON of context_path: "redis" to
+#     workflow:output:<instance_id>, "rabbitmq" to the configured
+#     output_queue.
+#   - poller nodes actively wait or repeat until their until predicate
+#     returns true. Exactly one transport block (http/redis/rabbitmq) is
+#     required and until is required inside it. They occupy a worker slot
+#     for the whole wait. The full normalized response {body, headers?,
+#     status?} is written to output_property (default: node attempt id).
+#     Defaults: http GET / 5s delay / 30s request_timeout / 10
+#     max_attempts; redis GET 5s / 30s / 10; redis SUB and rabbitmq 5m
+#     max_wait_time; retry_on_recovery true. poller request_timeout and
+#     max_wait_time are not capped by engine.max_node_timeout. Templates
+#     may also use the reserved automatic roots workflow_instance_id and
+#     node_instance_id (read-only, never persisted into context).
+#   - the optional top-level status_update block fans one logical event out
+#     to every configured transport (http/redis/rabbitmq), each with its own
+#     retry policy; redis publishes to workflow:status:<instance_id>,
+#     rabbitmq to the configured status_queue.
+
+start_node_id: "11111111-1111-7111-8111-111111111101"
+
+# Status notifications: one outbox row per transport per event, sharing one
+# logical event id; ordering and retries are per transport.
+status_update:
+  http:
+    url: "https://example.com/workflow-status"
+    method: "POST"
+    headers:
+      Authorization: "Bearer token"
+    max_retry: 3
+    retry_delay: "5s"
+  redis:
+    max_retry: 2
+    retry_delay: "2s"
+  rabbitmq:
+    max_retry: 1
+    retry_delay: "10s"
+
+keys:
+  manager: "11111111-1111-7111-8111-111111111103"
+  staff: "11111111-1111-7111-8111-111111111104"
+
+nodes:
+  - type: script
+    id: "11111111-1111-7111-8111-111111111101"
+    name: "Load Profile"
+    input_data: "user"
+    # Optional lifecycle hook: transforms context before the node's own
+    # behavior (here before input_data is resolved and the script runs).
+    pre_script:
+      script: |
+        context.profile_attempts = (context.profile_attempts || 0) + 1;
+    script: |
+      if (!context.user) { return { ok: false, error: 'no user' }; }
+      return { ok: true, name: context.user.name, title: context.user.title };
+    timeout: 30s
+    output_property: profile
+    next_node: "11111111-1111-7111-8111-111111111102"
+
+  # Conditions select keys from the containing workflow.
+  - type: conditions
+    id: "11111111-1111-7111-8111-111111111102"
+    name: "Route by Title"
+    conditions:
+      - key: manager
+        condition: "return context.profile.title === 'Manager';"
+      - key: staff
+        condition: "return context.profile.title === 'Staff';"
+      # No key means this match exits the current workflow.
+      - condition: "return context.profile.title !== 'Manager' && context.profile.title !== 'Staff';"
+
+  # Input node: parks the instance waiting on a payload. The channel fixes
+  # the transport; here the payload arrives through the instance's Redis
+  # channel workflow:input:<instance_id>.
+  - type: input
+    id: "11111111-1111-7111-8111-111111111103"
+    name: "Manager Approval"
+    channel: "redis"
+    context_path: "approval"
+    validation:
+      script: |
+        var body = JSON.parse(input);
+        if (!body.approved) { return 'Approval rejected'; }
+    # Optional lifecycle hook: runs once per accepted delivery, after the
+    # payload was written to context_path; sees the parsed payload as a
+    # frozen "output" global.
+    post_script:
+      script: |
+        context.approval_reviewed = true;
+        context.approval_received_at = new Date().toISOString();
+    next_node: "11111111-1111-7111-8111-111111111105"
+
+  - type: script
+    id: "11111111-1111-7111-8111-111111111104"
+    name: "Staff Path"
+    script: "return { approved: true, by: 'staff' };"
+    output_property: approval
+    next_node: "11111111-1111-7111-8111-111111111105"
+
+  # External HTTP call; the response (status, headers, parsed body) becomes
+  # the node output. http_config.url, http_config.method, every header value
+  # and every nested body string value can use {{ context.path }} templates
+  # resolved from context data at execution time; header names and body
+  # property names are not templated. Templated URLs and methods are
+  # validated only after rendering (absolute http(s), host, allowlist, DNS).
+  # A body with no Content-Type defaults to application/json. For
+  # application/x-www-form-urlencoded or multipart/form-data, the body must
+  # render to an object: arrays become repeated text fields, nested objects
+  # become compact JSON strings, and null values are omitted. Multipart
+  # boundaries are generated automatically; file fields are not supported.
+  - type: external_call
+    id: "11111111-1111-7111-8111-111111111105"
+    name: "Notify"
+    timeout: 30s
+    http_config:
+      url: "https://api.example.com/webhook/{{ approval.by }}"
+      method: "POST"
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ user.token }}"
+      body:
+        profile: "{{ profile.name }}"
+        approved: "{{ approval.approved }}"
+    retry_on_recovery: true
+    output_property: notification
+    next_node: "11111111-1111-7111-8111-111111111106"
+
+  # Group: nested nodes; group start node id must exist inside the group.
+  - type: group
+    id: "11111111-1111-7111-8111-111111111106"
+    name: "Wrap Up"
+    start_node_id: "11111111-1111-7111-8111-111111111107"
+    # Group conditions resolve only this group-local key map.
+    keys:
+      finish: null
+    next_node: "11111111-1111-7111-8111-111111111109"
+    nodes:
+      - type: script
+        id: "11111111-1111-7111-8111-111111111107"
+        name: "Finalize"
+        script: "return { done: true, at: new Date().toISOString() };"
+        output_property: final
+        next_node: "11111111-1111-7111-8111-111111111108"
+      - type: conditions
+        id: "11111111-1111-7111-8111-111111111108"
+        name: "Finish Group"
+        conditions:
+          - key: finish
+            condition: "return true;"
+          - condition: "return false;"
+
+  # Output node: publishes the exact JSON of context_path to the broker
+  # transport; the {channel,destination,message_id} receipt lands on
+  # output_property. Rabbitmq goes to the configured output_queue.
+  - type: output
+    id: "11111111-1111-7111-8111-111111111109"
+    name: "Publish Result"
+    channel: "rabbitmq"
+    context_path: "final"
+    output_property: "published"
+
+# ---------------------------------------------------------------------------
+# Poller examples (commented; each is a complete poller node). A poller
+# requires exactly one transport block and a nonblank until predicate that
+# returns a boolean. Predicates run frozen and receive the normalized
+# response as `response` plus the frozen workflow `context`.
+# ---------------------------------------------------------------------------
+
+# HTTP poller: repeats until the predicate matches. The first request starts
+# immediately; delay applies only between attempts; every request (including
+# transport errors) counts toward max_attempts. HTTP status codes are
+# responses evaluated by until, not errors. The Idempotency-Key header stays
+# stable across attempts.
+#
+# - type: poller
+#   id: "22222222-2222-7222-8222-222222222221"
+#   name: "Wait for job completion"
+#   http:
+#     url: "https://api.example.com/jobs/{{ job.id }}"
+#     method: GET
+#     delay: 5s            # between attempts (default 5s)
+#     request_timeout: 30s # per call (default 30s, no global cap)
+#     max_attempts: 10     # default 10
+#     until: >-
+#       return response.status === 200 &&
+#              response.body.status === "completed";
+#   output_property: polled_data
+#   retry_on_recovery: true
+#   next_node: "11111111-1111-7111-8111-111111111109"
+
+# Redis GET poller: repeats GET on the rendered key. A missing key is a
+# normal response with response.body === null (evaluated by until), not an
+# error. delay / request_timeout / max_attempts defaults match http.
+#
+# - type: poller
+#   id: "22222222-2222-7222-8222-222222222222"
+#   name: "Wait for redis key"
+#   redis:
+#     method: GET
+#     key: "jobs:{{ job.id }}"
+#     until: 'return response.body !== null && response.body.status === "completed";'
+#   output_property: polled_data
+
+# Redis SUB poller: subscribes to the rendered channel and waits up to
+# max_wait_time for a message whose predicate matches. Nonmatching messages
+# are discarded. Pub/sub is broadcast: multiple pollers may accept the same
+# message, and messages published while nobody is subscribed are lost.
+#
+# - type: poller
+#   id: "22222222-2222-7222-8222-222222222223"
+#   name: "Wait for redis signal"
+#   redis:
+#     method: SUB
+#     channel: "jobs:{{ job.id }}"
+#     max_wait_time: 5m    # default 5m
+#     until: 'return response.body.status === "completed";'
+#   output_property: polled_data
+
+# RabbitMQ poller: consumes the rendered queue and waits up to max_wait_time
+# for a matching message. The queue must already exist (the engine never
+# declares it) and must be exclusive to one active poller execution. Every
+# consumed message is acknowledged: false messages are discarded, the first
+# match completes the node, and predicate/normalization errors acknowledge
+# the message before failing the node.
+#
+# - type: poller
+#   id: "22222222-2222-7222-8222-222222222224"
+#   name: "Wait for queue message"
+#   rabbitmq:
+#     queue: "jobs.{{ workflow_instance_id }}"
+#     max_wait_time: 5m    # default 5m
+#     until: 'return response.body.status === "completed";'
+#   output_property: polled_data
+#   next_node: "11111111-1111-7111-8111-111111111109"

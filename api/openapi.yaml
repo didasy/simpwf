@@ -1,0 +1,758 @@
+openapi: 3.1.0
+info:
+  title: SimpWF Workflow Engine
+  version: 1.0.0
+  description: |
+    Durable PostgreSQL-backed workflow engine. Definitions are immutable;
+    new versions reference the previous version. Instances run asynchronously
+    and expose status, context, input, and node-level debugging APIs.
+servers:
+  - url: /
+tags:
+  - name: Workflow Definitions
+  - name: Node Definitions
+  - name: Workflow Instances
+  - name: Controls
+  - name: Node Debug
+  - name: Health
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: liveness
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: readiness
+      summary: Readiness probe (checks database)
+      responses:
+        "200":
+          description: Ready to serve
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Not ready (database unreachable)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /v1/node/definition:
+    post:
+      tags: [Node Definitions]
+      operationId: createNodeDefinition
+      security:
+        - ApiKeyAuth: []
+      summary: Create an immutable node definition (or its next version)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeDefinitionRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeDefinition" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    get:
+      tags: [Node Definitions]
+      operationId: listNodeDefinitions
+      security:
+        - ApiKeyAuth: []
+      summary: List node definitions
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/Name"
+        - $ref: "#/components/parameters/LineageID"
+        - $ref: "#/components/parameters/Version"
+        - $ref: "#/components/parameters/LatestOnly"
+        - $ref: "#/components/parameters/NodeType"
+      responses:
+        "200":
+          description: List of node definitions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDefinitionList"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/node/definition/{id}:
+    get:
+      tags: [Node Definitions]
+      operationId: getNodeDefinition
+      security:
+        - ApiKeyAuth: []
+      summary: Get a node definition by id
+      parameters:
+        - $ref: "#/components/parameters/DefinitionID"
+      responses:
+        "200":
+          description: Node definition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeDefinition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [Node Definitions]
+      operationId: deleteNodeDefinition
+      security:
+        - ApiKeyAuth: []
+      summary: Delete a node definition (fails if referenced)
+      parameters:
+        - $ref: "#/components/parameters/DefinitionID"
+      responses:
+        "204": { description: Deleted }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/definition:
+    post:
+      tags: [Workflow Definitions]
+      operationId: createWorkflowDefinition
+      security:
+        - ApiKeyAuth: []
+      summary: Create an immutable workflow definition (or its next version)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkflowDefinitionRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowDefinition" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    get:
+      tags: [Workflow Definitions]
+      operationId: listWorkflowDefinitions
+      security:
+        - ApiKeyAuth: []
+      summary: List workflow definitions
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/Name"
+        - $ref: "#/components/parameters/LineageID"
+        - $ref: "#/components/parameters/Version"
+        - $ref: "#/components/parameters/LatestOnly"
+      responses:
+        "200":
+          description: List of workflow definitions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinitionList"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/definition/{id}:
+    get:
+      tags: [Workflow Definitions]
+      operationId: getWorkflowDefinition
+      security:
+        - ApiKeyAuth: []
+      summary: Get a workflow definition by id
+      parameters:
+        - $ref: "#/components/parameters/DefinitionID"
+      responses:
+        "200":
+          description: Workflow definition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowDefinition" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [Workflow Definitions]
+      operationId: deleteWorkflowDefinition
+      security:
+        - ApiKeyAuth: []
+      summary: Delete a workflow definition (fails if referenced by instances)
+      parameters:
+        - $ref: "#/components/parameters/DefinitionID"
+      responses:
+        "204": { description: Deleted }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/instance:
+    post:
+      tags: [Workflow Instances]
+      operationId: createWorkflowInstance
+      security:
+        - ApiKeyAuth: []
+      summary: Start a workflow instance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateInstanceRequest" }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateInstanceResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    get:
+      tags: [Workflow Instances]
+      operationId: listWorkflowInstances
+      security:
+        - ApiKeyAuth: []
+      summary: List workflow instances
+      description: |
+        Paginated compact instance summaries. Filters combine: repeated id,
+        one workflow_definition_id, repeated status. Ordering is allowlisted
+        (id, workflow_definition_id, status, created_at, updated_at) with an
+        optional leading "-" for descending.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/WorkflowDefinitionID"
+        - $ref: "#/components/parameters/InstanceStatus"
+      responses:
+        "200":
+          description: List of workflow instance summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceList"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/instance/{id}/status:
+    get:
+      tags: [Workflow Instances]
+      operationId: getWorkflowStatus
+      security:
+        - ApiKeyAuth: []
+      summary: Get workflow instance status
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          description: Instance status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstanceStatus" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/instance/{id}/context:
+    get:
+      tags: [Workflow Instances]
+      operationId: getWorkflowContext
+      security:
+        - ApiKeyAuth: []
+      summary: Get workflow instance context
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          description: Instance context
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstanceContext" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [Workflow Instances]
+      operationId: replaceWorkflowContext
+      security:
+        - ApiKeyAuth: []
+      summary: Replace workflow instance context (paused instances only)
+      description: |
+        Replaces the full context of a paused instance. The body must be a
+        JSON object; keys not present in the body are dropped (full
+        replacement, not a merge). The update is guarded atomically: it
+        succeeds only while the instance is paused, so a concurrent resume
+        or stop wins and the request returns 409. An optional
+        X-Context-Update-Reason header is recorded on the context_updated
+        audit event; context values are never written to the audit trail.
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+        - name: X-Context-Update-Reason
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Replaced instance context
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstanceContext" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /v1/workflow/instance/{id}/status/node/{node_id}:
+    get:
+      tags: [Node Debug]
+      operationId: getNodeDebug
+      security:
+        - ApiKeyAuth: []
+      summary: Get node occurrence debug detail (context snapshots, attempts)
+      description: |
+        node_id is the occurrence UUIDv7. attempt omitted returns the latest
+        execution; a positive attempt selects an exact loop execution. A valid
+        node that has not run returns 200 with status not_started.
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+        - $ref: "#/components/parameters/NodeID"
+        - name: attempt
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Node debug detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeDebug" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/instance/{id}/input:
+    put:
+      tags: [Workflow Instances]
+      operationId: deliverInput
+      security:
+        - ApiKeyAuth: []
+      summary: Deliver input to a waiting input node
+      description: |
+        Raw JSON body; requires Idempotency-Key header. Accepted payload is
+        written to the waiting input node's context_path.
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {}
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InputDeliveryResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /v1/workflow/instance/{id}/pause:
+    post:
+      tags: [Controls]
+      operationId: pauseWorkflow
+      security:
+        - ApiKeyAuth: []
+      summary: Pause a workflow instance (immediate or after current node)
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          description: Paused immediately
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PauseResponse" }
+        "202":
+          description: Deferred pause requested (node still running)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PauseResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/workflow/instance/{id}/resume:
+    post:
+      tags: [Controls]
+      operationId: resumeWorkflow
+      security:
+        - ApiKeyAuth: []
+      summary: Resume a paused workflow instance
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          description: Resumed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResumeResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/workflow/instance/{id}/stop:
+    post:
+      tags: [Controls]
+      operationId: stopWorkflow
+      security:
+        - ApiKeyAuth: []
+      summary: Stop a workflow instance (fences workers, cancels active node)
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          description: Stopped (or termination in progress)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StopResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Token
+      description: API token authentication. Required when auth is enabled; sent as X-Api-Token header.
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Order:
+      name: order
+      in: query
+      required: false
+      schema:
+        type: string
+        description: Sort field with optional leading "-" for descending (allowlisted)
+    ID:
+      name: id
+      in: query
+      required: false
+      schema:
+        type: array
+        items: { type: string, format: uuid }
+        maxItems: 100
+        description: Repeatable id filter
+      style: form
+      explode: true
+    Name:
+      name: name
+      in: query
+      required: false
+      schema: { type: string }
+    LineageID:
+      name: lineage_id
+      in: query
+      required: false
+      schema: { type: string, format: uuid }
+    Version:
+      name: version
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1 }
+    LatestOnly:
+      name: latest_only
+      in: query
+      required: false
+      schema: { type: boolean }
+    NodeType:
+      name: type
+      in: query
+      required: false
+      schema: { type: string }
+    WorkflowDefinitionID:
+      name: workflow_definition_id
+      in: query
+      required: false
+      schema: { type: string, format: uuid }
+    InstanceStatus:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: array
+        items: { type: string, enum: [waiting, running, paused, finished, failed, stopped] }
+        description: Repeatable status filter
+      style: form
+      explode: true
+    DefinitionID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InstanceID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    NodeID:
+      name: node_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    BadRequest:
+      description: Invalid query or malformed request
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Not found
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: State or reference conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: Missing or invalid API token
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unprocessable:
+      description: Invalid definition or input
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, default: "about:blank" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string }
+    NodeDefinitionRequest:
+      type: object
+      required: [name, type, content]
+      properties:
+        name: { type: string }
+        type:
+          type: string
+          enum: [script, conditions, input, group, external_call]
+        previous_version_id: { type: string, format: uuid, nullable: true }
+        content: { type: object }
+    NodeDefinition:
+      type: object
+      required: [id, name, version, lineage_id, type, content, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer }
+        previous_version_id: { type: string, format: uuid, nullable: true }
+        lineage_id: { type: string, format: uuid }
+        type: { type: string }
+        content: { type: object }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NodeDefinitionList:
+      type: object
+      required: [items, page, per_page, total, total_pages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/NodeDefinition" } }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+    WorkflowDefinitionRequest:
+      type: object
+      required: [name, content]
+      properties:
+        name: { type: string }
+        previous_version_id: { type: string, format: uuid, nullable: true }
+        content: { type: object }
+    WorkflowDefinition:
+      type: object
+      required: [id, name, version, lineage_id, content, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer }
+        previous_version_id: { type: string, format: uuid, nullable: true }
+        lineage_id: { type: string, format: uuid }
+        content: { type: object }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WorkflowDefinitionList:
+      type: object
+      required: [items, page, per_page, total, total_pages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/WorkflowDefinition" } }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+    CreateInstanceRequest:
+      type: object
+      required: [workflow_definition_id]
+      properties:
+        workflow_definition_id: { type: string, format: uuid }
+        context: { type: object }
+    CreateInstanceResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string }
+    InstanceSummary:
+      type: object
+      required: [id, workflow_definition_id, status, waiting_reason, pause_requested, termination_pending, error, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        workflow_definition_id: { type: string, format: uuid }
+        status: { type: string, enum: [waiting, running, paused, finished, failed, stopped] }
+        waiting_reason: { type: string, nullable: true }
+        pause_requested: { type: boolean }
+        termination_pending: { type: boolean }
+        error: { type: string, nullable: true }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    InstanceList:
+      type: object
+      required: [items, page, per_page, total, total_pages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/InstanceSummary" } }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+    InstanceStatus:
+      type: object
+      required: [id, workflow_definition_id, status, waiting_reason, pause_requested, termination_pending, attempt, counters, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        workflow_definition_id: { type: string, format: uuid }
+        status: { type: string, enum: [waiting, running, paused, finished, failed, stopped] }
+        waiting_reason: { type: string, nullable: true }
+        pause_requested: { type: boolean }
+        termination_pending: { type: boolean }
+        current_group_id: { type: string, format: uuid, nullable: true }
+        current_node_id: { type: string, format: uuid, nullable: true }
+        current_node_instance_id:
+          type: string
+          nullable: true
+          description: Public node instance id "<instance>:<occurrence>"
+        attempt: { type: integer }
+        counters: { type: object }
+        error: { type: string, nullable: true }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    InstanceContext:
+      type: object
+      required: [id, context]
+      properties:
+        id: { type: string, format: uuid }
+        context: { type: object }
+    InputDeliveryResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean }
+        error: { type: string, nullable: true }
+    PauseResponse:
+      type: object
+      required: [status, pause_requested]
+      properties:
+        status: { type: string }
+        pause_requested: { type: boolean }
+    ResumeResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string }
+    StopResponse:
+      type: object
+      required: [status, termination_pending]
+      properties:
+        status: { type: string }
+        termination_pending: { type: boolean }
+    NodeDebug:
+      type: object
+      required:
+        - occurrence_id
+        - source_node_definition_id
+        - name
+        - type
+        - selected_attempt
+        - latest_attempt
+        - attempt_count
+        - status
+      properties:
+        occurrence_id: { type: string, format: uuid }
+        source_node_definition_id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string }
+        selected_attempt: { type: integer, nullable: true }
+        latest_attempt: { type: integer, nullable: true }
+        attempt_count: { type: integer }
+        status:
+          type: string
+          enum: [not_started, waiting, running, finished, failed, stopped]
+        context_before: { type: object, nullable: true }
+        context_after: { type: object, nullable: true }
+        input: {}
+        output: {}
+        error: { type: string, nullable: true }
+        recovery_policy: { type: string, nullable: true }
+        recovery_result: { type: string, nullable: true }
+        cancelled: { type: boolean }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        stopped_at: { type: string, format: date-time, nullable: true }
+        duration_ms: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
