@@ -72,17 +72,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
-      - name: Install Atlas
-        run: go install ariga.io/atlas/cmd/atlas@v1.3.0
+      - uses: ariga/setup-atlas@v0
+        with:
+          version: v1.3.0
       - name: Atlas validate (replay migration directory on a clean DB)
         run: |
           PGPASSWORD=gorm createdb -h localhost -p 9921 -U gorm simpwf_ci_validate
-          "$(go env GOPATH)/bin/atlas" migrate validate \
+          atlas migrate validate \
             --config file://migrations/atlas.hcl --env gorm \
             --var dev_url='host=localhost user=gorm password=gorm dbname=simpwf_ci_validate port=9921 sslmode=disable'
       - name: Atlas apply
         run: |
-          "$(go env GOPATH)/bin/atlas" migrate apply \
+          atlas migrate apply \
             --config file://migrations/atlas.hcl --env gorm \
             --url 'postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable' \
             --var dev_url='host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable'
