@@ -1,0 +1,54 @@
+name: "Go Coverage Guard"
+
+on:
+  push:
+    branches: [main] # Required so the action stores baseline coverage notes
+  pull_request:
+    branches: [main]
+
+jobs:
+  coverage-check: # <--- Job name GitHub tracks; select as required status check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to read/write git notes for coverage tracking
+      pull-requests: write # Needed to post coverage comments on PRs
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gorm
+          POSTGRES_PASSWORD: gorm
+          POSTGRES_DB: gorm
+        ports:
+          - 9921:5432
+        options: >-
+          --health-cmd "pg_isready -U gorm -d gorm"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      TEST_DATABASE_DSN: host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable
+      TEST_DATABASE_DSN_ENGINE: host=localhost user=gorm password=gorm dbname=simpwf_test_engine port=9921 sslmode=disable
+      TEST_DATABASE_DSN_SERVICE: host=localhost user=gorm password=gorm dbname=simpwf_test_service port=9921 sslmode=disable
+      TEST_DATABASE_DSN_APP: host=localhost user=gorm password=gorm dbname=simpwf_test_app port=9921 sslmode=disable
+      TEST_DATABASE_DSN_STATUSUPDATE: host=localhost user=gorm password=gorm dbname=simpwf_test_statusupdate port=9921 sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 10 # Required to find previous git notes for delta checks
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Create scratch test databases
+        run: |
+          for db in simpwf_test_engine simpwf_test_service simpwf_test_app simpwf_test_statusupdate; do
+            PGPASSWORD=gorm createdb -h localhost -p 9921 -U gorm "$db"
+          done
+
+      - name: Run Go Coverage Action
+        uses: gwatts/go-coverage-action@v2
+        with:
+          coverage-threshold: 75
+          fail-coverage: always
