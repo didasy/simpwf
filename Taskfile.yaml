@@ -5,6 +5,8 @@ version: "3"
 
 vars:
   DSN: 'host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable'
+  # Atlas needs a driver-qualified URL (postgres://); the bare host=... DSN is pgx-only.
+  ATLAS_DEV_URL: 'postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable'
   TEST_DSN: '{{.DSN}}'
   TEST_DSN_ENGINE: 'host=localhost user=gorm password=gorm dbname=simpwf_test_engine port=9921 sslmode=disable'
   TEST_DSN_SERVICE: 'host=localhost user=gorm password=gorm dbname=simpwf_test_service port=9921 sslmode=disable'
@@ -55,17 +57,17 @@ tasks:
   migrate-up:
     desc: Apply Atlas migrations to the dev database
     cmds:
-      - atlas migrate apply --config file://migrations/atlas.hcl --env gorm --var dev_url='{{.DSN}}'
+      - atlas migrate apply --config file://migrations/atlas.hcl --env gorm --var dev_url='{{.ATLAS_DEV_URL}}'
 
   migrate-diff:
     desc: Generate a new Atlas migration from the GORM models
     cmds:
-      - atlas migrate diff add_ --config file://migrations/atlas.hcl --env gorm --var dev_url='{{.DSN}}'
+      - atlas migrate diff add_ --config file://migrations/atlas.hcl --env gorm --var dev_url='{{.ATLAS_DEV_URL}}'
 
   migrate-lint:
     desc: Validate the migration directory (checksums + replay); lint is Pro-only in atlas >= v0.38
     cmds:
-      - atlas migrate validate --config file://migrations/atlas.hcl --env gorm --var dev_url='{{.DSN}}'
+      - atlas migrate validate --config file://migrations/atlas.hcl --env gorm --var dev_url='{{.ATLAS_DEV_URL}}'
 
   e2e:
     desc: Black-box API checks against a running app

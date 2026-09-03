@@ -50,7 +50,7 @@ docker run -d --name simpwf-pg -p 9921:5432 \
 
 # Migrate (Atlas owns the schema; the app never migrates)
 atlas migrate apply --config file://migrations/atlas.hcl --env gorm \
-  --var dev_url="host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable"
+  --var dev_url="postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable"
 
 # Run the API + dispatcher
 go run ./cmd/app -config config.yaml
@@ -337,7 +337,7 @@ go test ./... -count=1
 go test -race ./... -count=1
 golangci-lint run ./...
 atlas migrate validate --config file://migrations/atlas.hcl --env gorm \
-  --var dev_url="host=localhost user=gorm password=gorm dbname=simpwf_dev port=9921 sslmode=disable"
+  --var dev_url="postgres://gorm:gorm@localhost:9921/simpwf_dev?sslmode=disable"
 ```
 
 ## Layout
