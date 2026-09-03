@@ -1,0 +1,70 @@
+name: coverage-badge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gorm
+          POSTGRES_PASSWORD: gorm
+          POSTGRES_DB: gorm
+        ports:
+          - 9921:5432
+        options: >-
+          --health-cmd "pg_isready -U gorm -d gorm"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      TEST_DATABASE_DSN: host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable
+      TEST_DATABASE_DSN_ENGINE: host=localhost user=gorm password=gorm dbname=simpwf_test_engine port=9921 sslmode=disable
+      TEST_DATABASE_DSN_SERVICE: host=localhost user=gorm password=gorm dbname=simpwf_test_service port=9921 sslmode=disable
+      TEST_DATABASE_DSN_APP: host=localhost user=gorm password=gorm dbname=simpwf_test_app port=9921 sslmode=disable
+      TEST_DATABASE_DSN_STATUSUPDATE: host=localhost user=gorm password=gorm dbname=simpwf_test_statusupdate port=9921 sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Create scratch test databases
+        run: |
+          for db in simpwf_test_engine simpwf_test_service simpwf_test_app simpwf_test_statusupdate; do
+            PGPASSWORD=gorm createdb -h localhost -p 9921 -U gorm "$db"
+          done
+      - name: Run tests with coverage
+        run: |
+          go test ./... -covermode=count -coverprofile=coverage.out
+          go tool cover -func=coverage.out -o=coverage.out
+      - name: Go Coverage Badge
+        uses: tj-actions/coverage-badge-go@v3
+        with:
+          filename: coverage.out
+      - name: Verify changed files
+        uses: tj-actions/verify-changed-files@v16
+        id: verify-changed-files
+        with:
+          files: README.md
+      - name: Commit badge
+        if: steps.verify-changed-files.outputs.files_changed == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add README.md
+          git commit -m "chore: update coverage badge"
+      - name: Push badge
+        if: steps.verify-changed-files.outputs.files_changed == 'true'
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ github.token }}
+          branch: main

@@ -30,21 +30,21 @@ levels never import handlers or services. PostgreSQL state, leases, and
 polling are the durable dispatch mechanism; brokers are optional add-ons
 behind narrow interfaces.
 
-| Package                          | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cmd/app`                          | Composition root: configuration, database, system-user seed, repositories, services, executors, engine, ants dispatcher, optional broker clients/consumers, status publishers, Gin router, graceful shutdown. No workflow rules.                                                                                                                                                                                                                                                                                                                                          |
-| `cmd/atlas-loader`                 | Atlas Go Program Mode schema loader; never runs AutoMigrate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `internal/workflow/model`          | Framework-free domain: entities, statuses, `Frame`/`Counters`/`Limits`, transition invariants, workflow/group-scoped condition-key routing, node-content validation (input channels `http`, `redis`, `rabbitmq`; output nodes; poller transports `http`, `redis`, `rabbitmq` with per-transport defaults; multi-transport `status_update`).                                                                                                                                                                                                                                                   |
-| `internal/workflow/repository`     | GORM persistence: models, mappers, fenced claims (`FOR UPDATE SKIP LOCKED`), checkpoints (lease + revision), pause/resume/stop, node attempts, events, idempotent input deliveries, termination pending/sweep, status-update outbox (atomic per-transport fan-out enqueue + ordered claim/deliver/dead-letter).                                                                                                                                                                                                                                                             |
-| `internal/workflow/executor`       | Node executors: Goja sandbox (cloned/frozen context, no eval, hard timeout, ctx-cancellation interrupt), script, conditions, input validation, outbound HTTP (allowlist + DNS + redirect revalidation), allowlisted commands (argv only, process-group kill), output (publish resolved context value, receipt), active pollers (repeated HTTP, Redis GET/SUB, RabbitMQ queue waits; frozen `until` predicate over a normalized response), lifecycle hooks (shared `HookRunner`: pre/post context-transform scripts in the same sandbox, frozen `output` global for post hooks). |
-| `internal/workflow/engine`         | Durable cursor machine (`EnterGroup`/`Advance`), one transition per claim, recovery, per-node/total limits, cancellation registry, fenced commit, lease fencing; ants-based dispatcher with claim/heartbeat loops and termination polling. Node transitions run optional lifecycle hooks: pre before node behavior, post after the output merge, exited-group posts innermost-first.                                                                                                                                                                                          |
-| `internal/workflow/transport`      | Optional Redis and RabbitMQ adapters: connect/ping, durable queue declaration, confirmed persistent publishing, pattern/exact subscribe, keyed GET with missing-key detection, manual-ack consume including per-execution arbitrary-queue poller consumption, clean shutdown; narrow `RedisPublisher`/`RabbitPublisher` interfaces plus poller `Get`/`Subscribe`/`ConsumeQueue` surfaces.                                                                                                                                                                                           |
-| `internal/workflow/inputtransport` | Broker input consumers: Redis pattern subscriber (`workflow:input:*`, envelope decode) and RabbitMQ queue consumer (`NodeInstanceId` + `IdempotencyKey` headers, `message_id` fallback, manual ack/requeue), both delivering through `InstanceService.DeliverInput` with the matching source channel.                                                                                                                                                                                                                                                                               |
-| `internal/workflow/statusupdate`   | Status-notification dispatcher: claims the oldest unresolved outbox event per instance/transport, loads the immutable per-definition config, publishes through the transport's publisher (http/redis/rabbitmq), retries with the transport's `retry_delay` and dead-letters past its `max_retry`.                                                                                                                                                                                                                                                                             |
-| `internal/workflow/service`        | Use-case orchestration: definitions, instance create/status/context/input (source channel must match the input node channel), node debug, pause/resume/stop controls (events + local cancellation signal). Accepted input deliveries run the input node's post hook and any enclosing group post hooks; a failing post hook fails the workflow atomically with the delivery.                                                                                                                                                                                              |
-| `internal/workflow/handler`        | Gin routes, HTTP DTOs, query parsing, RFC 7807 problem+json.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `pkg/*`                            | Configuration (Viper), database (pgx), UUIDv7 ids, context paths + typed rendering, host-function registry. No `internal` imports.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `migrations/`                      | Atlas config + immutable versioned SQL + `atlas.sum`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Package                          | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/app`                          | Composition root: configuration, database, system-user seed, repositories, services, executors, engine, ants dispatcher + status-update dispatcher, optional broker clients/consumers, status publishers, Gin router, graceful shutdown. No workflow rules.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `cmd/atlas-loader`                 | Atlas Go Program Mode schema loader; never runs AutoMigrate in prod (tests use AutoMigrate for schema bootstrap only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `internal/workflow/model`          | Framework-free domain: entities, statuses, `Frame`/`Counters`/`Limits`, transition invariants, workflow/group-scoped condition-key routing, node-content validation (input channels `http`, `redis`, `rabbitmq`; output channels `redis`, `rabbitmq`; external_call `http_config`/`execution_config`; node timeouts incl. output nodes; poller transports `http`, `redis`, `rabbitmq` with per-transport defaults; multi-transport `status_update`).                                                                                                                                                                                                                                                         |
+| `internal/workflow/repository`     | GORM persistence: models, mappers, fenced claims (`FOR UPDATE SKIP LOCKED`), checkpoints (lease + revision), pause/resume/stop, node attempts, events, idempotent input deliveries, termination pending/sweep, status-update outbox (atomic per-transport fan-out enqueue + ordered claim/deliver/dead-letter).                                                                                                                                                                                                                                                                                                                                                                    |
+| `internal/workflow/executor`       | Node executors: Goja sandbox (context deep-cloned to pure JS, then cloned/frozen, no eval / no `Function`, hard timeout, ctx-cancellation interrupt), script, conditions, input validation (string return rejects), outbound HTTP (allowlist + DNS + redirect revalidation, `Idempotency-Key` stable per attempt), allowlisted commands (argv only, process-group kill), output (publish resolved context value, receipt), active pollers (repeated HTTP, Redis GET/SUB, RabbitMQ queue waits; frozen `until` predicate over a normalized response), lifecycle hooks (shared `HookRunner`: pre/post context-transform scripts in the same sandbox, frozen `output` global for post hooks). |
+| `internal/workflow/engine`         | Durable cursor machine (`EnterGroup`/`Advance`), one transition per claim, recovery, per-node/total limits, cancellation registry, fenced commit, lease + revision fencing (`ErrLeaseLost` / `ErrRevisionConflict`); ants-based dispatcher with claim/heartbeat loops and termination polling. Node transitions run optional lifecycle hooks: pre before node behavior, post after the output merge, exited-group posts innermost-first.                                                                                                                                                                                                                                                                                                 |
+| `internal/workflow/transport`      | Optional Redis and RabbitMQ adapters: connect/ping, durable queue declaration, confirmed persistent publishing, pattern/exact subscribe, keyed GET with missing-key detection, manual-ack consume including per-execution arbitrary-queue poller consumption, clean shutdown; narrow `RedisPublisher`/`RabbitPublisher` interfaces plus poller `Get`/`Subscribe`/`ConsumeQueue` surfaces.                                                                                                                                                                                                                                                                                                  |
+| `internal/workflow/inputtransport` | Broker input consumers: Redis pattern subscriber (`workflow:input:*`, envelope decode) and RabbitMQ queue consumer (`NodeInstanceId` + `IdempotencyKey` headers, `message_id` fallback, manual ack/requeue), both delivering through `InstanceService.DeliverInput` with the matching source channel.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `internal/workflow/statusupdate`   | Status-notification dispatcher: claims the oldest unresolved outbox event per instance/transport, loads the immutable per-definition config, publishes through the transport's publisher (http/redis/rabbitmq), retries with the transport's `retry_delay` and dead-letters past its `max_retry`.                                                                                                                                                                                                                                                                                                                                                                                    |
+| `internal/workflow/service`        | Use-case orchestration: definitions, instance create/status/context/input (source channel must match the input node channel), node debug, pause/resume/stop controls (events + local cancellation signal). Accepted input deliveries run the input node's post hook and any enclosing group post hooks; a failing post hook fails the workflow atomically with the delivery.                                                                                                                                                                                                                                                                                                     |
+| `internal/workflow/handler`        | Gin routes, HTTP DTOs, query parsing, RFC 7807 problem+json.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `pkg/*`                            | Configuration (Viper), database (GORM over the Postgres driver with the pgx wire format), UUIDv7 ids, context paths + typed rendering, host-function registry. No `internal` imports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `migrations/`                      | Atlas config + immutable versioned SQL + `atlas.sum`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ## Runtime model
 
@@ -80,20 +80,22 @@ flowchart LR
   cancellation registry (cross-replica stop propagation).
 - **Recovery**: when a lease expires, the next claim finds the running
   attempt. Scripts requeue (new attempt); input nodes re-enter waiting;
-  `external_call` requeues only with `retry_on_recovery=true`, otherwise the
-  node and workflow fail. `poller` behaves like `external_call` but defaults
-  `retry_on_recovery` to `true`, so an interrupted poller restarts with a
-  fresh internal attempt/wait budget (in-loop attempt counts are not
-  persisted).
+  `conditions`, `external_call`, `output`, and `poller` nodes requeue only
+  with `retry_on_recovery=true` (pollers default it to `true`), otherwise
+  the node and workflow fail. An interrupted poller restarts with a fresh
+  internal attempt/wait budget (in-loop attempt counts are not persisted).
+  `external_call`/`poller` nodes with `on_failure` route instead of failing
+  on recovery (reason `recovery`).
 - **Instance audit**: starting an instance stamps `created_by` and
-  `updated_by` with the configured system actor (no auth yet); the status
+  `updated_by` with the configured system actor (used for the
+  `X-Api-Token` auth scheme when enabled); the status
   and list APIs return both fields. The instance list endpoint returns
   compact summaries (never the full context/frame/counters/lease state)
   with repeated `id`, one `workflow_definition_id`, and repeated `status`
   filters, paginated with the same envelope as the definition lists.
 - **Status notifications**: each externally meaningful status transition
-  (waiting for input, input received, paused, resumed, finished, failed,
-  stopped) is enqueued into `status_update_outbox` in the same transaction
+  (`waiting_for_input`, `input_received`, `paused`, `resumed`, `finished`,
+  `failed`, `stopped`) is enqueued into `status_update_outbox` in the same transaction
   as the transition, when the definition configures any `status_update`
   transport (http, redis, rabbitmq, or any combination). Each event fans out
   to one row per configured transport, all sharing one logical event id.
@@ -104,8 +106,9 @@ flowchart LR
   `max_retry` retries so later events unblock. Delivery is at-least-once;
   the shared logical event id doubles as an idempotency key for receivers.
 - **Condition routing**: a conditions node requires at least two conditions;
-  the executor evaluates all of them and exactly one must return true. Zero
-  matches fail the workflow (`no condition matched`), and multiple matches
+  the executor evaluates all of them and exactly one must return an actual
+  boolean `true` (script errors, timeouts, and non-boolean results fail the
+  node). Zero matches fail the workflow (`no condition matched`), and multiple matches
   fail it listing every matched index and key. The single match returns its
   optional key, and the engine resolves that key only against the containing
   scope. Missing/null/blank condition keys, and defined keys mapped to
@@ -140,8 +143,8 @@ flowchart LR
   or paused with no workflow error.
 - **Cancellation**: every transition runs on a per-instance cancellable
   context registered in the engine. `Cancel` interrupts Goja (runtime
-  interrupt), aborts HTTP (request context), SIGKILLs command process
-  groups, and aborts active poller waits (in-flight request, inter-attempt
+  interrupt), aborts HTTP (request context), SIGKILLs the whole command
+  process group, and aborts active poller waits (in-flight request, inter-attempt
   delay, Redis subscription, RabbitMQ consumption). Interrupted attempts
   become `stopped` + `cancelled` when a stop committed; otherwise they are
   left running for another worker to recover.
@@ -169,7 +172,7 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
 1. `NewDispatcher` builds an ants pool and a cancellable run context.
 2. `Run` starts the claim loop (poll `ClaimNext`, submit to the pool, inline
    fallback if the pool is closed) and the heartbeat loop (renew leases,
-   poll termination-pending, sweep finished cleanups).
+   poll termination-pending, sweep instances with no running node attempt left).
 3. `Shutdown` cancels the loops, waits for in-flight transitions, releases
    the pool. In-flight executors are interrupted; interrupted attempts with
    no committed stop stay `running` for another worker to recover.
@@ -181,12 +184,15 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
    undelivered, non-dead event per workflow instance **and transport**
    (older siblings of the same transport block later events until delivered
    or dead; expired claims are reclaimed; transports never block each
-   other).
+   other). Claimed events run through the ants pool with an inline fallback
+   if the pool is closed.
 3. Claimed events run through the pool: `deliver` loads the immutable
    definition config, routes the event to its transport's publisher, and
    resolves the outbox row — delivered on success, retried after the
    transport's `retry_delay`, or dead-lettered once attempts exceed the
-   transport's `max_retry`.
+   transport's `max_retry`. A missing/unreadable definition or an
+   unconfigured/unknown transport dead-letters immediately to unblock later
+   events.
 4. `Shutdown` cancels the claim loop and waits for in-flight deliveries.
 
 Transports are pluggable behind the `statusupdate.Publisher` interface,
@@ -200,10 +206,11 @@ to the configured status queue.
 When a broker DSN is configured, `cmd/app` starts the matching consumer:
 
 - **Redis**: pattern-subscribes `workflow:input:*`. Each envelope
-  `{"idempotency_key": "...", "payload": <json>}` is delivered to the
+  `{"idempotency_key": "...", "payload": <json>}` (both required, payload
+  must be non-null JSON) is delivered to the
   instance named by the channel suffix with source `redis`. Redis pub/sub is
-  best effort: a successful publish counts as delivered even with zero
-  subscribers, and a failed delivery is logged while consumption continues.
+  best effort: messages published while no consumer is subscribed are lost,
+  and a failed delivery is logged while consumption continues.
 - **RabbitMQ**: consumes the configured input queue with manual
   acknowledgments. `NodeInstanceId` and `IdempotencyKey` headers address the
   delivery (AMQP `message_id` is the idempotency fallback). Permanent
@@ -219,10 +226,12 @@ channel of the input node the instance is parked on.
 
 An `output` node publishes the exact JSON of its selected `context_path` to
 its channel (`redis` → `workflow:output:<instance_id>`, `rabbitmq` → the
-configured `output_queue` with `NodeInstanceId`/`IdempotencyKey` headers and
-the stable execution id as AMQP `message_id`). The publish result
+configured `output_queue` with `NodeInstanceId` (the workflow instance id) /
+`IdempotencyKey` headers and the stable `<instance_id>:<occurrence_id>`
+execution id as AMQP `message_id` and receipt `message_id`). The publish result
 (`{channel, destination, message_id}`) is written to the workflow context
-through the normal `output_property` behavior. A broker-disabled deployment
+through the normal `output_property` behavior (default: the node occurrence
+id, not the graph node id). A broker-disabled deployment
 or a publish error fails the node like any other execution error.
 
 ## Pollers
@@ -245,11 +254,11 @@ input/output (no extra long-lived connections), behind the narrow
 executor-side `RedisPollerClient` (`Get` with missing-key detection,
 exact-channel `Subscribe`) and `RabbitPollerClient` (`ConsumeQueue`:
 per-execution fresh AMQP channel, passive queue check of the
-pre-provisioned queue, QoS 1, unique consumer tag, manual ACK settlement,
-channel closed on return/cancellation — the fixed input consumer channel is
-never reused). Poller templates additionally expose the reserved automatic
-roots `workflow_instance_id` and `node_instance_id` (read-only, always win
-over user values, never persisted).
+pre-provisioned queue, QoS 1, consumer tag derived from the poller idempotency key (`poller-<instance>:<occurrence>`), manual ACK
+settlement, channel closed on return/cancellation — the fixed input
+consumer channel is never reused). Poller templates additionally expose the
+reserved automatic roots `workflow_instance_id` and `node_instance_id`
+(read-only, always win over user values, never persisted).
 
 Capacity and delivery semantics to design against:
 
@@ -273,7 +282,9 @@ Capacity and delivery semantics to design against:
 for a healthy database, applies `migrations/versions`), Redis 7 and
 RabbitMQ 4 (with management UI), and `app` (waits for the migration to
 complete and both brokers to be healthy, then serves the API, dispatcher,
-status dispatcher, and broker consumers). The app never migrates. Broker
+status dispatcher, and broker consumers). The compose stack enables auth
+(`SIMPWF_AUTH_ENABLED=true`, token `wadidaw`) and the wildcard HTTP
+allowlist for dev. The app never migrates. Broker
 DSNs are optional: without them the app runs HTTP-only. Horizontal scaling
 is safe: multiple `app` replicas share the database; leases and SKIP LOCKED
 prevent duplicate execution, the heartbeat propagates stops across replicas,

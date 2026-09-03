@@ -15,7 +15,7 @@ outbound HTTP calls, as allowlisted subprocesses, or as broker publishers.
   (`previous_version_id`, `lineage_id`), recursive materialization, and graph
   validation.
 - Node types: `script` (Goja ES5.1 sandbox, no eval), `conditions`
-  (at least two branches; all are evaluated and exactly one must match, zero
+  (at least two conditions; all are evaluated and exactly one must match, zero
   or multiple matches fail the workflow; workflow/group-scoped key routing),
   `input` (HTTP webhook, Redis pub/sub, or RabbitMQ queue with validation
   script and `Idempotency-Key` dedupe), `output` (publish a selected
@@ -26,9 +26,10 @@ outbound HTTP calls, as allowlisted subprocesses, or as broker publishers.
 - Durable cursor (`frame`), per-node/total execution counters, full
   `context_before`/`context_after` snapshots, and an append-only event log.
 - Worker claims via `SELECT ... FOR UPDATE SKIP LOCKED`, fenced checkpoints
-  (lease + revision), heartbeat renewal, and recovery: pure nodes requeue;
-  `external_call` and `poller` requeue only with `retry_on_recovery=true`
-  (pollers default it to true).
+  (lease + revision), heartbeat renewal, and recovery: scripts requeue (new
+  attempt) and input nodes re-enter waiting; `conditions`, `external_call`,
+  `output`, and `poller` nodes requeue only with `retry_on_recovery=true` (pollers
+  default it to true), otherwise the node and workflow fail.
 - Controls: `pause` (immediate or deferred after the current node), `resume`,
   and `stop` (terminal, fences workers, cancels the in-flight Goja/HTTP/
   command execution locally and across replicas through the heartbeat).
@@ -36,7 +37,7 @@ outbound HTTP calls, as allowlisted subprocesses, or as broker publishers.
   `not_started` views per occurrence.
 - Status notifications: per-definition `status_update` webhooks delivered
   from a PostgreSQL transactional outbox, strictly ordered per workflow
-  instance (see "Status notifications").
+  instance and per transport (see "Status notifications").
 
 ## Quickstart
 
@@ -74,6 +75,9 @@ The stack runs PostgreSQL on `9921`, Redis on `6379`, RabbitMQ on `5672`
 (management UI on `15672`), and the app on `8080` with all broker transports
 enabled. To run broker-free, remove the `SIMPWF_INFRA_REDIS_DSN` and
 `SIMPWF_INFRA_RABBITMQ_DSN` environment variables from the `app` service.
+Note the compose `app` service sets `SIMPWF_AUTH_ENABLED=true` (token
+`wadidaw`), so `/v1` calls against the compose stack need the
+`X-Api-Token: wadidaw` header; `/health/*` stays public.
 
 Swaggo documentation is committed under `docs/`. Regenerate it after API
 annotation changes with `task swagger`. Set `infra.http.swagger_enabled` to
@@ -84,18 +88,19 @@ public and Swagger UI sends the header via the Authorize button.
 ### End-to-end checks
 
 ```bash
-# with the app running:
-bash scripts/e2e.sh
+# with the app running (pass an explicit workflow JSON; workflow.yaml is the
+# annotated sample definition):
+bash scripts/e2e.sh [BASE_URL] [WORKFLOW_JSON]
 ```
 
 ## Configuration
 
-`config.yaml` holds infra, worker pool, engine limits, and the system audit
+`config.yaml` holds infra, worker pool, engine limits, auth, and the system audit
 user. Without a config file the same keys are read from `SIMPWF_*`
 environment variables (see `.env.example`). Highlights:
 
-- `engine.default_node_timeout` / `max_node_timeout` — script and
-  `external_call` timeouts (default 30s, cap 5m).
+- `engine.default_node_timeout` / `max_node_timeout` — script,
+  `external_call`, and `output` node timeouts (default 30s, cap 5m).
 - `engine.condition_timeout` — fixed budget for conditions, input
   validation, and poller `until` predicates.
 - `engine.http_allowlist` — allowed http(s) targets for `external_call` and
@@ -241,7 +246,7 @@ the workflow instance:
   - `message`: human-readable error description.
   - `reason`: category (e.g. `http`, `http-status`, `command`, `poller`, `poller-until`, `recovery`).
   - `result`: native normalized result when available (e.g. `{ Status, Headers, Body }`), otherwise `null`.
-- **External HTTP**: when `on_failure` is configured, HTTP status `>= 300` is treated as a handled failure and routes to `next_node` with reason `http-status`. Without `on_failure`, status `>= 300` remains a normal successful output and runs `post_script`.
+- **External HTTP**: when `on_failure` is configured, HTTP status `>= 300` is treated as a handled failure and routes to `next_node` with reason `http-status` (the partial result is also stored in the `result` field). Without `on_failure`, status `>= 300` remains a normal successful output and runs `post_script`.
 - **Pollers**: repeated attempts and until predicate evaluations proceed normally; failure routing only occurs after attempts are exhausted or upon unrecoverable error.
 - **Recovery**: interrupted nodes with `retry_on_recovery: false` route to `on_failure` with reason `recovery` and null result.
 - **Lifecycle & Events**: handled failures mark the node attempt `failed`, skip the node's `post_script`, emit `node_failed` and `node_failure_routed` events, keep the workflow error empty, and advance the workflow cursor to the fallback node without emitting `workflow_failed`. Pre-hook, `input_data`, post-hook, graph, persistence, and internal engine failures do not route via `on_failure`.
@@ -281,23 +286,23 @@ pending-pause flag changes emit nothing.
 
 Delivery is at-least-once. Each payload carries a stable `id` (the logical
 event id) echoed as `Idempotency-Key` / `X-SimpWF-Event-ID` on HTTP, as the
-AMQP `message_id` and `Idempotency-Key` header on RabbitMQ, and embedded in
-the Redis payload, so receivers can dedupe across transports. The payload
-also carries `workflow_instance_id`, `workflow_definition_id`, `event`,
+AMQP `message_id` and `IdempotencyKey` header on RabbitMQ, and embedded in
+the Redis payload (`id`), so receivers can dedupe across transports. The payload
+also carries `type` (`workflow.status_changed`), `workflow_instance_id`, `workflow_definition_id`, `event`,
 `from_status`, `to_status`, `from_waiting_reason`, `to_waiting_reason`,
 `revision`, `occurred_at`, and `error` (no workflow context).
 
-- **HTTP**: a non-2xx response is retried up to `http.max_retry` times with
-  `http.retry_delay` between attempts, then dead-lettered. Targets obey
-  `engine.http_allowlist` (scheme, host:port, DNS, and redirect
-  revalidation).
+- **HTTP**: a non-2xx response or request error is retried up to
+  `http.max_retry` times with `http.retry_delay` between attempts, then
+  dead-lettered. Targets obey `engine.http_allowlist` (scheme, host:port,
+  DNS, and redirect revalidation).
 - **Redis**: the event JSON is published to `workflow:status:<instance_id>`.
   A successful publish counts as delivered even with zero subscribers
   (best-effort).
 - **RabbitMQ**: the event JSON is published as a persistent,
   publisher-confirmed message to the configured `status_queue`, with
-  `NodeInstanceId` and `IdempotencyKey` headers and the logical id as the
-  AMQP `message_id`.
+  `NodeInstanceId` (the workflow instance id) and `IdempotencyKey` headers
+  and the logical id as the AMQP `message_id`.
 
 Transports are enabled only when the matching broker DSN is configured; a
 `status_update` block for a disabled broker is delivered to no one and
@@ -325,8 +330,9 @@ dead-letters (the definition configures a transport the deployment lacks).
 | POST       | `/v1/workflow/instance/{id}/resume`                | resume                                                          |
 | POST       | `/v1/workflow/instance/{id}/stop`                  | force stop                                                      |
 
-See `api/openapi.yaml` for the authoritative contract and
-`docs/examples/requests.http` for runnable examples.
+See `api/openapi.yaml` for the authoritative contract, `workflow.yaml` for an
+annotated sample definition, and `scripts/e2e.sh` for black-box API checks
+(`bash scripts/e2e.sh [BASE_URL] [WORKFLOW_JSON]`).
 
 ## Validation
 
@@ -337,7 +343,7 @@ go test ./... -count=1
 go test -race ./... -count=1
 golangci-lint run ./...
 atlas migrate validate --config file://migrations/atlas.hcl --env gorm \
-  --var dev_url="postgres://gorm:gorm@localhost:9921/simpwf_dev?sslmode=disable"
+  --var dev_url="postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable"
 ```
 
 ## Layout
@@ -358,6 +364,6 @@ pkg/*              configuration, database, ids, contextpath, jsfunc (no interna
 api/openapi.yaml   authoritative OpenAPI 3.1 contract
 docs/              generated Swaggo documentation
 migrations/        Atlas config + versioned SQL (migrations/versions)
-docs/examples/     requests.http + workflow.json
-scripts/e2e.sh     black-box API checks
+workflow.yaml      annotated sample workflow definition
+scripts/           seed.sh (sample seed) + e2e.sh (black-box API checks)
 ```
