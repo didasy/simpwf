@@ -47,11 +47,13 @@ func newSUInstance(id string, status model.WorkflowStatus, reason model.WaitingR
 	return w
 }
 
-// outboxRows loads the outbox rows of an instance in delivery order.
+// outboxRows loads the outbox rows of an instance in delivery order. The
+// transport tie-breaker keeps fanout rows (same revision/event_index across
+// transports) in deterministic order.
 func outboxRows(t *testing.T, db *gorm.DB, instanceID string) []repository.StatusUpdateOutboxModel {
 	t.Helper()
 	var rows []repository.StatusUpdateOutboxModel
-	if err := db.Where("workflow_instance_id = ?", instanceID).Order("revision, event_index").Find(&rows).Error; err != nil {
+	if err := db.Where("workflow_instance_id = ?", instanceID).Order("revision, event_index, transport").Find(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
 	return rows
@@ -163,13 +165,17 @@ func TestCheckpointFansOutAcrossTransports(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("outbox rows = %d, want 3 (one per transport)", len(rows))
 	}
-	wantTransports := []string{"http", "redis", "rabbitmq"}
+	// Fanout rows share revision/event_index, so DB order across transports
+	// is arbitrary; compare as a set.
+	wantTransports := map[string]bool{"http": true, "redis": true, "rabbitmq": true}
+	seenTransports := map[string]bool{}
 	logicalIDs := map[string]bool{}
 	rowIDs := map[string]bool{}
 	for i, row := range rows {
-		if row.Transport != wantTransports[i] {
-			t.Errorf("rows[%d] transport = %q, want %q", i, row.Transport, wantTransports[i])
+		if !wantTransports[row.Transport] || seenTransports[row.Transport] {
+			t.Errorf("rows[%d] transport = %q, want one of http/redis/rabbitmq exactly once", i, row.Transport)
 		}
+		seenTransports[row.Transport] = true
 		if row.Revision != 1 || row.EventIndex != 0 {
 			t.Errorf("rows[%d] = rev %d idx %d, want 1/0", i, row.Revision, row.EventIndex)
 		}
