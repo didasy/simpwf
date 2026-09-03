@@ -1,4 +1,5 @@
 # SimpWF — PostgreSQL-backed durable workflow engine
+![Coverage](https://img.shields.io/badge/Coverage-78.3%25-brightgreen)
 
 SimpWF is a Go workflow engine with **immutable workflow definitions**, a
 **leased state machine** over PostgreSQL, and **HTTP input/control/debug
