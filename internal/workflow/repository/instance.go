@@ -89,8 +89,12 @@ type ContextUpdate struct {
 // RearmInputOccurrence, set only when the target is a finished input
 // occurrence of this instance, re-arms it as a fresh attempt of the same
 // row (delivery history stays attached for audit) so the next resume
-// re-parks it. Reason is an audit annotation recorded on the rollback event
-// only, never context values.
+// re-parks it. SupersedeRunning closes any other live attempt of the
+// instance (status stopped, cancelled, error "superseded by rollback") in
+// the same transaction so the cursor and the park never diverge;
+// SupersededOccurrence/SupersededNode record the closed attempt on the
+// rollback audit event. Reason is an audit annotation recorded on the
+// rollback event only, never context values.
 type RollbackUpdate struct {
 	InstanceID           string
 	Frame                model.Frame
@@ -102,6 +106,9 @@ type RollbackUpdate struct {
 	ToOccurrence         string
 	WaitingReason        model.WaitingReason
 	RearmInputOccurrence bool
+	SupersedeRunning     bool
+	SupersededOccurrence string
+	SupersededNode       string
 }
 
 var errDeliveryExists = errors.New("repository: input delivery already exists")
@@ -137,7 +144,11 @@ type InstanceRepository interface {
 	// kept), waiting_reason becomes the caller-supplied park reason
 	// (runnable, or input when the target is an input node), pause_requested
 	// clears, the frame and context are replaced, the revision increments,
-	// and a rollback audit event is appended. Rolling back to a finished
+	// and a rollback audit event is appended. With SupersedeRunning set, any
+	// other live attempt is closed (stopped, cancelled, error "superseded by
+	// rollback") in the same transaction so the cursor and the park never
+	// diverge; the closed attempt's ids ride on the rollback event.
+	// Rolling back to a finished
 	// input occurrence additionally re-arms it to running (delivery history
 	// stays attached for audit) so the next resume re-parks it; other
 	// occurrences are untouched. No status-update outbox rows are enqueued.
@@ -199,8 +210,14 @@ type InstanceRepository interface {
 	UpdateNodeInstance(ctx context.Context, n model.NodeInstance) error
 	GetNodeInstance(ctx context.Context, workflowInstanceID, occurrenceID string) (*model.NodeInstance, error)
 	// GetNodeInstanceByNode returns the occurrence of a workflow graph node
-	// within an instance, or ErrNodeInstanceNotFound.
+	// within an instance, or ErrNodeInstanceNotFound. Multiple rows per
+	// node exist after loop iterations and rollback re-parks; callers that
+	// need the latest row must filter ListNodeInstances instead.
 	GetNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error)
+	// GetLiveNodeInstanceByNode returns the newest live (running) occurrence
+	// of a workflow graph node, or ErrNodeInstanceNotFound. Used by input
+	// delivery so a superseded (stopped) park is never resurrected.
+	GetLiveNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error)
 	// GetRunningNodeInstance returns the in-flight attempt of an instance,
 	// or ErrNodeInstanceNotFound.
 	GetRunningNodeInstance(ctx context.Context, workflowInstanceID string) (*model.NodeInstance, error)
@@ -362,12 +379,34 @@ func (r *instanceRepo) RollbackInstance(ctx context.Context, u RollbackUpdate) (
 			}
 			return ErrStatusConflict
 		}
+		if u.SupersedeRunning {
+			// Close the superseded live park so the moved cursor and the
+			// park never diverge: running -> stopped + cancelled with the
+			// error naming the rollback. A stale late delivery to it fails
+			// its running guard. The re-armed target (finished at txn
+			// start) is excluded so its own rollback never closes it.
+			res := tx.Model(&NodeInstanceModel{}).
+				Where("workflow_instance_id = ? AND status = ? AND id != ?",
+					u.InstanceID, string(model.NodeRunning), u.ToOccurrence).
+				Updates(map[string]any{
+					"status":     string(model.NodeStopped),
+					"cancelled":  true,
+					"error":      "superseded by rollback",
+					"stopped_at": now,
+					"updated_at": now,
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+		}
 		if u.RearmInputOccurrence {
 			// Rolling back to a finished input occurrence re-arms its
 			// wait as a fresh attempt of the same row (delivery history
 			// stays attached for audit) so the next resume re-parks it
 			// and a fresh delivery is accepted. The update is guarded on
-			// finished so a concurrent delivery wins.
+			// finished so a concurrent delivery wins. It runs after the
+			// supersede close (which only touches running rows), so the
+			// re-armed target is never closed by its own rollback.
 			res := tx.Model(&NodeInstanceModel{}).
 				Where("id = ? AND workflow_instance_id = ? AND status = ? AND type = ?",
 					u.ToOccurrence, u.InstanceID, string(model.NodeFinished), string(model.NodeTypeInput)).
@@ -385,13 +424,20 @@ func (r *instanceRepo) RollbackInstance(ctx context.Context, u RollbackUpdate) (
 				return res.Error
 			}
 		}
-		data, err := json.Marshal(map[string]string{
+		data := map[string]string{
 			"from_node":     u.FromNode,
 			"to_node":       u.ToNode,
 			"to_occurrence": u.ToOccurrence,
 			"context_mode":  "restore",
 			"reason":        u.Reason,
-		})
+		}
+		if u.SupersededOccurrence != "" {
+			data["superseded_occurrence"] = u.SupersededOccurrence
+		}
+		if u.SupersededNode != "" {
+			data["superseded_node"] = u.SupersededNode
+		}
+		raw, err := json.Marshal(data)
 		if err != nil {
 			return err
 		}
@@ -399,7 +445,7 @@ func (r *instanceRepo) RollbackInstance(ctx context.Context, u RollbackUpdate) (
 			ID:                 newRepoID(),
 			WorkflowInstanceID: u.InstanceID,
 			Type:               "rollback",
-			Data:               data,
+			Data:               raw,
 			CreatedBy:          u.Actor,
 			CreatedAt:          now,
 		})
@@ -986,6 +1032,21 @@ func (r *instanceRepo) GetNodeInstanceByNode(ctx context.Context, workflowInstan
 	var m NodeInstanceModel
 	if err := r.db.WithContext(ctx).
 		Where("workflow_instance_id = ? AND node_id = ?", workflowInstanceID, nodeID).
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNodeInstanceNotFound
+		}
+		return nil, err
+	}
+	n := NodeInstanceFromModel(m)
+	return &n, nil
+}
+
+func (r *instanceRepo) GetLiveNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error) {
+	var m NodeInstanceModel
+	if err := r.db.WithContext(ctx).
+		Where("workflow_instance_id = ? AND node_id = ? AND status = ?", workflowInstanceID, nodeID, string(model.NodeRunning)).
+		Order("created_at DESC, id DESC").
 		First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNodeInstanceNotFound

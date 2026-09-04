@@ -446,9 +446,12 @@ paths:
         instance is always paused afterwards (failed becomes paused); its
         context is restored from the target occurrence's context_before
         snapshot. Rolling back onto the currently parked input occurrence is
-        rejected (409): resume and deliver input instead. Rolling back while a
-        live parked attempt exists on another node is likewise rejected (409):
-        resume and deliver (or stop) first. History is immutable: node occurrences, input deliveries,
+        a no-op success (200, still paused, no writes). Rolling back to any
+        other occurrence supersedes (closes) the live parked attempt
+        atomically in the same transaction: the park moves to stopped and
+        cancelled with the error "superseded by rollback", and the closed
+        attempt's ids ride on the rollback audit event. History is otherwise
+        immutable: node occurrences, input deliveries,
         and prior events are untouched, and the next execution increments
         the target occurrence's attempt. Nodes that never ran, group nodes,
         and occurrences with no restorable context are rejected.

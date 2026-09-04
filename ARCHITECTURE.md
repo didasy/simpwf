@@ -184,15 +184,14 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
   (`<instance>:<occurrence>`) stays stable so downstream dedupe still works.
   Rolling back to a finished `input` occurrence re-arms it to running (its
   delivery history stays attached) so the next `resume` re-parks it waiting
-  for a fresh delivery; rolling back onto the currently parked input
-  occurrence is rejected (409) because its live attempt would discard the
-  cursor. Rolling back while a live parked attempt exists on another node is
-  likewise rejected (409): the caller must resume and deliver (or stop)
-  first, otherwise the orphaned running row would be re-parked by recovery
-  while the cursor points elsewhere. As a second layer, input recovery
-  reconciles a stale cursor onto the recovered attempt's node (emitting a
-  `cursor_reconciled` audit event) before re-parking, so cursor and park
-  cannot diverge. Re-execution duplicates side effects: rolling back past an `input`
+  for a fresh delivery. A live parked input attempt never blocks the
+  rollback: targeting the park itself is a no-op success (still paused, no
+  writes), and any other target supersedes (closes) the live park atomically
+  in the same transaction (running -> stopped + cancelled, error
+  "superseded by rollback", ids on the `rollback` audit event). Input
+  recovery still reconciles a stale cursor onto the recovered attempt's node
+  (emitting a `cursor_reconciled` audit event) before re-parking, as a
+  safety net for rows predating the supersede close. Re-execution duplicates side effects: rolling back past an `input`
   node re-parks it and consumes a fresh input delivery on resume, and pollers
   restart with a fresh wait budget.
 

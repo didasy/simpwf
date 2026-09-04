@@ -1312,6 +1312,179 @@ func TestRollbackInstanceRearmFlagOffLeavesInputFinished(t *testing.T) {
 	}
 }
 
+func TestRollbackInstanceSupersedesLivePark(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	insertInstance(t, db, newTestInstance(id, model.WorkflowPaused, model.WaitingReasonInput))
+	liveID := "66666666-6666-7666-8666-666666666666"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 liveID,
+		WorkflowInstanceID: id,
+		NodeID:             "33333333-3333-7333-8333-333333333333",
+		Name:               "ask",
+		Type:               string(model.NodeTypeInput),
+		Attempt:            1,
+		Status:             model.NodeRunning,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance(live) error = %v", err)
+	}
+	targetID := "55555555-5555-7555-8555-555555555555"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 targetID,
+		WorkflowInstanceID: id,
+		NodeID:             "22222222-2222-7222-8222-222222222222",
+		Name:               "compute",
+		Type:               string(model.NodeTypeScript),
+		Attempt:            1,
+		Status:             model.NodeFinished,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance(target) error = %v", err)
+	}
+
+	got, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:           id,
+		Frame:                model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:              json.RawMessage(`{"before":1}`),
+		Actor:                fixtureUserID,
+		Reason:               "supersede",
+		FromNode:             "33333333-3333-7333-8333-333333333333",
+		ToNode:               "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:         targetID,
+		WaitingReason:        model.WaitingReasonRunnable,
+		SupersedeRunning:     true,
+		SupersededOccurrence: liveID,
+		SupersededNode:       "33333333-3333-7333-8333-333333333333",
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	if got.Status != model.WorkflowPaused || got.WaitingReason != model.WaitingReasonRunnable {
+		t.Errorf("got status = %s/%q, want paused/runnable", got.Status, got.WaitingReason)
+	}
+	live, err := repo.GetNodeInstance(ctx, id, liveID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Status != model.NodeStopped || !live.Cancelled {
+		t.Errorf("live park = %s/cancelled=%v, want stopped/true", live.Status, live.Cancelled)
+	}
+	if live.Error != "superseded by rollback" {
+		t.Errorf("live error = %q, want supersede marker", live.Error)
+	}
+	if live.StoppedAt == nil {
+		t.Error("live stopped_at = nil, want set")
+	}
+	target, err := repo.GetNodeInstance(ctx, id, targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != model.NodeFinished || target.Attempt != 1 {
+		t.Errorf("target = %s/%d, want untouched finished/1", target.Status, target.Attempt)
+	}
+	events, err := repo.ListEvents(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "rollback" {
+		t.Fatalf("events = %+v, want one rollback event", events)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(events[0].Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["superseded_occurrence"] != liveID || data["superseded_node"] != "33333333-3333-7333-8333-333333333333" {
+		t.Errorf("event supersede ids = %v, want live park ids", data)
+	}
+	var outboxCount int64
+	if err := db.Model(&repository.StatusUpdateOutboxModel{}).Count(&outboxCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 0 {
+		t.Errorf("status_update_outbox rows = %d, want 0", outboxCount)
+	}
+}
+
+func TestRollbackInstanceSupersedeThenRearmKeepsTargetRunning(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	insertInstance(t, db, newTestInstance(id, model.WorkflowPaused, model.WaitingReasonInput))
+	liveID := "66666666-6666-7666-8666-666666666666"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 liveID,
+		WorkflowInstanceID: id,
+		NodeID:             "33333333-3333-7333-8333-333333333333",
+		Name:               "ask-later",
+		Type:               string(model.NodeTypeInput),
+		Attempt:            1,
+		Status:             model.NodeRunning,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance(live) error = %v", err)
+	}
+	targetID := "55555555-5555-7555-8555-555555555555"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 targetID,
+		WorkflowInstanceID: id,
+		NodeID:             "22222222-2222-7222-8222-222222222222",
+		Name:               "ask-first",
+		Type:               string(model.NodeTypeInput),
+		Attempt:            1,
+		Status:             model.NodeFinished,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance(target) error = %v", err)
+	}
+
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:           id,
+		Frame:                model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:              json.RawMessage(`{}`),
+		Actor:                fixtureUserID,
+		ToNode:               "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:         targetID,
+		WaitingReason:        model.WaitingReasonInput,
+		RearmInputOccurrence: true,
+		SupersedeRunning:     true,
+		SupersededOccurrence: liveID,
+		SupersededNode:       "33333333-3333-7333-8333-333333333333",
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	live, err := repo.GetNodeInstance(ctx, id, liveID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Status != model.NodeStopped || !live.Cancelled {
+		t.Errorf("live park = %s/cancelled=%v, want stopped/true", live.Status, live.Cancelled)
+	}
+	target, err := repo.GetNodeInstance(ctx, id, targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != model.NodeRunning || target.Attempt != 2 {
+		t.Errorf("target = %s/%d, want running/2 (re-armed, not superseded)", target.Status, target.Attempt)
+	}
+}
+
 func TestReplaceContextMissingInstance(t *testing.T) {
 	db := setupTestDB(t)
 	seedInstanceFixture(t, db)

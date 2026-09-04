@@ -574,12 +574,13 @@ func TestInstanceRollbackErrors(t *testing.T) {
 	}
 }
 
-func TestInstanceRollbackParkedInputConflict(t *testing.T) {
-	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{rollbackErr: model.ErrConflict}})
+func TestInstanceRollbackSupersedeSucceeded(t *testing.T) {
+	svc := &fakeInstanceSvc{rollbackRes: &service.RollbackResult{Status: model.WorkflowPaused, CurrentNodeID: occurrenceID}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
 	w := performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/rollback",
 		`{"target_occurrence_id":"`+occurrenceID+`"}`, nil)
-	if w.Code != http.StatusConflict {
-		t.Errorf("status = %d, want 409 (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
 }
 

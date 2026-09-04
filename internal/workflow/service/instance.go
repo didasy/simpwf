@@ -173,7 +173,9 @@ type InstanceService interface {
 	// forward from there. The instance is always paused afterwards and its
 	// context is restored from the target occurrence's ContextBefore.
 	// History is immutable; the next execution increments the target
-	// occurrence's attempt.
+	// occurrence's attempt. A live parked input attempt never blocks the
+	// rollback: targeting the park itself is a no-op, any other target
+	// supersedes (closes) it atomically in the same transaction.
 	Rollback(ctx context.Context, req RollbackRequest) (*RollbackResult, error)
 }
 
@@ -669,19 +671,28 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	if rerr != nil && !errors.Is(rerr, repository.ErrNodeInstanceNotFound) {
 		return nil, rerr
 	}
-	if rerr == nil && (target.Type != model.NodeTypeInput || running.NodeID != target.ID) {
-		return nil, fmt.Errorf("%w: instance %s has running attempt on node %q; resume and deliver input instead", model.ErrConflict, req.InstanceID, running.NodeID)
+	hasLive := rerr == nil
+
+	frame, err := model.ParseFrame(inst.Frame)
+	if err != nil {
+		return nil, err
+	}
+
+	// Self rollback: paused on the live park itself. No-op without writes.
+	if hasLive && inst.Status == model.WorkflowPaused &&
+		running.ID == occ.ID && frame.CurrentNodeID == target.ID {
+		return &RollbackResult{
+			Status:        model.WorkflowPaused,
+			CurrentNodeID: target.ID,
+			GroupStack:    frame.GroupStack,
+		}, nil
 	}
 	if target.Type == model.NodeTypeInput {
 		// Rolling back to an input node re-arms its wait as a fresh
 		// attempt of the same finished occurrence (delivery history stays
 		// attached for audit) so the next resume re-parks it and a fresh
-		// delivery with a new idempotency key is accepted. Parking on the
-		// node still collides with a live parked attempt, which must be
-		// resumed + delivered instead.
-		if rerr == nil {
-			return nil, fmt.Errorf("%w: instance %s is parked on input node %q; resume and deliver input instead", model.ErrConflict, req.InstanceID, target.ID)
-		}
+		// delivery with a new idempotency key is accepted. Any other live
+		// park is superseded (closed) atomically by the repository.
 		if occ.Status != model.NodeFinished {
 			return nil, fmt.Errorf("%w: input occurrence %q is not finished", model.ErrConflict, req.TargetOccurrenceID)
 		}
@@ -695,10 +706,6 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 		return nil, fmt.Errorf("%w: occurrence %q has no restorable context", model.ErrInvalid, req.TargetOccurrenceID)
 	}
 
-	frame, err := model.ParseFrame(inst.Frame)
-	if err != nil {
-		return nil, err
-	}
 	// The park reason follows the target: input targets stay parked for
 	// their delivery, everything else becomes runnable. Rolling back to a
 	// finished input occurrence re-arms it as a fresh attempt of the same
@@ -709,6 +716,16 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	if target.Type == model.NodeTypeInput {
 		waitingReason = model.WaitingReasonInput
 		rearm = true
+	}
+	// Any live attempt other than the re-armed target is superseded: the
+	// repository closes it in the same transaction so the cursor and the
+	// park never diverge.
+	supersede := hasLive && (!rearm || running.ID != occ.ID)
+	supersededOccurrence := ""
+	supersededNode := ""
+	if supersede {
+		supersededOccurrence = running.ID
+		supersededNode = running.NodeID
 	}
 	rolled, err := s.instances.RollbackInstance(ctx, repository.RollbackUpdate{
 		InstanceID:           inst.ID,
@@ -721,6 +738,9 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 		ToOccurrence:         occ.ID,
 		WaitingReason:        waitingReason,
 		RearmInputOccurrence: rearm,
+		SupersedeRunning:     supersede,
+		SupersededOccurrence: supersededOccurrence,
+		SupersededNode:       supersededNode,
 	})
 	if err != nil {
 		if errors.Is(err, repository.ErrInstanceNotFound) {
@@ -836,16 +856,16 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if inputNode.Channel != source {
 		return nil, fmt.Errorf("%w: input source %q does not match input node channel %q", model.ErrConflict, source, inputNode.Channel)
 	}
-	attempt, err := s.instances.GetNodeInstanceByNode(ctx, inst.ID, inputNode.ID)
+	attempt, err := s.instances.GetLiveNodeInstanceByNode(ctx, inst.ID, inputNode.ID)
 	if err != nil {
+		if errors.Is(err, repository.ErrNodeInstanceNotFound) {
+			return nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
+		}
 		return nil, err
 	}
 
 	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
 		return nil, fmt.Errorf("%w: instance %s is not waiting for input", model.ErrConflict, req.InstanceID)
-	}
-	if attempt.Status != model.NodeRunning {
-		return nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
 	}
 
 	ctxMap, err := unmarshalJSON(inst.Context)

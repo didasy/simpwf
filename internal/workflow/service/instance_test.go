@@ -1793,7 +1793,7 @@ func TestRollbackErrors(t *testing.T) {
 	}
 }
 
-func TestRollbackParkedInputConflict(t *testing.T) {
+func TestRollbackParkedInputIsNoOp(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
 	svc := svcInstanceService(db)
@@ -1823,18 +1823,53 @@ func TestRollbackParkedInputConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rolling back onto the parked input occurrence collides with its
-	// still-running attempt; the caller must resume + deliver instead.
-	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ.ID}); !errors.Is(err, model.ErrConflict) {
-		t.Errorf("Rollback(parked input) error = %v, want ErrConflict", err)
+	before, err := svc.GetStatus(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rolling back onto the live parked occurrence itself is a no-op:
+	// 200 paused, zero writes, park stays running.
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n2 {
+		t.Errorf("res = %+v, want paused at %s", res, n2)
 	}
 	stored, _ := svc.GetStatus(ctx, inst.ID)
 	if stored.Status != model.WorkflowPaused {
 		t.Errorf("status = %s, want still paused", stored.Status)
 	}
+	if stored.Revision != before.Revision {
+		t.Errorf("revision = %d, want unchanged %d (no-op)", stored.Revision, before.Revision)
+	}
+	frame, err := model.ParseFrame(stored.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.CurrentNodeID != n2 {
+		t.Errorf("cursor = %q, want still %q", frame.CurrentNodeID, n2)
+	}
+	running, err := repo.GetRunningNodeInstance(ctx, inst.ID)
+	if err != nil || running.ID != occ.ID {
+		t.Fatalf("running = %+v, err %v, want live park %s untouched", running, err, occ.ID)
+	}
+	if events, _ := repo.ListEvents(ctx, inst.ID); svcEventTypes(t, db, inst.ID)["rollback"] || len(events) == 0 {
+		t.Errorf("events = %d types, want no rollback event on no-op", len(events))
+	}
+	// No-op preserves the park: resume + deliver still works.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "noop-keeps-park", Payload: []byte(`{"v":1}`),
+	})
+	if err != nil || !delivery.Accepted {
+		t.Fatalf("DeliverInput() = %+v, err %v, want accepted", delivery, err)
+	}
 }
 
-func TestRollbackRejectsWithLiveParkedAttemptElsewhere(t *testing.T) {
+func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
 	svc := svcInstanceService(db)
@@ -1863,34 +1898,111 @@ func TestRollbackRejectsWithLiveParkedAttemptElsewhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rolling the cursor back to n1 would orphan the live n2 park.
-	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID}); !errors.Is(err, model.ErrConflict) {
-		t.Fatalf("Rollback() error = %v, want ErrConflict", err)
+	parked, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rolling the cursor back to n1 supersedes the live n2 park: 200,
+	// park closed, cursor moved, context restored.
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID, Reason: "supersede"})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Fatalf("res = %+v, want paused at %s", res, n1)
 	}
 	stored, _ := svc.GetStatus(ctx, inst.ID)
 	if stored.Status != model.WorkflowPaused {
 		t.Errorf("status = %s, want still paused", stored.Status)
 	}
+	if stored.WaitingReason != model.WaitingReasonRunnable {
+		t.Errorf("waiting_reason = %q, want runnable", stored.WaitingReason)
+	}
 	frame, err := model.ParseFrame(stored.Frame)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame.CurrentNodeID != n2 {
-		t.Errorf("cursor = %q, want still %q", frame.CurrentNodeID, n2)
+	if frame.CurrentNodeID != n1 {
+		t.Errorf("cursor = %q, want %q", frame.CurrentNodeID, n1)
 	}
-	running, err := repo.GetRunningNodeInstance(ctx, inst.ID)
-	if err != nil || running.NodeID != n2 {
-		t.Fatalf("running = %+v, err %v, want live park on %s", running, err, n2)
+	gotCtx, _ := svc.GetContext(ctx, inst.ID)
+	if !jsonEqualCtx(t, gotCtx.Context, json.RawMessage(`{}`)) {
+		t.Errorf("context = %s, want restored pre-n1 {}", gotCtx.Context)
 	}
-	// Rejected rollback corrupts nothing: resume + deliver still works.
+	closed, err := repo.GetNodeInstance(ctx, inst.ID, parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != model.NodeStopped || !closed.Cancelled {
+		t.Errorf("superseded park = %s/cancelled=%v, want stopped/true", closed.Status, closed.Cancelled)
+	}
+	if closed.Error != "superseded by rollback" {
+		t.Errorf("superseded error = %q, want supersede marker", closed.Error)
+	}
+	if _, err := repo.GetRunningNodeInstance(ctx, inst.ID); !errors.Is(err, repository.ErrNodeInstanceNotFound) {
+		t.Errorf("GetRunningNodeInstance() error = %v, want ErrNodeInstanceNotFound", err)
+	}
+	if !svcEventTypes(t, db, inst.ID)["rollback"] {
+		t.Error("event 'rollback' missing")
+	}
+	// Resume re-executes forward from n1: n1 runs again on the same
+	// occurrence row (attempt++), then re-parks on n2 as a fresh row
+	// (the superseded park stays stopped).
 	if _, err := svc.Resume(ctx, inst.ID); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want re-parked on input", cur)
+	}
+	rerun, err := repo.GetNodeInstance(ctx, inst.ID, occ1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerun.Status != model.NodeFinished || rerun.Attempt != 2 {
+		t.Errorf("rerun n1 = %s/%d, want finished/2", rerun.Status, rerun.Attempt)
+	}
+	reparked, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// GetNodeInstanceByNode returns the oldest row (the superseded park);
+	// the live re-park is the newest running row for n2.
+	if reparked.ID == parked.ID || reparked.Status != model.NodeRunning {
+		occs, lerr := repo.ListNodeInstances(ctx, inst.ID)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		for i := len(occs) - 1; i >= 0; i-- {
+			if occs[i].NodeID == n2 && occs[i].Status == model.NodeRunning {
+				cp := occs[i]
+				reparked = &cp
+				break
+			}
+		}
+	}
+	if reparked.Status != model.NodeRunning {
+		t.Errorf("repark status = %s, want running", reparked.Status)
+	}
+	if reparked.ID == parked.ID {
+		t.Errorf("repark id = %s, want fresh row (superseded park stays stopped)", reparked.ID)
+	}
+	stillClosed, err := repo.GetNodeInstance(ctx, inst.ID, parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillClosed.Status != model.NodeStopped {
+		t.Errorf("superseded park status = %s, want stopped", stillClosed.Status)
+	}
+	// Deliver to the live re-park.
 	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
-		InstanceID: inst.ID, IdempotencyKey: "guard-keeps-park", Payload: []byte(`{"v":1}`),
+		InstanceID: inst.ID, IdempotencyKey: "supersede-fresh", Payload: []byte(`{"v":1}`),
 	})
 	if err != nil || !delivery.Accepted {
 		t.Fatalf("DeliverInput() = %+v, err %v, want accepted", delivery, err)
+	}
+	if delivery.NodeInstanceID == parked.ID {
+		t.Errorf("delivery landed on superseded row %s, want live re-park %s", delivery.NodeInstanceID, reparked.ID)
 	}
 }
 
@@ -1982,6 +2094,105 @@ func TestRollbackToFinishedInputReparks(t *testing.T) {
 	_ = json.Unmarshal(gotFinal.Context, &ctxMap)
 	if gate, ok := ctxMap["gate"].(map[string]any); !ok || gate["v"] != float64(3) {
 		t.Errorf("context = %s, want fresh delivery v=3", gotFinal.Context)
+	}
+}
+
+func TestRollbackToFinishedInputSupersedesOtherLivePark(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	// n1 input (delivered, finished) -> n2 script (finished) -> n3 input
+	// parks live. Rollback to the finished n1 input must close the live n3
+	// park and re-arm n1 in the same transaction.
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	n3 := "11111111-1111-7111-8111-111111111103"
+	n4 := "11111111-1111-7111-8111-111111111104"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "input", "ask-first", "", n2,
+			map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(n2, "script", "ok", "return 1;", n3, map[string]any{"output_property": "mid"}),
+		svcNodeJSON(n3, "input", "ask-later", "", n4,
+			map[string]any{"channel": "http", "context_path": "gate2"}),
+		svcNodeJSON(n4, "script", "done", "return 1;", "", map[string]any{"output_property": "last"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on first input", cur)
+	}
+	first, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "supersede-rearm-1", Payload: []byte(`{"v":1}`),
+	})
+	if err != nil || !delivery.Accepted {
+		t.Fatalf("DeliverInput() = %+v, err %v", delivery, err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on second input", cur)
+	}
+	live, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Status != model.NodeRunning {
+		t.Fatalf("n3 park status = %s, want running", live.Status)
+	}
+	finishedFirst, err := repo.GetNodeInstance(ctx, inst.ID, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishedFirst.Status != model.NodeFinished {
+		t.Fatalf("n1 occurrence status = %s, want finished", finishedFirst.Status)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: first.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Fatalf("res = %+v, want paused at %s", res, n1)
+	}
+	closed, err := repo.GetNodeInstance(ctx, inst.ID, live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != model.NodeStopped || !closed.Cancelled {
+		t.Errorf("live n3 park = %s/cancelled=%v, want stopped/true", closed.Status, closed.Cancelled)
+	}
+	rearmed, err := repo.GetNodeInstance(ctx, inst.ID, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rearmed.Status != model.NodeRunning || rearmed.Attempt != 2 {
+		t.Errorf("re-armed n1 = %s/%d, want running/2", rearmed.Status, rearmed.Attempt)
+	}
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want re-parked on n1", cur)
+	}
+	delivery2, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "supersede-rearm-2", Payload: []byte(`{"v":2}`),
+	})
+	if err != nil || !delivery2.Accepted {
+		t.Fatalf("second DeliverInput() = %+v, err %v", delivery2, err)
+	}
+	if delivery2.NodeInstanceID != first.ID {
+		t.Errorf("delivery node = %s, want re-armed n1 %s", delivery2.NodeInstanceID, first.ID)
 	}
 }
 
