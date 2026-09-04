@@ -9,26 +9,29 @@ import (
 // workflowGraph indexes a materialized node tree by node id for cursor
 // routing and content lookup.
 type workflowGraph struct {
-	byID       map[string]*model.NodeContent
-	keysByNode map[string]map[string]string
+	byID        map[string]*model.NodeContent
+	keysByNode  map[string]map[string]string
+	stackByNode map[string][]string
 }
 
 func buildGraph(wc *model.WorkflowContent) *workflowGraph {
 	g := &workflowGraph{
-		byID:       make(map[string]*model.NodeContent, 16),
-		keysByNode: make(map[string]map[string]string, 16),
+		byID:        make(map[string]*model.NodeContent, 16),
+		keysByNode:  make(map[string]map[string]string, 16),
+		stackByNode: make(map[string][]string, 16),
 	}
-	var walk func(nodes []*model.NodeContent, keys map[string]string)
-	walk = func(nodes []*model.NodeContent, keys map[string]string) {
+	var walk func(nodes []*model.NodeContent, keys map[string]string, ancestors []string)
+	walk = func(nodes []*model.NodeContent, keys map[string]string, ancestors []string) {
 		for _, n := range nodes {
 			g.byID[n.ID] = n
 			g.keysByNode[n.ID] = keys
+			g.stackByNode[n.ID] = append([]string(nil), ancestors...)
 			if n.Group != nil {
-				walk(n.Group.Nodes, n.Group.Keys)
+				walk(n.Group.Nodes, n.Group.Keys, append(ancestors, n.ID))
 			}
 		}
 	}
-	walk(wc.Nodes, wc.Keys)
+	walk(wc.Nodes, wc.Keys, nil)
 	return g
 }
 
@@ -71,4 +74,14 @@ func (g *workflowGraph) StartOf(id string) (string, error) {
 func (g *workflowGraph) KeyTarget(nodeID, key string) (string, bool) {
 	target, ok := g.keysByNode[nodeID][key]
 	return target, ok
+}
+
+// groupStack returns the ancestor group chain outermost-first (nil for
+// top-level nodes), mirroring service.groupStack.
+func (g *workflowGraph) groupStack(id string) ([]string, error) {
+	stack, ok := g.stackByNode[id]
+	if !ok {
+		return nil, fmt.Errorf("engine: unknown node %q in workflow graph", id)
+	}
+	return append([]string(nil), stack...), nil
 }
