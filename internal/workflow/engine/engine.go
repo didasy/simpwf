@@ -269,6 +269,16 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 
 	// Input nodes re-enter waiting (they never execute on recovery).
 	if attempt.Type == string(model.NodeTypeInput) {
+		if frame.CurrentNodeID != attempt.NodeID {
+			from := frame.CurrentNodeID
+			stack, gerr := g.groupStack(attempt.NodeID)
+			if gerr != nil {
+				return e.fail(ctx, cur, "", gerr)
+			}
+			frame.CurrentNodeID = attempt.NodeID
+			frame.GroupStack = stack
+			_ = e.appendEvent(ctx, cur.ID, "cursor_reconciled", map[string]any{"from_node": from, "to_node": attempt.NodeID})
+		}
 		attempt.Attempt++
 		attempt.Status = model.NodeRunning
 		attempt.ContextBefore = marshal(ctxMap)
