@@ -76,6 +76,10 @@ definitions:
         type: string
       id:
         type: string
+      nodes:
+        additionalProperties:
+          $ref: '#/definitions/internal_workflow_handler.NodeOccurrenceResponse'
+        type: object
       pause_requested:
         type: boolean
       started_at:
@@ -247,6 +251,17 @@ definitions:
       version:
         type: integer
     type: object
+  internal_workflow_handler.NodeOccurrenceResponse:
+    properties:
+      attempt:
+        type: integer
+      occurrence_id:
+        type: string
+      rollbackable:
+        type: boolean
+      status:
+        type: string
+    type: object
   internal_workflow_handler.PauseResponse:
     properties:
       pause_requested:
@@ -269,6 +284,20 @@ definitions:
     type: object
   internal_workflow_handler.ResumeResponse:
     properties:
+      status:
+        type: string
+    type: object
+  internal_workflow_handler.RollbackRequest:
+    properties:
+      reason:
+        type: string
+      target_occurrence_id:
+        type: string
+    type: object
+  internal_workflow_handler.RollbackResponse:
+    properties:
+      current_node_id:
+        type: string
       status:
         type: string
     type: object
@@ -957,6 +986,54 @@ paths:
       security:
       - ApiKeyAuth: []
       summary: Resume workflow instance
+      tags:
+      - workflow-instances
+  /v1/workflow/instance/{id}/rollback:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Instance ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Rollback target
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_workflow_handler.RollbackRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.RollbackResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Roll back a paused or failed instance to a prior node occurrence
       tags:
       - workflow-instances
   /v1/workflow/instance/{id}/status:

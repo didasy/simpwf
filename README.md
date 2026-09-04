@@ -311,25 +311,26 @@ dead-letters (the definition configures a transport the deployment lacks).
 
 ## API entry points
 
-| Method     | Path                                             | Purpose                                                         |
-| ---------- | ------------------------------------------------ | --------------------------------------------------------------- |
-| GET        | `/health/live`, `/health/ready`                      | liveness / readiness                                            |
-| POST       | `/v1/node/definition`                              | create node definition (immutable)                              |
-| GET        | `/v1/node/definition`                              | list (paged, `latest_only`, `type`, ...)                            |
-| GET/DELETE | `/v1/node/definition/{id}`                         | get / delete                                                    |
-| POST       | `/v1/workflow/definition`                          | create workflow definition (immutable)                          |
-| GET        | `/v1/workflow/definition`                          | list (paged, `latest_only`, ...)                                  |
-| GET/DELETE | `/v1/workflow/definition/{id}`                     | get / delete                                                    |
-| POST       | `/v1/workflow/instance`                            | create instance (202)                                           |
-| GET        | `/v1/workflow/instance`                            | list (paged, `id`/`workflow_definition_id`/`status` filters)          |
-| GET        | `/v1/workflow/instance/{id}/status`                | status + counters + cursor + audit actors                       |
-| GET        | `/v1/workflow/instance/{id}/context`               | full context JSON                                               |
-| PUT        | `/v1/workflow/instance/{id}/context`               | replace context (paused only, optional `X-Context-Update-Reason`) |
-| GET        | `/v1/workflow/instance/{id}/status/node/{node_id}` | node debug (`?attempt=N`)                                         |
-| PUT        | `/v1/workflow/instance/{id}/input`                 | deliver webhook input (`Idempotency-Key`)                         |
-| POST       | `/v1/workflow/instance/{id}/pause`                 | pause (200 immediate / 202 deferred)                            |
-| POST       | `/v1/workflow/instance/{id}/resume`                | resume                                                          |
-| POST       | `/v1/workflow/instance/{id}/stop`                  | force stop                                                      |
+| Method     | Path                                             | Purpose                                                                                                                                                              |
+| ---------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET        | `/health/live`, `/health/ready`                      | liveness / readiness                                                                                                                                                 |
+| POST       | `/v1/node/definition`                              | create node definition (immutable)                                                                                                                                   |
+| GET        | `/v1/node/definition`                              | list (paged, `latest_only`, `type`, ...)                                                                                                                                 |
+| GET/DELETE | `/v1/node/definition/{id}`                         | get / delete                                                                                                                                                         |
+| POST       | `/v1/workflow/definition`                          | create workflow definition (immutable)                                                                                                                               |
+| GET        | `/v1/workflow/definition`                          | list (paged, `latest_only`, ...)                                                                                                                                       |
+| GET/DELETE | `/v1/workflow/definition/{id}`                     | get / delete                                                                                                                                                         |
+| POST       | `/v1/workflow/instance`                            | create instance (202)                                                                                                                                                |
+| GET        | `/v1/workflow/instance`                            | list (paged, `id`/`workflow_definition_id`/`status` filters)                                                                                                               |
+| GET        | `/v1/workflow/instance/{id}/status`                | status + counters + cursor + `nodes` map (node id → occurrence id/status/attempt/rollbackable) + audit actors                                                          |
+| GET        | `/v1/workflow/instance/{id}/context`               | full context JSON                                                                                                                                                    |
+| PUT        | `/v1/workflow/instance/{id}/context`               | replace context (paused only, optional `X-Context-Update-Reason`)                                                                                                      |
+| GET        | `/v1/workflow/instance/{id}/status/node/{node_id}` | node debug (`?attempt=N`)                                                                                                                                              |
+| PUT        | `/v1/workflow/instance/{id}/input`                 | deliver webhook input (`Idempotency-Key`)                                                                                                                              |
+| POST       | `/v1/workflow/instance/{id}/pause`                 | pause (200 immediate / 202 deferred)                                                                                                                                 |
+| POST       | `/v1/workflow/instance/{id}/resume`                | resume                                                                                                                                                               |
+| POST       | `/v1/workflow/instance/{id}/stop`                  | force stop                                                                                                                                                           |
+| POST       | `/v1/workflow/instance/{id}/rollback`              | roll back a paused/failed instance to a prior node occurrence (always lands paused, restores `context_before`; 409 while a live parked input attempt exists elsewhere) |
 
 See `api/openapi.yaml` for the authoritative contract, `workflow.yaml` for an
 annotated sample definition, and `scripts/e2e.sh` for black-box API checks

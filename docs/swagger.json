@@ -1032,6 +1032,81 @@
                 }
             }
         },
+        "/v1/workflow/instance/{id}/rollback": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workflow-instances"
+                ],
+                "summary": "Roll back a paused or failed instance to a prior node occurrence",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Instance ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Rollback target",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.RollbackRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.RollbackResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/workflow/instance/{id}/status": {
             "get": {
                 "security": [
@@ -1311,6 +1386,12 @@
                 "id": {
                     "type": "string"
                 },
+                "nodes": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/internal_workflow_handler.NodeOccurrenceResponse"
+                    }
+                },
                 "pause_requested": {
                     "type": "boolean"
                 },
@@ -1571,6 +1652,23 @@
                 }
             }
         },
+        "internal_workflow_handler.NodeOccurrenceResponse": {
+            "type": "object",
+            "properties": {
+                "attempt": {
+                    "type": "integer"
+                },
+                "occurrence_id": {
+                    "type": "string"
+                },
+                "rollbackable": {
+                    "type": "boolean"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_workflow_handler.PauseResponse": {
             "type": "object",
             "properties": {
@@ -1605,6 +1703,28 @@
         "internal_workflow_handler.ResumeResponse": {
             "type": "object",
             "properties": {
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.RollbackRequest": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string"
+                },
+                "target_occurrence_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.RollbackResponse": {
+            "type": "object",
+            "properties": {
+                "current_node_id": {
+                    "type": "string"
+                },
                 "status": {
                     "type": "string"
                 }

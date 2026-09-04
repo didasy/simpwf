@@ -432,6 +432,44 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /v1/workflow/instance/{id}/rollback:
+    post:
+      tags: [Controls]
+      operationId: rollbackWorkflow
+      security:
+        - ApiKeyAuth: []
+      summary: Roll back a paused or failed instance to a prior node occurrence
+      description: |
+        Moves the cursor of a paused or failed instance back to an
+        already-executed node occurrence (the occurrence UUID from the node
+        debug API), so the next resume re-executes forward from there. The
+        instance is always paused afterwards (failed becomes paused); its
+        context is restored from the target occurrence's context_before
+        snapshot. Rolling back onto the currently parked input occurrence is
+        rejected (409): resume and deliver input instead. Rolling back while a
+        live parked attempt exists on another node is likewise rejected (409):
+        resume and deliver (or stop) first. History is immutable: node occurrences, input deliveries,
+        and prior events are untouched, and the next execution increments
+        the target occurrence's attempt. Nodes that never ran, group nodes,
+        and occurrences with no restorable context are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RollbackRequest" }
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          description: Rolled back (always paused)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RollbackResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -684,6 +722,11 @@ components:
           description: Public node instance id "<instance>:<occurrence>"
         attempt: { type: integer }
         counters: { type: object }
+        nodes:
+          type: object
+          nullable: true
+          description: Graph node id to occurrence state (omitted when the definition cannot be loaded)
+          additionalProperties: { $ref: "#/components/schemas/NodeOccurrence" }
         error: { type: string, nullable: true }
         started_at: { type: string, format: date-time, nullable: true }
         finished_at: { type: string, format: date-time, nullable: true }
@@ -691,6 +734,22 @@ components:
         updated_by: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    NodeOccurrence:
+      type: object
+      required: [status, rollbackable]
+      properties:
+        occurrence_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Executed occurrence id for rollback (null when never ran)
+        status:
+          type: string
+          enum: [not_started, waiting, running, finished, failed, stopped]
+        attempt: { type: integer, nullable: true }
+        rollbackable:
+          type: boolean
+          description: Advisory rollback target hint; the rollback endpoint stays the source of truth
     InstanceContext:
       type: object
       required: [id, context]
@@ -720,6 +779,23 @@ components:
       properties:
         status: { type: string }
         termination_pending: { type: boolean }
+    RollbackRequest:
+      type: object
+      required: [target_occurrence_id]
+      properties:
+        target_occurrence_id:
+          type: string
+          format: uuid
+          description: Already-executed node occurrence id (from the node debug API)
+        reason:
+          type: string
+          description: Optional audit annotation recorded on the rollback event only
+    RollbackResponse:
+      type: object
+      required: [status, current_node_id]
+      properties:
+        status: { type: string, enum: [paused] }
+        current_node_id: { type: string, format: uuid }
     NodeDebug:
       type: object
       required:

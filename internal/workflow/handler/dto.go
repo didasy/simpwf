@@ -98,24 +98,36 @@ type InstanceSummaryResponse struct {
 
 // InstanceStatusResponse mirrors api/openapi.yaml.
 type InstanceStatusResponse struct {
-	ID                    string          `json:"id"`
-	WorkflowDefinitionID  string          `json:"workflow_definition_id"`
-	Status                string          `json:"status"`
-	WaitingReason         *string         `json:"waiting_reason"`
-	PauseRequested        bool            `json:"pause_requested"`
-	TerminationPending    bool            `json:"termination_pending"`
-	CurrentGroupID        *string         `json:"current_group_id"`
-	CurrentNodeID         *string         `json:"current_node_id"`
-	CurrentNodeInstanceID *string         `json:"current_node_instance_id"`
-	Attempt               int             `json:"attempt"`
-	Counters              json.RawMessage `json:"counters"`
-	Error                 *string         `json:"error"`
-	StartedAt             *time.Time      `json:"started_at"`
-	FinishedAt            *time.Time      `json:"finished_at"`
-	CreatedBy             string          `json:"created_by"`
-	UpdatedBy             string          `json:"updated_by"`
-	CreatedAt             time.Time       `json:"created_at"`
-	UpdatedAt             time.Time       `json:"updated_at"`
+	ID                    string                            `json:"id"`
+	WorkflowDefinitionID  string                            `json:"workflow_definition_id"`
+	Status                string                            `json:"status"`
+	WaitingReason         *string                           `json:"waiting_reason"`
+	PauseRequested        bool                              `json:"pause_requested"`
+	TerminationPending    bool                              `json:"termination_pending"`
+	CurrentGroupID        *string                           `json:"current_group_id"`
+	CurrentNodeID         *string                           `json:"current_node_id"`
+	CurrentNodeInstanceID *string                           `json:"current_node_instance_id"`
+	Attempt               int                               `json:"attempt"`
+	Counters              json.RawMessage                   `json:"counters"`
+	Nodes                 map[string]NodeOccurrenceResponse `json:"nodes,omitempty"`
+	Error                 *string                           `json:"error"`
+	StartedAt             *time.Time                        `json:"started_at"`
+	FinishedAt            *time.Time                        `json:"finished_at"`
+	CreatedBy             string                            `json:"created_by"`
+	UpdatedBy             string                            `json:"updated_by"`
+	CreatedAt             time.Time                         `json:"created_at"`
+	UpdatedAt             time.Time                         `json:"updated_at"`
+}
+
+// NodeOccurrenceResponse maps a workflow graph node id to its executed
+// occurrence. Never-executed nodes carry a null occurrence_id and attempt
+// with status "not_started". Rollbackable is advisory: the rollback
+// endpoint stays the source of truth.
+type NodeOccurrenceResponse struct {
+	OccurrenceID *string `json:"occurrence_id"`
+	Status       string  `json:"status"`
+	Attempt      *int    `json:"attempt"`
+	Rollbackable bool    `json:"rollbackable"`
 }
 
 // InstanceContextResponse is the GET .../context body.
@@ -145,6 +157,20 @@ type ResumeResponse struct {
 type StopResponse struct {
 	Status             string `json:"status"`
 	TerminationPending bool   `json:"termination_pending"`
+}
+
+// RollbackRequest is the POST .../rollback body. Reason is an optional
+// audit annotation recorded on the rollback event only.
+type RollbackRequest struct {
+	TargetOccurrenceID string `json:"target_occurrence_id"`
+	Reason             string `json:"reason,omitempty"`
+}
+
+// RollbackResponse is the POST .../rollback body. The instance is always
+// paused after a rollback.
+type RollbackResponse struct {
+	Status        string `json:"status"`
+	CurrentNodeID string `json:"current_node_id"`
 }
 
 // NodeDebugResponse mirrors api/openapi.yaml. Occurrences that never ran use

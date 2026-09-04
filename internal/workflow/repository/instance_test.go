@@ -876,6 +876,442 @@ func TestReplaceContextRejectsNonPaused(t *testing.T) {
 	}
 }
 
+func TestRollbackInstancePausedMovesCursorAndRestoresContext(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	w := newTestInstance(id, model.WorkflowPaused, "")
+	w.Context = json.RawMessage(`{"after":true}`)
+	w.PauseRequested = true
+	insertInstance(t, db, w)
+
+	frame := model.Frame{
+		CurrentNodeID: "22222222-2222-7222-8222-222222222222",
+		GroupStack:    []string{"33333333-3333-7333-8333-333333333333"},
+	}
+	got, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         frame,
+		Context:       json.RawMessage(`{"before":1}`),
+		Actor:         fixtureUserID,
+		Reason:        "retry from earlier node",
+		FromNode:      "44444444-4444-7444-8444-444444444444",
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+		WaitingReason: model.WaitingReasonRunnable,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	if got.Status != model.WorkflowPaused || got.WaitingReason != model.WaitingReasonRunnable {
+		t.Errorf("got status = %s/%q, want paused/runnable", got.Status, got.WaitingReason)
+	}
+	if got.PauseRequested {
+		t.Error("pause_requested = true, want false")
+	}
+	gotFrame, err := model.ParseFrame(got.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFrame.CurrentNodeID != "22222222-2222-7222-8222-222222222222" ||
+		len(gotFrame.GroupStack) != 1 || gotFrame.GroupStack[0] != "33333333-3333-7333-8333-333333333333" {
+		t.Errorf("frame = %+v, want target cursor", gotFrame)
+	}
+	if !jsonEqual(t, got.Context, json.RawMessage(`{"before":1}`)) {
+		t.Errorf("context = %s, want restored", got.Context)
+	}
+	if got.Revision != w.Revision+1 {
+		t.Errorf("revision = %d, want %d", got.Revision, w.Revision+1)
+	}
+
+	events, err := repo.ListEvents(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "rollback" {
+		t.Fatalf("events = %+v, want one rollback event", events)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(events[0].Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"from_node":     "44444444-4444-7444-8444-444444444444",
+		"to_node":       "22222222-2222-7222-8222-222222222222",
+		"to_occurrence": "55555555-5555-7555-8555-555555555555",
+		"context_mode":  "restore",
+		"reason":        "retry from earlier node",
+	}
+	if !reflect.DeepEqual(data, want) {
+		t.Errorf("event data = %v, want %v", data, want)
+	}
+}
+
+func TestRollbackInstanceFailedClearsErrorAndFinishedAt(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	w := newTestInstance(id, model.WorkflowFailed, "")
+	w.Context = json.RawMessage(`{"after":true}`)
+	w.Error = "node boom"
+	finished := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	w.FinishedAt = &finished
+	started := finished.Add(-time.Minute)
+	w.StartedAt = &started
+	w.LeasedBy = "dead-worker"
+	insertInstance(t, db, w)
+
+	frame := model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"}
+	got, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         frame,
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		FromNode:      "44444444-4444-7444-8444-444444444444",
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+		WaitingReason: model.WaitingReasonRunnable,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	if got.Status != model.WorkflowPaused {
+		t.Errorf("status = %s, want paused", got.Status)
+	}
+	if got.Error != "" {
+		t.Errorf("error = %q, want cleared", got.Error)
+	}
+	if got.FinishedAt != nil {
+		t.Errorf("finished_at = %v, want nil", got.FinishedAt)
+	}
+	if got.StartedAt == nil || !got.StartedAt.Equal(started) {
+		t.Errorf("started_at = %v, want preserved %v", got.StartedAt, started)
+	}
+	if got.LeasedBy != "dead-worker" {
+		t.Errorf("leased_by = %q, want untouched", got.LeasedBy)
+	}
+	if got.Revision != w.Revision+1 {
+		t.Errorf("revision = %d, want %d", got.Revision, w.Revision+1)
+	}
+
+	events, err := repo.ListEvents(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "rollback" {
+		t.Fatalf("events = %+v, want one rollback event", events)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(events[0].Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["reason"] != "" || data["context_mode"] != "restore" {
+		t.Errorf("event data = %v, want empty reason and restore mode", data)
+	}
+}
+
+func TestRollbackInstanceRejectsWrongState(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	cases := []struct {
+		id     string
+		status model.WorkflowStatus
+	}{
+		{"11111111-1111-7111-8111-111111111111", model.WorkflowWaiting},
+		{"22222222-2222-7222-8222-222222222222", model.WorkflowRunning},
+		{"33333333-3333-7333-8333-333333333333", model.WorkflowFinished},
+		{"44444444-4444-7444-8444-444444444444", model.WorkflowStopped},
+	}
+	for _, tc := range cases {
+		insertInstance(t, db, newTestInstance(tc.id, tc.status, ""))
+		_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+			InstanceID:    tc.id,
+			Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+			Context:       json.RawMessage(`{}`),
+			Actor:         fixtureUserID,
+			ToNode:        "22222222-2222-7222-8222-222222222222",
+			ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+			WaitingReason: model.WaitingReasonRunnable,
+		})
+		if !errors.Is(err, repository.ErrStatusConflict) {
+			t.Errorf("RollbackInstance(%s) error = %v, want ErrStatusConflict", tc.status, err)
+		}
+		stored, err := repo.GetByID(ctx, tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Revision != 0 {
+			t.Errorf("revision of %s = %d, want unchanged", tc.status, stored.Revision)
+		}
+		if events, _ := repo.ListEvents(ctx, tc.id); len(events) != 0 {
+			t.Errorf("events of %s = %d, want none", tc.status, len(events))
+		}
+	}
+}
+
+func TestRollbackInstanceRejectsTerminationPending(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	w := newTestInstance(id, model.WorkflowPaused, "")
+	w.TerminationPending = true
+	insertInstance(t, db, w)
+
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+		WaitingReason: model.WaitingReasonRunnable,
+	})
+	if !errors.Is(err, repository.ErrStatusConflict) {
+		t.Errorf("RollbackInstance() error = %v, want ErrStatusConflict", err)
+	}
+}
+
+func TestRollbackInstanceMissingInstance(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    "99999999-9999-7999-8999-999999999999",
+		Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+		WaitingReason: model.WaitingReasonRunnable,
+	})
+	if !errors.Is(err, repository.ErrInstanceNotFound) {
+		t.Errorf("RollbackInstance() error = %v, want ErrInstanceNotFound", err)
+	}
+}
+
+func TestRollbackInstanceEnqueuesNoStatusUpdate(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	insertInstance(t, db, newTestInstance(id, model.WorkflowPaused, ""))
+
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+		WaitingReason: model.WaitingReasonRunnable,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	var count int64
+	if err := db.Model(&repository.StatusUpdateOutboxModel{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("status_update_outbox rows = %d, want 0", count)
+	}
+}
+
+func TestRollbackInstancePreservesInputParkReason(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	w := newTestInstance(id, model.WorkflowPaused, model.WaitingReasonInput)
+	insertInstance(t, db, w)
+
+	got, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  "55555555-5555-7555-8555-555555555555",
+		WaitingReason: model.WaitingReasonInput,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	if got.Status != model.WorkflowPaused || got.WaitingReason != model.WaitingReasonInput {
+		t.Errorf("got status = %s/%q, want paused/input", got.Status, got.WaitingReason)
+	}
+	stored, err := repo.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.WaitingReason != model.WaitingReasonInput {
+		t.Errorf("stored waiting_reason = %q, want input", stored.WaitingReason)
+	}
+}
+
+func TestRollbackInstanceRearmsFinishedInputOccurrence(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	w := newTestInstance(id, model.WorkflowPaused, "")
+	insertInstance(t, db, w)
+	occID := "55555555-5555-7555-8555-555555555555"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 occID,
+		WorkflowInstanceID: id,
+		NodeID:             "22222222-2222-7222-8222-222222222222",
+		Name:               "ask",
+		Type:               string(model.NodeTypeInput),
+		Attempt:            1,
+		Status:             model.NodeFinished,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance() error = %v", err)
+	}
+
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:           id,
+		Frame:                model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:              json.RawMessage(`{}`),
+		Actor:                fixtureUserID,
+		ToNode:               "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:         occID,
+		WaitingReason:        model.WaitingReasonInput,
+		RearmInputOccurrence: true,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	occ, err := repo.GetNodeInstance(ctx, id, occID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if occ.Status != model.NodeRunning {
+		t.Errorf("occurrence status = %s, want running (re-armed)", occ.Status)
+	}
+	if occ.Attempt != 2 {
+		t.Errorf("attempt = %d, want 2 (fresh attempt of same row)", occ.Attempt)
+	}
+}
+
+func TestRollbackInstanceRearmSkipsNonInputOccurrence(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	insertInstance(t, db, newTestInstance(id, model.WorkflowPaused, ""))
+	occID := "55555555-5555-7555-8555-555555555555"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 occID,
+		WorkflowInstanceID: id,
+		NodeID:             "22222222-2222-7222-8222-222222222222",
+		Name:               "compute",
+		Type:               string(model.NodeTypeScript),
+		Attempt:            1,
+		Status:             model.NodeFinished,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance() error = %v", err)
+	}
+
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  occID,
+		WaitingReason: model.WaitingReasonRunnable,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	occ, err := repo.GetNodeInstance(ctx, id, occID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if occ.Status != model.NodeFinished {
+		t.Errorf("occurrence status = %s, want untouched finished", occ.Status)
+	}
+	if occ.Attempt != 1 {
+		t.Errorf("attempt = %d, want unchanged 1", occ.Attempt)
+	}
+}
+
+func TestRollbackInstanceRearmFlagOffLeavesInputFinished(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	id := "11111111-1111-7111-8111-111111111111"
+	insertInstance(t, db, newTestInstance(id, model.WorkflowPaused, ""))
+	occID := "55555555-5555-7555-8555-555555555555"
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 occID,
+		WorkflowInstanceID: id,
+		NodeID:             "22222222-2222-7222-8222-222222222222",
+		Name:               "ask",
+		Type:               string(model.NodeTypeInput),
+		Attempt:            1,
+		Status:             model.NodeFinished,
+		ContextBefore:      json.RawMessage(`{}`),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance() error = %v", err)
+	}
+
+	// Without the re-arm flag an input occurrence stays finished even
+	// when the park reason is input.
+	_, err := repo.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:    id,
+		Frame:         model.Frame{CurrentNodeID: "22222222-2222-7222-8222-222222222222"},
+		Context:       json.RawMessage(`{}`),
+		Actor:         fixtureUserID,
+		ToNode:        "22222222-2222-7222-8222-222222222222",
+		ToOccurrence:  occID,
+		WaitingReason: model.WaitingReasonInput,
+	})
+	if err != nil {
+		t.Fatalf("RollbackInstance() error = %v", err)
+	}
+	occ, err := repo.GetNodeInstance(ctx, id, occID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if occ.Status != model.NodeFinished || occ.Attempt != 1 {
+		t.Errorf("occurrence = %s/%d, want finished/1", occ.Status, occ.Attempt)
+	}
+}
+
 func TestReplaceContextMissingInstance(t *testing.T) {
 	db := setupTestDB(t)
 	seedInstanceFixture(t, db)

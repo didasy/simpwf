@@ -80,6 +80,30 @@ type ContextUpdate struct {
 	Reason     string
 }
 
+// RollbackUpdate moves a paused or failed instance's cursor back to an
+// already-executed node occurrence. Frame carries the recomputed cursor
+// (target graph node + group stack) and Context carries the target
+// occurrence's ContextBefore, both resolved by the caller. WaitingReason is
+// the post-rollback park reason: runnable, or input when the target is an
+// input node so the instance keeps waiting for its delivery.
+// RearmInputOccurrence, set only when the target is a finished input
+// occurrence of this instance, re-arms it as a fresh attempt of the same
+// row (delivery history stays attached for audit) so the next resume
+// re-parks it. Reason is an audit annotation recorded on the rollback event
+// only, never context values.
+type RollbackUpdate struct {
+	InstanceID           string
+	Frame                model.Frame
+	Context              json.RawMessage
+	Actor                string
+	Reason               string
+	FromNode             string
+	ToNode               string
+	ToOccurrence         string
+	WaitingReason        model.WaitingReason
+	RearmInputOccurrence bool
+}
+
 var errDeliveryExists = errors.New("repository: input delivery already exists")
 
 func newRepoID() string {
@@ -107,6 +131,22 @@ type InstanceRepository interface {
 	// Returns ErrInstanceNotFound when the instance is missing and
 	// ErrStatusConflict when it is not paused.
 	ReplaceContext(ctx context.Context, u ContextUpdate) (*model.WorkflowInstance, error)
+	// RollbackInstance atomically moves a paused or failed instance's cursor
+	// back to an already-executed node occurrence: status becomes paused
+	// (failed instances clear their error and finished_at; started_at is
+	// kept), waiting_reason becomes the caller-supplied park reason
+	// (runnable, or input when the target is an input node), pause_requested
+	// clears, the frame and context are replaced, the revision increments,
+	// and a rollback audit event is appended. Rolling back to a finished
+	// input occurrence additionally re-arms it to running (delivery history
+	// stays attached for audit) so the next resume re-parks it; other
+	// occurrences are untouched. No status-update outbox rows are enqueued.
+	// The failed -> paused move is the explicit rollback-only exception to
+	// model.CanWorkflowTransition, which stays unchanged for generic paths.
+	// Returns ErrInstanceNotFound when the instance is missing and
+	// ErrStatusConflict when it is not paused/failed, has termination
+	// pending, or lost a concurrent race.
+	RollbackInstance(ctx context.Context, u RollbackUpdate) (*model.WorkflowInstance, error)
 	// ClaimNext leases up to limit runnable instances (waiting with no
 	// active lease, or running with an expired lease) using FOR UPDATE SKIP
 	// LOCKED, moving them to running and fencing them to workerID.
@@ -274,6 +314,91 @@ func (r *instanceRepo) ReplaceContext(ctx context.Context, u ContextUpdate) (*mo
 			ID:                 newRepoID(),
 			WorkflowInstanceID: u.InstanceID,
 			Type:               "context_updated",
+			Data:               data,
+			CreatedBy:          u.Actor,
+			CreatedAt:          now,
+		})
+		return tx.Create(&ev).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return r.GetByID(ctx, u.InstanceID)
+}
+
+func (r *instanceRepo) RollbackInstance(ctx context.Context, u RollbackUpdate) (*model.WorkflowInstance, error) {
+	frameRaw, err := u.Frame.JSON()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&WorkflowInstanceModel{}).
+			Where("id = ? AND status IN ? AND termination_pending = ?",
+				u.InstanceID,
+				[]string{string(model.WorkflowPaused), string(model.WorkflowFailed)},
+				false).
+			Updates(map[string]any{
+				"status":          string(model.WorkflowPaused),
+				"waiting_reason":  string(u.WaitingReason),
+				"pause_requested": false,
+				"frame":           frameRaw,
+				"context":         jsonCol(u.Context, "{}"),
+				"error":           "",
+				"finished_at":     nil,
+				"revision":        gorm.Expr("revision + 1"),
+				"updated_at":      now,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			var m WorkflowInstanceModel
+			if err := tx.Where("id = ?", u.InstanceID).First(&m).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrInstanceNotFound
+				}
+				return err
+			}
+			return ErrStatusConflict
+		}
+		if u.RearmInputOccurrence {
+			// Rolling back to a finished input occurrence re-arms its
+			// wait as a fresh attempt of the same row (delivery history
+			// stays attached for audit) so the next resume re-parks it
+			// and a fresh delivery is accepted. The update is guarded on
+			// finished so a concurrent delivery wins.
+			res := tx.Model(&NodeInstanceModel{}).
+				Where("id = ? AND workflow_instance_id = ? AND status = ? AND type = ?",
+					u.ToOccurrence, u.InstanceID, string(model.NodeFinished), string(model.NodeTypeInput)).
+				Updates(map[string]any{
+					"status":        string(model.NodeRunning),
+					"attempt":       gorm.Expr("attempt + 1"),
+					"output":        jsonCol(nil, "null"),
+					"context_after": jsonCol(nil, "null"),
+					"error":         "",
+					"finished_at":   nil,
+					"started_at":    now,
+					"updated_at":    now,
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+		}
+		data, err := json.Marshal(map[string]string{
+			"from_node":     u.FromNode,
+			"to_node":       u.ToNode,
+			"to_occurrence": u.ToOccurrence,
+			"context_mode":  "restore",
+			"reason":        u.Reason,
+		})
+		if err != nil {
+			return err
+		}
+		ev := WorkflowInstanceEventToModel(model.WorkflowInstanceEvent{
+			ID:                 newRepoID(),
+			WorkflowInstanceID: u.InstanceID,
+			Type:               "rollback",
 			Data:               data,
 			CreatedBy:          u.Actor,
 			CreatedAt:          now,

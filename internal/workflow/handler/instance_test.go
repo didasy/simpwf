@@ -41,6 +41,8 @@ type fakeInstanceSvc struct {
 	resumeErr    error
 	stopRes      *service.ControlResult
 	stopErr      error
+	rollbackRes  *service.RollbackResult
+	rollbackErr  error
 	listQuery    repository.InstanceListQuery
 	listItems    []model.WorkflowInstance
 	listTotal    int64
@@ -77,6 +79,9 @@ func (f *fakeInstanceSvc) Resume(_ context.Context, _ string) (*service.ControlR
 }
 func (f *fakeInstanceSvc) Stop(_ context.Context, _, _ string) (*service.ControlResult, error) {
 	return f.stopRes, f.stopErr
+}
+func (f *fakeInstanceSvc) Rollback(_ context.Context, _ service.RollbackRequest) (*service.RollbackResult, error) {
+	return f.rollbackRes, f.rollbackErr
 }
 func (f *fakeInstanceSvc) List(_ context.Context, q repository.InstanceListQuery) ([]model.WorkflowInstance, int64, error) {
 	f.listQuery = q
@@ -151,6 +156,69 @@ func TestInstanceStatusNotFound(t *testing.T) {
 	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestInstanceStatusNodesMap(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status:    model.WorkflowPaused,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		Frame:     json.RawMessage(`{"current_node_id":"node-1"}`),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	occ := occurrenceID
+	attempt := 1
+	detail := &service.StatusDetail{
+		Instance:              inst,
+		CurrentNodeInstanceID: &occ,
+		Attempt:               2,
+		Nodes: map[string]service.NodeOccurrence{
+			"node-1": {OccurrenceID: &occ, Status: "finished", Attempt: &attempt, Rollbackable: true},
+			"node-2": {Status: "not_started", Rollbackable: false},
+		},
+	}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp InstanceStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	e1, ok := resp.Nodes["node-1"]
+	if !ok {
+		t.Fatalf("nodes missing node-1: %v", resp.Nodes)
+	}
+	if e1.OccurrenceID == nil || *e1.OccurrenceID != occurrenceID {
+		t.Errorf("node-1 occurrence = %v, want %s", e1.OccurrenceID, occurrenceID)
+	}
+	if e1.Status != "finished" || e1.Attempt == nil || *e1.Attempt != 1 || !e1.Rollbackable {
+		t.Errorf("node-1 = %+v, want finished/1/true", e1)
+	}
+	// not_started entries render occurrence_id and attempt as JSON null.
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	nodes, ok := raw["nodes"].(map[string]any)
+	if !ok {
+		t.Fatalf("nodes missing in raw body: %v", raw)
+	}
+	n2, ok := nodes["node-2"].(map[string]any)
+	if !ok {
+		t.Fatalf("nodes.node-2 missing: %v", nodes)
+	}
+	if n2["occurrence_id"] != nil {
+		t.Errorf("node-2 occurrence_id = %v, want null", n2["occurrence_id"])
+	}
+	if n2["attempt"] != nil {
+		t.Errorf("node-2 attempt = %v, want null", n2["attempt"])
+	}
+	if n2["status"] != "not_started" || n2["rollbackable"] != false {
+		t.Errorf("node-2 = %v, want not_started/false", n2)
 	}
 }
 
@@ -454,6 +522,64 @@ func TestInstanceControlsNotFound(t *testing.T) {
 		if w.Code != http.StatusNotFound {
 			t.Errorf("%s status = %d, want 404", path, w.Code)
 		}
+	}
+}
+
+func TestInstanceRollback(t *testing.T) {
+	svc := &fakeInstanceSvc{rollbackRes: &service.RollbackResult{Status: model.WorkflowPaused, CurrentNodeID: occurrenceID}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
+	w := performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/rollback",
+		`{"target_occurrence_id":"`+occurrenceID+`","reason":"retry"}`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp RollbackResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "paused" || resp.CurrentNodeID != occurrenceID {
+		t.Errorf("resp = %+v", resp)
+	}
+}
+
+func TestInstanceRollbackBadBody(t *testing.T) {
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{}})
+	for _, body := range []string{"not json", "", `{}`, `{"reason":"x"}`} {
+		w := performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/rollback", body, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %q: status = %d, want 400", body, w.Code)
+		}
+	}
+}
+
+func TestInstanceRollbackErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"not found", model.ErrNotFound, http.StatusNotFound},
+		{"conflict", model.ErrConflict, http.StatusConflict},
+		{"invalid", model.ErrInvalid, http.StatusUnprocessableEntity},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{rollbackErr: tc.err}})
+			w := performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/rollback",
+				`{"target_occurrence_id":"`+occurrenceID+`"}`, nil)
+			if w.Code != tc.want {
+				t.Errorf("status = %d, want %d (%s)", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestInstanceRollbackParkedInputConflict(t *testing.T) {
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{rollbackErr: model.ErrConflict}})
+	w := performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/rollback",
+		`{"target_occurrence_id":"`+occurrenceID+`"}`, nil)
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 (%s)", w.Code, w.Body.String())
 	}
 }
 
