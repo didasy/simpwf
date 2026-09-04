@@ -120,6 +120,7 @@ func (h *InstanceHandler) Status(c *gin.Context) {
 		CurrentNodeInstanceID: nodeInstanceIDString(inst.ID, d.CurrentNodeInstanceID),
 		Attempt:               d.Attempt,
 		Counters:              inst.Counters,
+		Nodes:                 toNodeOccurrenceResponses(d.Nodes),
 		Error:                 errorMsg,
 		StartedAt:             inst.StartedAt,
 		FinishedAt:            inst.FinishedAt,
@@ -307,6 +308,54 @@ func (h *InstanceHandler) Stop(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, StopResponse{Status: string(res.Status), TerminationPending: res.TerminationPending})
+}
+
+// Rollback handles POST /v1/workflow/instance/{id}/rollback.
+//
+// @Summary Roll back a paused or failed instance to a prior node occurrence
+// @Tags workflow-instances
+// @Accept json
+// @Produce json
+// @Param id path string true "Instance ID"
+// @Param request body RollbackRequest true "Rollback target"
+// @Success 200 {object} RollbackResponse
+// @Failure 400,404,409,422,500 {object} Problem
+// @Security ApiKeyAuth
+// @Router /v1/workflow/instance/{id}/rollback [post]
+func (h *InstanceHandler) Rollback(c *gin.Context) {
+	var req RollbackRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.TargetOccurrenceID == "" {
+		WriteProblem(c, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	res, err := h.svc.Rollback(c.Request.Context(), service.RollbackRequest{
+		InstanceID:         c.Param("id"),
+		TargetOccurrenceID: req.TargetOccurrenceID,
+		Reason:             req.Reason,
+	})
+	if err != nil {
+		WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, RollbackResponse{Status: string(res.Status), CurrentNodeID: res.CurrentNodeID})
+}
+
+// toNodeOccurrenceResponses maps the service nodes view onto the openapi
+// NodeOccurrence schema. A nil map stays nil so the field is omitted.
+func toNodeOccurrenceResponses(nodes map[string]service.NodeOccurrence) map[string]NodeOccurrenceResponse {
+	if nodes == nil {
+		return nil
+	}
+	out := make(map[string]NodeOccurrenceResponse, len(nodes))
+	for id, e := range nodes {
+		out[id] = NodeOccurrenceResponse{
+			OccurrenceID: e.OccurrenceID,
+			Status:       e.Status,
+			Attempt:      e.Attempt,
+			Rollbackable: e.Rollbackable,
+		}
+	}
+	return out
 }
 
 // toInstanceListQuery converts a parsed list query into the repository query.
