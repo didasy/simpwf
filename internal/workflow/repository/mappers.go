@@ -135,6 +135,7 @@ func WorkflowInstanceToModel(w model.WorkflowInstance) WorkflowInstanceModel {
 	return WorkflowInstanceModel{
 		ID:                   w.ID,
 		WorkflowDefinitionID: w.WorkflowDefinitionID,
+		ContextMode:          w.ContextMode,
 		Status:               string(w.Status),
 		WaitingReason:        string(w.WaitingReason),
 		PauseRequested:       w.PauseRequested,
@@ -162,6 +163,7 @@ func WorkflowInstanceFromModel(m WorkflowInstanceModel) model.WorkflowInstance {
 	return model.WorkflowInstance{
 		ID:                   m.ID,
 		WorkflowDefinitionID: m.WorkflowDefinitionID,
+		ContextMode:          m.ContextMode,
 		Status:               model.WorkflowStatus(m.Status),
 		WaitingReason:        model.WaitingReason(m.WaitingReason),
 		PauseRequested:       m.PauseRequested,
@@ -181,6 +183,38 @@ func WorkflowInstanceFromModel(m WorkflowInstanceModel) model.WorkflowInstance {
 		UpdatedBy:            m.UpdatedBy,
 		CreatedAt:            m.CreatedAt,
 		UpdatedAt:            m.UpdatedAt,
+	}
+}
+
+// NodeContextHistoryToModel maps a domain history row to persistence.
+func NodeContextHistoryToModel(h model.NodeContextHistory) NodeContextHistoryModel {
+	return NodeContextHistoryModel{
+		ID:                 h.ID,
+		WorkflowInstanceID: h.WorkflowInstanceID,
+		OccurrenceID:       h.OccurrenceID,
+		NodeID:             h.NodeID,
+		Attempt:            h.Attempt,
+		IsAnchor:           h.IsAnchor,
+		Snapshot:           jsonCol(h.Snapshot, "null"),
+		Diff:               jsonCol(h.Diff, "null"),
+		Superseded:         h.Superseded,
+		CreatedAt:          h.CreatedAt,
+	}
+}
+
+// NodeContextHistoryFromModel maps a persistence history row to the domain.
+func NodeContextHistoryFromModel(m NodeContextHistoryModel) model.NodeContextHistory {
+	return model.NodeContextHistory{
+		ID:                 m.ID,
+		WorkflowInstanceID: m.WorkflowInstanceID,
+		OccurrenceID:       m.OccurrenceID,
+		NodeID:             m.NodeID,
+		Attempt:            m.Attempt,
+		IsAnchor:           m.IsAnchor,
+		Snapshot:           json.RawMessage(m.Snapshot),
+		Diff:               json.RawMessage(m.Diff),
+		Superseded:         m.Superseded,
+		CreatedAt:          m.CreatedAt,
 	}
 }
 

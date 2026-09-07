@@ -42,6 +42,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
 		&repository.WorkflowInstanceModel{},
+		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{},
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
@@ -53,7 +54,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	// Truncate all tables in one statement so foreign-key ordering never
 	// blocks the reset.
 	if err := db.Exec(`TRUNCATE TABLE
-		status_update_outbox, input_deliveries, workflow_instance_events, node_instances,
+		status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users
 		RESTART IDENTITY`).Error; err != nil {

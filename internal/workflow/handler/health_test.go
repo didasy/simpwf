@@ -77,7 +77,7 @@ func TestInstanceStatusResponseMarshals(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"id", "workflow_definition_id", "status", "waiting_reason", "pause_requested", "termination_pending", "current_node_instance_id", "counters", "error", "created_by", "updated_by", "created_at"} {
+	for _, key := range []string{"id", "workflow_definition_id", "context_mode", "status", "waiting_reason", "pause_requested", "termination_pending", "current_node_instance_id", "counters", "error", "created_by", "updated_by", "created_at"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("missing key %q in %v", key, m)
 		}

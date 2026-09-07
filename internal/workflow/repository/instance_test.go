@@ -11,6 +11,7 @@ import (
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -118,6 +119,52 @@ func TestClaimNextClaimsOnlyRunnable(t *testing.T) {
 		if w.Status != model.WorkflowRunning || w.LeasedBy != "worker-1" || w.LeaseExpiry.Before(now.Add(30*time.Second)) {
 			t.Errorf("claim not fenced: %+v", w)
 		}
+	}
+}
+
+func TestWorkflowInstanceContextModeDefaultsFull(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	w := newTestInstance("11111111-1111-7111-8111-111111111111", model.WorkflowWaiting, "")
+	insertInstance(t, db, w)
+
+	got, err := repository.NewInstanceRepository(db).GetByID(context.Background(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContextMode != model.ContextModeFull {
+		t.Errorf("ContextMode = %q, want full", got.ContextMode)
+	}
+}
+
+func TestNodeContextHistoryRoundTrip(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	w := newTestInstance("11111111-1111-7111-8111-111111111112", model.WorkflowWaiting, "")
+	insertInstance(t, db, w)
+	now := time.Now().UTC()
+	row := repository.NodeContextHistoryModel{
+		ID:                 "99999999-9999-7999-8999-999999999999",
+		WorkflowInstanceID: w.ID,
+		OccurrenceID:       "occurrence-1",
+		NodeID:             "11111111-1111-7111-8111-111111111101",
+		Attempt:            2,
+		IsAnchor:           true,
+		Snapshot:           datatypes.JSON(`{"a":1}`),
+		Diff:               datatypes.JSON(`{"set":{},"unset":[]}`),
+		CreatedAt:          now,
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	var got repository.NodeContextHistoryModel
+	if err := db.Where("id = ?", row.ID).First(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.WorkflowInstanceID != row.WorkflowInstanceID || got.OccurrenceID != row.OccurrenceID ||
+		got.Attempt != row.Attempt || !got.IsAnchor || string(got.Snapshot) != string(row.Snapshot) ||
+		string(got.Diff) != string(row.Diff) {
+		t.Errorf("history row = %+v, want %+v", got, row)
 	}
 }
 

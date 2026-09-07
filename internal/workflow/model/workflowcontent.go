@@ -16,6 +16,9 @@ type WorkflowContent struct {
 	StartNodeID string
 	Keys        map[string]string
 	Nodes       []*NodeContent
+	// ContextMode is an optional per-workflow override of the global lean
+	// context default. It is nil when the definition omits the field.
+	ContextMode *string
 	// StatusUpdate is the optional webhook notification configuration; nil
 	// when the definition publishes no status updates.
 	StatusUpdate *StatusUpdateConfig
@@ -79,7 +82,17 @@ func ParseWorkflowContent(raw []byte, limits NodeLimits) (*WorkflowContent, erro
 	if err != nil {
 		return nil, err
 	}
-	wc := &WorkflowContent{StartNodeID: *wf.StartNodeID, Keys: keys, Nodes: nodes, StatusUpdate: statusUpdate}
+	contextMode, err := ParseContextMode(raw)
+	if err != nil {
+		return nil, err
+	}
+	wc := &WorkflowContent{
+		StartNodeID:  *wf.StartNodeID,
+		Keys:         keys,
+		Nodes:        nodes,
+		ContextMode:  contextMode,
+		StatusUpdate: statusUpdate,
+	}
 	if err := ValidateWorkflowContent(wc); err != nil {
 		return nil, err
 	}
@@ -92,6 +105,9 @@ func ParseWorkflowContent(raw []byte, limits NodeLimits) (*WorkflowContent, erro
 func ValidateWorkflowContent(wc *WorkflowContent) error {
 	if wc == nil {
 		return errors.New("workflow content is required")
+	}
+	if wc.ContextMode != nil && *wc.ContextMode != ContextModeFull && *wc.ContextMode != ContextModeLean {
+		return fmt.Errorf("workflow context_mode %q must be full or lean", *wc.ContextMode)
 	}
 	if !ids.Valid(wc.StartNodeID) {
 		return errors.New("workflow requires a valid start_node_id")

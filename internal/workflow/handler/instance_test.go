@@ -119,7 +119,8 @@ func TestInstanceStatus(t *testing.T) {
 	inst := model.WorkflowInstance{
 		ID: instanceID, WorkflowDefinitionID: wfDefID,
 		Status: model.WorkflowWaiting, WaitingReason: model.WaitingReasonInput,
-		CreatedBy: instanceID, UpdatedBy: instanceID,
+		ContextMode: model.ContextModeLean,
+		CreatedBy:   instanceID, UpdatedBy: instanceID,
 		Frame:     json.RawMessage(`{"current_node_id":"x"}`),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -133,6 +134,9 @@ func TestInstanceStatus(t *testing.T) {
 	var resp InstanceStatusResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
+	}
+	if resp.ContextMode != model.ContextModeLean {
+		t.Errorf("context_mode = %q, want lean", resp.ContextMode)
 	}
 	if resp.Status != "waiting" || resp.WaitingReason == nil || *resp.WaitingReason != "input" {
 		t.Errorf("resp = %+v", resp)

@@ -61,6 +61,7 @@ type WorkflowRequest struct {
 type WorkflowInstance struct {
 	ID                   string
 	WorkflowDefinitionID string
+	ContextMode          string
 	Status               WorkflowStatus
 	WaitingReason        WaitingReason
 	PauseRequested       bool
@@ -80,6 +81,53 @@ type WorkflowInstance struct {
 	UpdatedBy            string
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+}
+
+// HistoryCursor identifies a history row using its stable database ordering.
+// The id tie-breaker keeps cursor comparisons deterministic when rows share a
+// timestamp.
+type HistoryCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// Before reports whether c sorts before other.
+func (c HistoryCursor) Before(other HistoryCursor) bool {
+	if c.CreatedAt.Before(other.CreatedAt) {
+		return true
+	}
+	return c.CreatedAt.Equal(other.CreatedAt) && c.ID < other.ID
+}
+
+// AtOrBefore reports whether c sorts at or before other.
+func (c HistoryCursor) AtOrBefore(other HistoryCursor) bool {
+	return c.Before(other) || (c.CreatedAt.Equal(other.CreatedAt) && c.ID == other.ID)
+}
+
+// NodeContextHistory is one immutable lean-context anchor or diff.
+type NodeContextHistory struct {
+	ID                 string
+	WorkflowInstanceID string
+	OccurrenceID       string
+	NodeID             string
+	Attempt            int
+	IsAnchor           bool
+	Snapshot           json.RawMessage
+	Diff               json.RawMessage
+	Superseded         bool
+	CreatedAt          time.Time
+}
+
+// Cursor returns history row's ordering cursor.
+func (h NodeContextHistory) Cursor() HistoryCursor {
+	return HistoryCursor{CreatedAt: h.CreatedAt, ID: h.ID}
+}
+
+// LeanOptions configures lean-context defaults and replay limits.
+type LeanOptions struct {
+	LeanContextDefault bool
+	AnchorEvery        int
+	ReplayMax          int
 }
 
 // NodeInstance is a single occurrence of a node within a workflow instance.

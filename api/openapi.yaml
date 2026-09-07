@@ -6,6 +6,9 @@ info:
     Durable PostgreSQL-backed workflow engine. Definitions are immutable;
     new versions reference the previous version. Instances run asynchronously
     and expose status, context, input, and node-level debugging APIs.
+    Lean-context mode stores per-node context as replayable set/unset diffs
+    with periodic anchors. Fleet default: SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT
+    (also SIMPWF_ENGINE_LEAN_ANCHOR_EVERY, SIMPWF_ENGINE_LEAN_REPLAY_MAX).
 servers:
   - url: /
 tags:
@@ -645,7 +648,12 @@ components:
       properties:
         name: { type: string }
         previous_version_id: { type: string, format: uuid, nullable: true }
-        content: { type: object }
+        content:
+          type: object
+          description: |
+            Workflow content. Optional top-level `context_mode: full|lean`
+            overrides the SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT fleet default
+            and is snapshotted onto each created instance.
     WorkflowDefinition:
       type: object
       required: [id, name, version, lineage_id, content, created_by, updated_by, created_at, updated_at]
@@ -709,10 +717,14 @@ components:
         total_pages: { type: integer }
     InstanceStatus:
       type: object
-      required: [id, workflow_definition_id, status, waiting_reason, pause_requested, termination_pending, attempt, counters, created_by, updated_by, created_at, updated_at]
+      required: [id, workflow_definition_id, context_mode, status, waiting_reason, pause_requested, termination_pending, attempt, counters, created_by, updated_by, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         workflow_definition_id: { type: string, format: uuid }
+        context_mode:
+          type: string
+          enum: [full, lean]
+          description: Snapshotted at instance create from the definition context_mode or SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT
         status: { type: string, enum: [waiting, running, paused, finished, failed, stopped] }
         waiting_reason: { type: string, nullable: true }
         pause_requested: { type: boolean }

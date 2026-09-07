@@ -178,7 +178,7 @@ func TestDispatcherHeartbeatCancelsStoppedInstance(t *testing.T) {
 }
 
 func TestCancellationRegistryConcurrent(t *testing.T) {
-	e := engine.NewEngine(nil, nil, executor.NewHookRunner(nil), model.Limits{}, nil, "test")
+	e := engine.NewEngine(nil, nil, executor.NewHookRunner(nil), model.Limits{}, nil, "test", model.LeanOptions{})
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
 		wg.Add(1)

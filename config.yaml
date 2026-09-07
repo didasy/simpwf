@@ -50,6 +50,11 @@ engine:
   claim_batch_size: 10
   max_output_bytes: 1048576
   max_redirects: 5
+  # Operator overrides: SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT,
+  # SIMPWF_ENGINE_LEAN_ANCHOR_EVERY, SIMPWF_ENGINE_LEAN_REPLAY_MAX.
+  lean_context_default: false
+  lean_anchor_every: 20
+  lean_replay_max: 500
   http_allowlist:
     - "127.0.0.1:8080"
     - "api.example.com"

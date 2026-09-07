@@ -13,6 +13,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"github.com/simpwf/workflow-engine/pkg/contextdiff"
 	"github.com/simpwf/workflow-engine/pkg/contextpath"
 	"github.com/simpwf/workflow-engine/pkg/ids"
 )
@@ -34,6 +35,7 @@ type Engine struct {
 	limits    model.Limits
 	loader    WorkflowLoader
 	actor     string
+	lean      model.LeanOptions
 	now       func() time.Time
 
 	mu      sync.RWMutex
@@ -48,6 +50,7 @@ func NewEngine(
 	limits model.Limits,
 	loader WorkflowLoader,
 	actor string,
+	lean model.LeanOptions,
 ) *Engine {
 	return &Engine{
 		instances: instances,
@@ -56,6 +59,7 @@ func NewEngine(
 		limits:    limits,
 		loader:    loader,
 		actor:     actor,
+		lean:      lean,
 		now:       time.Now,
 		cancels:   map[string]context.CancelFunc{},
 	}
@@ -159,13 +163,17 @@ func (e *Engine) enterGroup(ctx context.Context, cur model.WorkflowInstance, g *
 	}
 	preCtx, err := e.hooks.RunPre(ctx, nc, ctxMap)
 	if err != nil {
-		return e.failWithContext(ctx, cur, err, ctxMap)
+		return e.failWithContext(ctx, cur, err, ctxMap, nil)
 	}
 	if _, err := EnterGroup(frame, g, nc.ID); err != nil {
 		return e.fail(ctx, cur, "", err)
 	}
 	_ = e.appendEvent(ctx, cur.ID, "group_entered", map[string]any{"node_id": nc.ID})
-	return e.checkpoint(ctx, cur, frame, counters, preCtx, e.nextStatus(cur), "", "", nil)
+	return e.checkpoint(ctx, cur, frame, counters, preCtx, e.nextStatus(cur), "", "", nil, &contextCommit{
+		start:  ctxMap,
+		end:    preCtx,
+		nodeID: nc.ID,
+	})
 }
 
 // waitInput runs the input pre hook, creates the input node occurrence, and
@@ -179,18 +187,33 @@ func (e *Engine) waitInput(ctx context.Context, cur model.WorkflowInstance, fram
 	}
 	preCtx, err := e.hooks.RunPre(ctx, nc, ctxMap)
 	if err != nil {
-		return e.failWithContext(ctx, cur, err, ctxMap)
+		return e.failWithContext(ctx, cur, err, ctxMap, nil)
 	}
 	attempt := newAttempt(cur.ID, nc, now)
 	attempt.Status = model.NodeRunning
-	attempt.ContextBefore = marshal(preCtx)
+	if cur.ContextMode == "lean" {
+		attempt.ContextBefore = json.RawMessage("null")
+		diff, err := contextdiff.DiffMaps(ctxMap, preCtx)
+		if err != nil {
+			return e.fail(ctx, cur, "", err)
+		}
+		attempt.ContextAfter = diff.JSON()
+	} else {
+		attempt.ContextBefore = marshal(preCtx)
+	}
 	attempt.StartedAt = &now
 	if err := e.instances.InsertNodeInstance(ctx, attempt); err != nil {
 		return err
 	}
 	_ = e.appendEvent(ctx, cur.ID, "node_started", map[string]any{"node_id": nc.ID, "occurrence_id": attempt.ID, "attempt": attempt.Attempt})
 	_ = e.appendEvent(ctx, cur.ID, "input_waiting", map[string]any{"node_id": nc.ID, "occurrence_id": attempt.ID})
-	if err := e.inputCheckpoint(ctx, cur, frame, counters, preCtx); err != nil {
+	if err := e.inputCheckpoint(ctx, cur, frame, counters, preCtx, &contextCommit{
+		start:        ctxMap,
+		end:          preCtx,
+		occurrenceID: attempt.ID,
+		nodeID:       nc.ID,
+		attempt:      attempt.Attempt,
+	}); err != nil {
 		return err
 	}
 	// A stop may have fenced the input checkpoint; the parked attempt must
@@ -227,7 +250,11 @@ func (e *Engine) runNode(ctx context.Context, cur model.WorkflowInstance, g *wor
 		a := newAttempt(cur.ID, nc, now)
 		attempt = &a
 		attempt.Status = model.NodeRunning
-		attempt.ContextBefore = marshal(ctxMap)
+		if cur.ContextMode == "lean" {
+			attempt.ContextBefore = json.RawMessage("null")
+		} else {
+			attempt.ContextBefore = marshal(ctxMap)
+		}
 		attempt.StartedAt = &now
 		if err := e.instances.InsertNodeInstance(ctx, *attempt); err != nil {
 			return err
@@ -241,7 +268,11 @@ func (e *Engine) runNode(ctx context.Context, cur model.WorkflowInstance, g *wor
 		a := newAttempt(cur.ID, nc, now)
 		attempt = &a
 		attempt.Status = model.NodeRunning
-		attempt.ContextBefore = marshal(ctxMap)
+		if cur.ContextMode == "lean" {
+			attempt.ContextBefore = json.RawMessage("null")
+		} else {
+			attempt.ContextBefore = marshal(ctxMap)
+		}
 		attempt.StartedAt = &now
 		if err := e.instances.InsertNodeInstance(ctx, *attempt); err != nil {
 			return err
@@ -250,7 +281,11 @@ func (e *Engine) runNode(ctx context.Context, cur model.WorkflowInstance, g *wor
 		// Loop iteration: a new attempt of the same occurrence.
 		attempt.Attempt++
 		attempt.Status = model.NodeRunning
-		attempt.ContextBefore = marshal(ctxMap)
+		if cur.ContextMode == "lean" {
+			attempt.ContextBefore = json.RawMessage("null")
+		} else {
+			attempt.ContextBefore = marshal(ctxMap)
+		}
 		attempt.Output = json.RawMessage("null")
 		attempt.ContextAfter = json.RawMessage("null")
 		attempt.Error = ""
@@ -264,7 +299,14 @@ func (e *Engine) runNode(ctx context.Context, cur model.WorkflowInstance, g *wor
 		}
 	}
 	_ = e.appendEvent(ctx, cur.ID, "node_started", map[string]any{"node_id": nc.ID, "occurrence_id": attempt.ID, "attempt": attempt.Attempt})
-	return e.executeStep(ctx, cur, g, frame, counters, nc, attempt, ctxMap)
+	startCtx := ctxMap
+	if cur.ContextMode == "lean" {
+		startCtx, err = cloneContextMap(ctxMap)
+		if err != nil {
+			return e.fail(ctx, cur, "", err)
+		}
+	}
+	return e.executeStep(ctx, cur, g, frame, counters, nc, attempt, startCtx, ctxMap)
 }
 
 // recover handles an attempt left running by a dead worker: pure nodes and
@@ -298,8 +340,15 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 			frame.GroupStack = stack
 		}
 		attempt.Attempt++
+		if cur.ContextMode == "lean" {
+			attempt.ContextAfter = emptyDiffJSON()
+		}
 		attempt.Status = model.NodeRunning
-		attempt.ContextBefore = marshal(ctxMap)
+		if cur.ContextMode == "lean" {
+			attempt.ContextBefore = json.RawMessage("null")
+		} else {
+			attempt.ContextBefore = marshal(ctxMap)
+		}
 		attempt.StartedAt = &now
 		attempt.RecoveryResult = "retried"
 		attempt.UpdatedAt = now
@@ -310,7 +359,13 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 		if reconciledFrom != "" {
 			_ = e.appendEvent(ctx, cur.ID, "cursor_reconciled", map[string]any{"from_node": reconciledFrom, "to_node": attempt.NodeID, "occurrence_id": attempt.ID, "attempt": attempt.Attempt})
 		}
-		return e.inputCheckpoint(ctx, cur, frame, counters, ctxMap)
+		return e.inputCheckpoint(ctx, cur, frame, counters, ctxMap, &contextCommit{
+			start:        ctxMap,
+			end:          ctxMap,
+			occurrenceID: attempt.ID,
+			nodeID:       nc.ID,
+			attempt:      attempt.Attempt,
+		})
 	}
 
 	retry := attempt.Type == string(model.NodeTypeScript) || nc.RetryOnRecovery
@@ -318,23 +373,37 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 		if nc.OnFailure != nil {
 			recErr := &executor.NodeError{Node: nc, Reason: "recovery", Err: errors.New("node interrupted by recovery; retry_on_recovery=false")}
 			attempt.RecoveryResult = "failed"
-			return e.routeFailure(ctx, cur, g, frame, counters, nc, attempt, ctxMap, recErr, nil)
+			return e.routeFailure(ctx, cur, g, frame, counters, nc, attempt, ctxMap, ctxMap, recErr, nil)
 		}
 		attempt.Status = model.NodeFailed
 		attempt.Error = "node interrupted by recovery; retry_on_recovery=false"
 		attempt.RecoveryResult = "failed"
+		if cur.ContextMode == "lean" {
+			attempt.ContextBefore = json.RawMessage("null")
+			attempt.ContextAfter = emptyDiffJSON()
+		}
 		attempt.FinishedAt = &now
 		attempt.UpdatedAt = now
 		if err := e.instances.UpdateNodeInstance(ctx, *attempt); err != nil {
 			return err
 		}
 		_ = e.appendEvent(ctx, cur.ID, "node_failed", map[string]any{"node_id": nc.ID, "occurrence_id": attempt.ID, "error": attempt.Error})
-		return e.fail(ctx, cur, "", errors.New("node interrupted by recovery; retry_on_recovery=false"))
+		return e.failWithContext(ctx, cur, errors.New("node interrupted by recovery; retry_on_recovery=false"), ctxMap, &contextCommit{
+			start:        ctxMap,
+			end:          ctxMap,
+			occurrenceID: attempt.ID,
+			nodeID:       attempt.NodeID,
+			attempt:      attempt.Attempt,
+		})
 	}
 
 	attempt.Attempt++
 	attempt.Status = model.NodeRunning
-	attempt.ContextBefore = marshal(ctxMap)
+	if cur.ContextMode == "lean" {
+		attempt.ContextBefore = json.RawMessage("null")
+	} else {
+		attempt.ContextBefore = marshal(ctxMap)
+	}
 	attempt.Output = json.RawMessage("null")
 	attempt.ContextAfter = json.RawMessage("null")
 	attempt.Error = ""
@@ -351,16 +420,23 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 	if err := counters.Record(nc.ID, e.limits); err != nil {
 		return e.fail(ctx, cur, "", err)
 	}
-	return e.executeStep(ctx, cur, g, frame, counters, nc, attempt, ctxMap)
+	startCtx := ctxMap
+	if cur.ContextMode == "lean" {
+		startCtx, err = cloneContextMap(ctxMap)
+		if err != nil {
+			return e.fail(ctx, cur, "", err)
+		}
+	}
+	return e.executeStep(ctx, cur, g, frame, counters, nc, attempt, startCtx, ctxMap)
 }
 
 // executeStep runs the pre hook, the executor, and the post hook, persists
 // the attempt outcome, and commits the next cursor transition. Exited groups
 // run their post hooks innermost-first before the checkpoint.
-func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g *workflowGraph, frame *model.Frame, counters model.Counters, nc *model.NodeContent, attempt *model.NodeInstance, ctxMap map[string]any) error {
+func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g *workflowGraph, frame *model.Frame, counters model.Counters, nc *model.NodeContent, attempt *model.NodeInstance, startCtx map[string]any, ctxMap map[string]any) error {
 	preCtx, err := e.hooks.RunPre(ctx, nc, ctxMap)
 	if err != nil {
-		return e.failNode(ctx, cur, attempt, ctxMap, err)
+		return e.failNode(ctx, cur, attempt, startCtx, ctxMap, err)
 	}
 	ctxMap = preCtx
 
@@ -368,7 +444,7 @@ func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g 
 	if nc.InputData != nil {
 		v, err := contextpath.Get(ctxMap, *nc.InputData)
 		if err != nil {
-			return e.failNode(ctx, cur, attempt, ctxMap, err)
+			return e.failNode(ctx, cur, attempt, startCtx, ctxMap, err)
 		}
 		req.Vars = map[string]any{"input": v}
 	}
@@ -379,9 +455,9 @@ func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g 
 			return e.interrupted(ctx, cur, attempt)
 		}
 		if nc.OnFailure != nil {
-			return e.routeFailure(ctx, cur, g, frame, counters, nc, attempt, ctxMap, err, res)
+			return e.routeFailure(ctx, cur, g, frame, counters, nc, attempt, startCtx, ctxMap, err, res)
 		}
-		return e.failNode(ctx, cur, attempt, ctxMap, err)
+		return e.failNode(ctx, cur, attempt, startCtx, ctxMap, err)
 	}
 
 	next := nc.NextNode
@@ -390,17 +466,17 @@ func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g 
 	if nc.Type == model.NodeTypeConditions {
 		cr, ok := res.Output.(*executor.ConditionResult)
 		if !ok {
-			return e.failNode(ctx, cur, attempt, ctxMap, errors.New("conditions executor returned an invalid result"))
+			return e.failNode(ctx, cur, attempt, startCtx, ctxMap, errors.New("conditions executor returned an invalid result"))
 		}
 		if !cr.Matched {
-			return e.failNode(ctx, cur, attempt, ctxMap, fmt.Errorf("no condition matched in node %s", nc.ID))
+			return e.failNode(ctx, cur, attempt, startCtx, ctxMap, fmt.Errorf("no condition matched in node %s", nc.ID))
 		}
 		if cr.Key == "" {
 			next = ""
 		} else {
 			target, ok := g.KeyTarget(nc.ID, cr.Key)
 			if !ok {
-				return e.failNode(ctx, cur, attempt, ctxMap, fmt.Errorf("condition key %q of node %s is not defined in its workflow or group", cr.Key, nc.ID))
+				return e.failNode(ctx, cur, attempt, startCtx, ctxMap, fmt.Errorf("condition key %q of node %s is not defined in its workflow or group", cr.Key, nc.ID))
 			}
 			next = target
 		}
@@ -419,14 +495,23 @@ func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g 
 
 	postCtx, err := e.hooks.RunPost(ctx, nc, outCtx, hookOutput)
 	if err != nil {
-		return e.failNode(ctx, cur, attempt, outCtx, err)
+		return e.failNode(ctx, cur, attempt, startCtx, outCtx, err)
 	}
 	outCtx = postCtx
 
 	now := e.now()
 	attempt.Status = model.NodeFinished
 	attempt.Output = marshal(res.Output)
-	attempt.ContextAfter = marshal(outCtx)
+	if cur.ContextMode == "lean" {
+		diff, err := contextdiff.DiffMaps(startCtx, outCtx)
+		if err != nil {
+			return e.failNode(ctx, cur, attempt, startCtx, outCtx, err)
+		}
+		attempt.ContextBefore = json.RawMessage("null")
+		attempt.ContextAfter = diff.JSON()
+	} else {
+		attempt.ContextAfter = marshal(outCtx)
+	}
 	attempt.FinishedAt = &now
 	attempt.UpdatedAt = now
 	if err := e.instances.UpdateNodeInstance(ctx, *attempt); err != nil {
@@ -445,16 +530,29 @@ func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g 
 			// The child attempt is already finished; the failure is a
 			// structural hook failure. Preserve the latest context instead
 			// of rolling back to the last checkpoint.
-			return e.failWithContext(ctx, cur, err, finalCtx)
+			return e.failWithContext(ctx, cur, err, finalCtx, &contextCommit{
+				start:        startCtx,
+				end:          finalCtx,
+				occurrenceID: attempt.ID,
+				nodeID:       attempt.NodeID,
+				attempt:      attempt.Attempt,
+			})
 		}
 	}
 	for _, gid := range exited {
 		_ = e.appendEvent(ctx, cur.ID, "group_exited", map[string]any{"node_id": gid})
 	}
-	if done {
-		return e.checkpoint(ctx, cur, frame, counters, finalCtx, model.WorkflowFinished, "", "", &now)
+	commit := &contextCommit{
+		start:        startCtx,
+		end:          finalCtx,
+		occurrenceID: attempt.ID,
+		nodeID:       attempt.NodeID,
+		attempt:      attempt.Attempt,
 	}
-	return e.checkpoint(ctx, cur, frame, counters, finalCtx, e.nextStatus(cur), "", "", nil)
+	if done {
+		return e.checkpoint(ctx, cur, frame, counters, finalCtx, model.WorkflowFinished, "", "", &now, commit)
+	}
+	return e.checkpoint(ctx, cur, frame, counters, finalCtx, e.nextStatus(cur), "", "", nil, commit)
 }
 
 // ExitedGroupLookup resolves a group node by id for post-exit hooks.
@@ -487,7 +585,7 @@ func RunExitedGroupPosts(ctx context.Context, hooks *executor.HookRunner, lookup
 // node, stores structured failure details at on_failure.output_property in context,
 // advances the frame to on_failure.next_node without running post_script, and
 // checkpoints the workflow in a runnable/waiting state without workflow error.
-func (e *Engine) routeFailure(ctx context.Context, cur model.WorkflowInstance, g *workflowGraph, frame *model.Frame, counters model.Counters, nc *model.NodeContent, attempt *model.NodeInstance, ctxMap map[string]any, cause error, res *executor.Result) error {
+func (e *Engine) routeFailure(ctx context.Context, cur model.WorkflowInstance, g *workflowGraph, frame *model.Frame, counters model.Counters, nc *model.NodeContent, attempt *model.NodeInstance, startCtx map[string]any, ctxMap map[string]any, cause error, res *executor.Result) error {
 	reason := "error"
 	var ne *executor.NodeError
 	if errors.As(cause, &ne) && ne.Reason != "" {
@@ -518,7 +616,16 @@ func (e *Engine) routeFailure(ctx context.Context, cur model.WorkflowInstance, g
 	} else {
 		attempt.Output = json.RawMessage("null")
 	}
-	attempt.ContextAfter = marshal(outCtx)
+	if cur.ContextMode == "lean" {
+		diff, err := contextdiff.DiffMaps(startCtx, outCtx)
+		if err != nil {
+			return e.failNode(ctx, cur, attempt, startCtx, outCtx, err)
+		}
+		attempt.ContextBefore = json.RawMessage("null")
+		attempt.ContextAfter = diff.JSON()
+	} else {
+		attempt.ContextAfter = marshal(outCtx)
+	}
 	attempt.FinishedAt = &now
 	attempt.UpdatedAt = now
 	if err := e.instances.UpdateNodeInstance(ctx, *attempt); err != nil {
@@ -546,31 +653,55 @@ func (e *Engine) routeFailure(ctx context.Context, cur model.WorkflowInstance, g
 	if len(exited) > 0 {
 		finalCtx, err = RunExitedGroupPosts(ctx, e.hooks, g, exited, outCtx)
 		if err != nil {
-			return e.failWithContext(ctx, cur, err, finalCtx)
+			return e.failWithContext(ctx, cur, err, finalCtx, &contextCommit{
+				start:        startCtx,
+				end:          finalCtx,
+				occurrenceID: attempt.ID,
+				nodeID:       attempt.NodeID,
+				attempt:      attempt.Attempt,
+			})
 		}
 	}
 	for _, gid := range exited {
 		_ = e.appendEvent(ctx, cur.ID, "group_exited", map[string]any{"node_id": gid})
 	}
 	if done {
-		return e.checkpoint(ctx, cur, frame, counters, finalCtx, model.WorkflowFinished, "", "", &now)
+		return e.checkpoint(ctx, cur, frame, counters, finalCtx, model.WorkflowFinished, "", "", &now, nil)
 	}
-	return e.checkpoint(ctx, cur, frame, counters, finalCtx, e.nextStatus(cur), "", "", nil)
+	return e.checkpoint(ctx, cur, frame, counters, finalCtx, e.nextStatus(cur), "", "", nil, nil)
 }
 
 // failNode marks the running attempt failed and fails the workflow.
-func (e *Engine) failNode(ctx context.Context, cur model.WorkflowInstance, attempt *model.NodeInstance, ctxMap map[string]any, cause error) error {
+func (e *Engine) failNode(ctx context.Context, cur model.WorkflowInstance, attempt *model.NodeInstance, startCtx map[string]any, ctxMap map[string]any, cause error) error {
 	now := e.now()
 	attempt.Status = model.NodeFailed
 	attempt.Error = cause.Error()
-	attempt.ContextAfter = marshal(ctxMap)
+	if cur.ContextMode == "lean" {
+		diff, err := contextdiff.DiffMaps(startCtx, ctxMap)
+		if err != nil {
+			return err
+		}
+		attempt.ContextBefore = json.RawMessage("null")
+		attempt.ContextAfter = diff.JSON()
+	} else {
+		attempt.ContextAfter = marshal(ctxMap)
+	}
 	attempt.FinishedAt = &now
 	attempt.UpdatedAt = now
 	if err := e.instances.UpdateNodeInstance(ctx, *attempt); err != nil {
 		return err
 	}
 	_ = e.appendEvent(ctx, cur.ID, "node_failed", map[string]any{"node_id": attempt.NodeID, "occurrence_id": attempt.ID, "error": cause.Error()})
-	return e.fail(ctx, cur, "", cause)
+	if cur.ContextMode != "lean" {
+		return e.fail(ctx, cur, "", cause)
+	}
+	return e.failWithContext(ctx, cur, cause, ctxMap, &contextCommit{
+		start:        startCtx,
+		end:          ctxMap,
+		occurrenceID: attempt.ID,
+		nodeID:       attempt.NodeID,
+		attempt:      attempt.Attempt,
+	})
 }
 
 // interrupted cleans up an attempt whose executor was cancelled. When a stop
@@ -607,13 +738,13 @@ func (e *Engine) fail(ctx context.Context, cur model.WorkflowInstance, _ string,
 	if err != nil {
 		ctxMap = map[string]any{}
 	}
-	return e.failWithContext(ctx, cur, cause, ctxMap)
+	return e.failWithContext(ctx, cur, cause, ctxMap, nil)
 }
 
 // failWithContext commits a failed terminal state with the cause, persisting
 // the given context instead of the last checkpoint. Structural hook failures
 // (group pre/post) use it so the latest completed context survives.
-func (e *Engine) failWithContext(ctx context.Context, cur model.WorkflowInstance, cause error, ctxMap map[string]any) error {
+func (e *Engine) failWithContext(ctx context.Context, cur model.WorkflowInstance, cause error, ctxMap map[string]any, commit *contextCommit) error {
 	now := e.now()
 	_ = e.appendEvent(ctx, cur.ID, "workflow_failed", map[string]any{"error": cause.Error()})
 	frame, ferr := model.ParseFrame(cur.Frame)
@@ -624,11 +755,26 @@ func (e *Engine) failWithContext(ctx context.Context, cur model.WorkflowInstance
 	if cerr != nil {
 		counters = model.Counters{}
 	}
-	return e.checkpoint(ctx, cur, &frame, counters, ctxMap, model.WorkflowFailed, "", cause.Error(), &now)
+	if cur.ContextMode == "lean" && commit == nil {
+		startCtx, err := unmarshalContext(cur.Context)
+		if err != nil {
+			startCtx = map[string]any{}
+		}
+		commit = &contextCommit{start: startCtx, end: ctxMap}
+	}
+	return e.checkpoint(ctx, cur, &frame, counters, ctxMap, model.WorkflowFailed, "", cause.Error(), &now, commit)
 }
 
 // checkpoint commits the transition under the worker's lease and revision.
-func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, frame *model.Frame, counters model.Counters, ctxMap map[string]any, status model.WorkflowStatus, reason model.WaitingReason, errMsg string, finished *time.Time) error {
+func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, frame *model.Frame, counters model.Counters, ctxMap map[string]any, status model.WorkflowStatus, reason model.WaitingReason, errMsg string, finished *time.Time, commit *contextCommit) error {
+	var history *model.NodeContextHistory
+	var err error
+	if cur.ContextMode == "lean" {
+		history, err = e.historyForCommit(ctx, cur, commit, ctxMap)
+		if err != nil {
+			return err
+		}
+	}
 	cp := repository.Checkpoint{
 		InstanceID:           cur.ID,
 		WorkerID:             cur.LeasedBy,
@@ -643,8 +789,9 @@ func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, fra
 		Context:              marshal(ctxMap),
 		Error:                errMsg,
 		FinishedAt:           finished,
+		History:              history,
 	}
-	err := e.instances.Checkpoint(ctx, cp)
+	err = e.instances.Checkpoint(ctx, cp)
 	if errors.Is(err, repository.ErrLeaseLost) {
 		// Stop won the race; the worker is fenced and aborts silently.
 		return nil
@@ -653,12 +800,58 @@ func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, fra
 }
 
 // inputCheckpoint parks the cursor waiting (or paused) on an input node.
-func (e *Engine) inputCheckpoint(ctx context.Context, cur model.WorkflowInstance, frame *model.Frame, counters model.Counters, ctxMap map[string]any) error {
+func (e *Engine) inputCheckpoint(ctx context.Context, cur model.WorkflowInstance, frame *model.Frame, counters model.Counters, ctxMap map[string]any, commit *contextCommit) error {
 	status := model.WorkflowWaiting
 	if cur.PauseRequested {
 		status = model.WorkflowPaused
 	}
-	return e.checkpoint(ctx, cur, frame, counters, ctxMap, status, model.WaitingReasonInput, "", nil)
+	return e.checkpoint(ctx, cur, frame, counters, ctxMap, status, model.WaitingReasonInput, "", nil, commit)
+}
+
+type contextCommit struct {
+	start        map[string]any
+	end          map[string]any
+	occurrenceID string
+	nodeID       string
+	attempt      int
+}
+
+func (e *Engine) historyForCommit(ctx context.Context, cur model.WorkflowInstance, commit *contextCommit, endCtx map[string]any) (*model.NodeContextHistory, error) {
+	if commit == nil {
+		startCtx, err := unmarshalContext(cur.Context)
+		if err != nil {
+			startCtx = map[string]any{}
+		}
+		commit = &contextCommit{start: startCtx, end: endCtx}
+	}
+	if commit.end == nil {
+		commit.end = endCtx
+	}
+	diff, err := contextdiff.DiffMaps(commit.start, commit.end)
+	if err != nil {
+		return nil, err
+	}
+	history, err := e.instances.LoadHistory(ctx, cur.ID)
+	if err != nil {
+		return nil, err
+	}
+	row := &model.NodeContextHistory{
+		OccurrenceID: commit.occurrenceID,
+		NodeID:       commit.nodeID,
+		Attempt:      commit.attempt,
+		Snapshot:     json.RawMessage("null"),
+		Diff:         diff.JSON(),
+	}
+	if e.lean.AnchorEvery > 0 && (len(history)+1)%e.lean.AnchorEvery == 0 {
+		row.IsAnchor = true
+		row.Snapshot = marshal(commit.end)
+		row.Diff = json.RawMessage("null")
+	}
+	return row, nil
+}
+
+func emptyDiffJSON() json.RawMessage {
+	return json.RawMessage(`{"set":{},"unset":[]}`)
 }
 
 // nextStatus decides the post-checkpoint status, honoring a deferred pause.
@@ -730,4 +923,8 @@ func unmarshalContext(raw json.RawMessage) (map[string]any, error) {
 		return nil, fmt.Errorf("engine: parse instance context: %w", err)
 	}
 	return m, nil
+}
+
+func cloneContextMap(ctxMap map[string]any) (map[string]any, error) {
+	return unmarshalContext(marshal(ctxMap))
 }

@@ -56,6 +56,7 @@ func setupEngineDB(t *testing.T) *gorm.DB {
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
 		&repository.WorkflowInstanceModel{},
+		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{},
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
@@ -64,7 +65,7 @@ func setupEngineDB(t *testing.T) *gorm.DB {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 	if err := db.Exec(`TRUNCATE TABLE
-		status_update_outbox, input_deliveries, workflow_instance_events, node_instances,
+		node_context_history, status_update_outbox, input_deliveries, workflow_instance_events, node_instances,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users RESTART IDENTITY`).Error; err != nil {
 		t.Fatalf("truncate tables: %v", err)
@@ -85,7 +86,14 @@ func testEngine(t *testing.T, db *gorm.DB, limits model.Limits) (*engine.Engine,
 func testEngineWithExec(t *testing.T, db *gorm.DB, limits model.Limits, execLimits executor.Limits) (*engine.Engine, repository.InstanceRepository) {
 	t.Helper()
 	instances := repository.NewInstanceRepository(db)
-	e := engine.NewEngine(instances, executor.NewExecutors(execLimits, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID)
+	e := engine.NewEngine(instances, executor.NewExecutors(execLimits, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID, model.LeanOptions{})
+	return e, instances
+}
+
+func testEngineWithOptions(t *testing.T, db *gorm.DB, limits model.Limits, opts model.LeanOptions) (*engine.Engine, repository.InstanceRepository) {
+	t.Helper()
+	instances := repository.NewInstanceRepositoryWithOptions(db, opts)
+	e := engine.NewEngine(instances, executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID, opts)
 	return e, instances
 }
 
@@ -178,6 +186,10 @@ func join(parts []string) string {
 
 // insertInstance creates a runnable instance at the given start node.
 func insertInstance(t *testing.T, db *gorm.DB, wfID string, start string, ctxMap map[string]any) string {
+	return insertInstanceWithMode(t, db, wfID, start, ctxMap, "")
+}
+
+func insertInstanceWithMode(t *testing.T, db *gorm.DB, wfID string, start string, ctxMap map[string]any, mode string) string {
 	t.Helper()
 	id := newEngineID()
 	ctxRaw, _ := json.Marshal(ctxMap)
@@ -185,6 +197,7 @@ func insertInstance(t *testing.T, db *gorm.DB, wfID string, start string, ctxMap
 	w := model.WorkflowInstance{
 		ID:                   id,
 		WorkflowDefinitionID: wfID,
+		ContextMode:          mode,
 		Status:               model.WorkflowWaiting,
 		WaitingReason:        model.WaitingReasonRunnable,
 		Frame:                frameRaw,

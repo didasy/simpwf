@@ -25,6 +25,7 @@ func main() {
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
 		&repository.WorkflowInstanceModel{},
+		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{},
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
@@ -75,6 +76,8 @@ func foreignKeyDDL() string {
 	// node_instances
 	add("node_instances", "fk_node_instances_workflow_instance", "\"workflow_instance_id\"", "workflow_instances", "\"id\"")
 	add("node_instances", "fk_node_instances_node_definition", "\"node_definition_id\"", "node_definitions", "\"id\"")
+	// node_context_history
+	add("node_context_history", "fk_node_context_history_workflow_instance", "\"workflow_instance_id\"", "workflow_instances", "\"id\"")
 	// workflow_instance_events
 	add("workflow_instance_events", "fk_wf_instance_events_workflow_instance", "\"workflow_instance_id\"", "workflow_instances", "\"id\"")
 	add("workflow_instance_events", "fk_wf_instance_events_created_by", "\"created_by\"", "users", "\"id\"")

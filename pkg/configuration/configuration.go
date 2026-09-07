@@ -95,6 +95,9 @@ type Engine struct {
 	MaxRedirects         int           `mapstructure:"max_redirects"`
 	HTTPAllowlist        []string      `mapstructure:"http_allowlist"`
 	ExecAllowlist        []string      `mapstructure:"exec_allowlist"`
+	LeanContextDefault   bool          `mapstructure:"lean_context_default"`
+	LeanAnchorEvery      int           `mapstructure:"lean_anchor_every"`
+	LeanReplayMax        int           `mapstructure:"lean_replay_max"`
 }
 
 // System holds the configured audit actor (no auth yet).
@@ -137,6 +140,15 @@ func Load(opts ...Option) (*Config, error) {
 
 	v := viper.New()
 	setDefaults(v)
+	v.SetEnvPrefix(envPrefix)
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	// auth.api_token is exposed as SIMPWF_API_TOKEN (not
+	// SIMPWF_AUTH_API_TOKEN) to match the requested env contract.
+	_ = v.BindEnv("auth.api_token", "SIMPWF_API_TOKEN")
+	// Lean settings are operator toggles and must override config.yaml.
+	_ = v.BindEnv("engine.lean_context_default", "SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT")
+	_ = v.BindEnv("engine.lean_anchor_every", "SIMPWF_ENGINE_LEAN_ANCHOR_EVERY")
+	_ = v.BindEnv("engine.lean_replay_max", "SIMPWF_ENGINE_LEAN_REPLAY_MAX")
 
 	fileRead := false
 	if _, err := os.Stat(path); err == nil {
@@ -146,15 +158,7 @@ func Load(opts ...Option) (*Config, error) {
 		}
 		fileRead = true
 	}
-
-	// Config file takes priority over environment variables: env vars are
-	// consulted only when no config file was read.
 	if !fileRead {
-		v.SetEnvPrefix(envPrefix)
-		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-		// auth.api_token is exposed as SIMPWF_API_TOKEN (not
-		// SIMPWF_AUTH_API_TOKEN) to match the requested env contract.
-		_ = v.BindEnv("auth.api_token", "SIMPWF_API_TOKEN")
 		v.AutomaticEnv()
 	}
 
@@ -205,6 +209,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.max_redirects", 0)
 	v.SetDefault("engine.http_allowlist", []string{})
 	v.SetDefault("engine.exec_allowlist", []string{})
+	v.SetDefault("engine.lean_context_default", false)
+	v.SetDefault("engine.lean_anchor_every", 20)
+	v.SetDefault("engine.lean_replay_max", 500)
 	v.SetDefault("system.user_id", "00000000-0000-7000-8000-000000000001")
 	v.SetDefault("system.name", "system")
 	v.SetDefault("system.email", "system@localhost")
@@ -225,6 +232,12 @@ func (c *Config) validate() error {
 	}
 	if c.Engine.ConditionTimeout <= 0 {
 		return errors.New("configuration: engine.condition_timeout must be > 0")
+	}
+	if c.Engine.LeanAnchorEvery <= 0 {
+		return errors.New("configuration: engine.lean_anchor_every must be > 0")
+	}
+	if c.Engine.LeanReplayMax <= 0 {
+		return errors.New("configuration: engine.lean_replay_max must be > 0")
 	}
 	if strings.TrimSpace(c.Infra.RabbitMQ.DSN) != "" {
 		if strings.TrimSpace(c.Infra.RabbitMQ.InputQueue) == "" {
