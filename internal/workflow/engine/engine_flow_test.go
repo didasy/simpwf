@@ -1183,3 +1183,117 @@ func TestEngineHTTP500WithoutOnFailureSucceeds(t *testing.T) {
 		t.Errorf("attempt.Status = %s, want finished", attempt.Status)
 	}
 }
+
+func TestEngineRecoveryReconcilesStaleCursorToParkedInput(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "a", "context.x = 1; return 1;", n2, "out", nil),
+		nodeJSON(n2, "input", "ask", "", n3, "", map[string]any{"channel": "http", "context_path": "gate"}),
+		nodeJSON(n3, "script", "b", "return 2;", "", "done", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	e, instances := testEngine(t, db, model.DefaultLimits())
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("status = %s/%s, want parked waiting/input", cur.Status, cur.WaitingReason)
+	}
+	// Simulate rollback-away: cursor moved to n1 while the n2 input
+	// attempt stayed running; resume made it claimable again.
+	if err := db.Exec(`UPDATE workflow_instances SET frame = ?, status = ?, waiting_reason = ?,
+		revision = revision + 1, updated_at = now() WHERE id = ?`,
+		`{"current_node_id":"`+n1+`"}`, string(model.WorkflowWaiting),
+		string(model.WaitingReasonRunnable), instanceID).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	claimed, err := instances.ClaimNext(ctx, "test-worker", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v, want 1", len(claimed), err)
+	}
+	if err := e.Process(ctx, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	got, err := instances.GetByID(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := model.ParseFrame(got.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.CurrentNodeID != n2 {
+		t.Errorf("cursor = %q, want %q (reconciled to parked input)", frame.CurrentNodeID, n2)
+	}
+	if got.Status != model.WorkflowWaiting || got.WaitingReason != model.WaitingReasonInput {
+		t.Errorf("status = %s/%s, want waiting/input", got.Status, got.WaitingReason)
+	}
+	attempt, err := instances.GetNodeInstanceByNode(ctx, instanceID, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.Status != model.NodeRunning || attempt.Attempt != 2 {
+		t.Errorf("attempt = %s/%d, want running/2", attempt.Status, attempt.Attempt)
+	}
+	events, err := instances.ListEvents(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type != "cursor_reconciled" {
+			continue
+		}
+		found = true
+		var data map[string]any
+		if err := json.Unmarshal(ev.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["from_node"] != n1 || data["to_node"] != n2 {
+			t.Errorf("cursor_reconciled data = %v, want from %s to %s", data, n1, n2)
+		}
+	}
+	if !found {
+		t.Error("no cursor_reconciled event, want one")
+	}
+}
+
+func TestEngineRecoveryReconcilesGroupedInputStack(t *testing.T) {
+	db := setupEngineDB(t)
+	grp := `{"id": "` + g1 + `", "type": "group", "name": "g", "start_node_id": "` + n2 + `", "next_node": "` + n3 + `", "nodes": [
+		{"id": "` + n2 + `", "type": "input", "name": "ask", "channel": "http", "context_path": "gate", "next_node": ""},
+		{"id": "` + n4 + `", "type": "script", "name": "skip", "script": "return 0;", "next_node": ""}]}`
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "a", "context.x = 1; return 1;", g1, "out", nil),
+		grp,
+		nodeJSON(n3, "script", "b", "return 2;", "", "done", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	e, instances := testEngine(t, db, model.DefaultLimits())
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("status = %s/%s, want parked waiting/input", cur.Status, cur.WaitingReason)
+	}
+	frame0, _ := model.ParseFrame(cur.Frame)
+	if len(frame0.GroupStack) != 1 || frame0.GroupStack[0] != g1 {
+		t.Fatalf("parked stack = %v, want [%s]", frame0.GroupStack, g1)
+	}
+	if err := db.Exec(`UPDATE workflow_instances SET frame = ?, status = ?, waiting_reason = ?,
+		revision = revision + 1, updated_at = now() WHERE id = ?`,
+		`{"current_node_id":"`+n1+`"}`, string(model.WorkflowWaiting),
+		string(model.WaitingReasonRunnable), instanceID).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	claimed, err := instances.ClaimNext(ctx, "test-worker", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v, want 1", len(claimed), err)
+	}
+	if err := e.Process(ctx, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	got, _ := instances.GetByID(ctx, instanceID)
+	frame, _ := model.ParseFrame(got.Frame)
+	if frame.CurrentNodeID != n2 || len(frame.GroupStack) != 1 || frame.GroupStack[0] != g1 {
+		t.Errorf("frame = %+v, want current %s stack [%s]", frame, n2, g1)
+	}
+}

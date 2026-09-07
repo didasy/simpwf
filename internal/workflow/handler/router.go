@@ -70,6 +70,7 @@ func NewRouter(deps Deps) *gin.Engine {
 		group.POST("/:id/pause", instances.Pause)
 		group.POST("/:id/resume", instances.Resume)
 		group.POST("/:id/stop", instances.Stop)
+		group.POST("/:id/rollback", instances.Rollback)
 	}
 
 	return r

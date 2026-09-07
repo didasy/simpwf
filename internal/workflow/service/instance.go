@@ -46,6 +46,22 @@ type StatusDetail struct {
 	Instance              model.WorkflowInstance
 	CurrentNodeInstanceID *string
 	Attempt               int
+	// Nodes maps every workflow graph node id (groups included) to its
+	// occurrence state. Nil when the definition cannot be loaded, so the
+	// status response omits the map instead of failing.
+	Nodes map[string]NodeOccurrence
+}
+
+// NodeOccurrence is the per-node status view: the already-executed
+// occurrence id (nil when never ran) plus whether it is a valid rollback
+// target. Rollbackable is advisory and instance-aware (false unless the
+// instance itself is paused or failed); the rollback endpoint stays the
+// source of truth.
+type NodeOccurrence struct {
+	OccurrenceID *string
+	Status       string
+	Attempt      *int
+	Rollbackable bool
 }
 
 // NodeDebugDetail is the resolved node-debug view. Occurrences that never ran
@@ -81,6 +97,24 @@ type ControlResult struct {
 	Status             model.WorkflowStatus
 	PauseRequested     bool
 	TerminationPending bool
+}
+
+// RollbackRequest moves a paused or failed instance's cursor back to an
+// already-executed node occurrence. Reason is an optional audit annotation
+// recorded on the rollback event only.
+type RollbackRequest struct {
+	InstanceID         string
+	TargetOccurrenceID string
+	Reason             string
+}
+
+// RollbackResult reports the post-rollback cursor: the instance is always
+// paused, parked on CurrentNodeID with GroupStack recomputed from the
+// materialized definition.
+type RollbackResult struct {
+	Status        model.WorkflowStatus
+	CurrentNodeID string
+	GroupStack    []string
 }
 
 // Canceller interrupts the local in-flight transition of an instance. The
@@ -134,6 +168,15 @@ type InstanceService interface {
 	// commits, and signals local cancellation. Idempotent on stopped
 	// instances.
 	Stop(ctx context.Context, id, reason string) (*ControlResult, error)
+	// Rollback moves a paused or failed instance's cursor back to an
+	// already-executed node occurrence so the next resume re-executes
+	// forward from there. The instance is always paused afterwards and its
+	// context is restored from the target occurrence's ContextBefore.
+	// History is immutable; the next execution increments the target
+	// occurrence's attempt. A live parked input attempt never blocks the
+	// rollback: targeting the park itself is a no-op, any other target
+	// supersedes (closes) it atomically in the same transaction.
+	Rollback(ctx context.Context, req RollbackRequest) (*RollbackResult, error)
 }
 
 type instanceService struct {
@@ -226,6 +269,7 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string) (*Stat
 		return nil, err
 	}
 	d := &StatusDetail{Instance: *inst}
+	d.Nodes = s.statusNodes(ctx, inst)
 	frame, err := model.ParseFrame(inst.Frame)
 	if err != nil {
 		return d, nil
@@ -245,6 +289,104 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string) (*Stat
 
 func (s *instanceService) GetContext(ctx context.Context, id string) (*model.WorkflowInstance, error) {
 	return s.instances.GetByID(ctx, id)
+}
+
+// statusNodes builds the graph-node-id → occurrence map for the status
+// response. It returns nil when the definition cannot be loaded, parsed, or
+// materialized, so the status view degrades to omitting the map instead of
+// failing the whole call.
+func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowInstance) map[string]NodeOccurrence {
+	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
+	if err != nil {
+		return nil
+	}
+	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
+	if err != nil {
+		return nil
+	}
+	wc, err = s.materializer.Materialize(ctx, wc)
+	if err != nil {
+		return nil
+	}
+	ids := flattenNodeIDs(wc.Nodes)
+	if len(ids) == 0 {
+		return nil
+	}
+	occs, err := s.instances.ListNodeInstances(ctx, inst.ID)
+	if err != nil {
+		return nil
+	}
+	byNode := make(map[string]*model.NodeInstance, len(occs))
+	for i := range occs {
+		byNode[occs[i].NodeID] = &occs[i]
+	}
+	instanceGate := inst.Status == model.WorkflowPaused || inst.Status == model.WorkflowFailed
+	instanceGate = instanceGate && !inst.TerminationPending
+	out := make(map[string]NodeOccurrence, len(ids))
+	for _, id := range ids {
+		nc, err := findNode(wc.Nodes, id)
+		if err != nil {
+			continue
+		}
+		occ, ok := byNode[id]
+		if !ok {
+			out[id] = NodeOccurrence{Status: "not_started"}
+			continue
+		}
+		e := NodeOccurrence{Status: string(occ.Status)}
+		occID := occ.ID
+		e.OccurrenceID = &occID
+		attempt := occ.Attempt
+		e.Attempt = &attempt
+		e.Rollbackable = instanceGate && rollbackableOccurrence(nc.Type, occ)
+		out[id] = e
+	}
+	return out
+}
+
+// flattenNodeIDs lists every graph node id in the materialized tree,
+// including group nodes themselves and their nested children.
+func flattenNodeIDs(nodes []*model.NodeContent) []string {
+	var out []string
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		out = append(out, n.ID)
+		if n.Group != nil {
+			out = append(out, flattenNodeIDs(n.Group.Nodes)...)
+		}
+	}
+	return out
+}
+
+// rollbackableOccurrence mirrors the rollback endpoint's target validation:
+// group nodes never qualify (they have no occurrence), only terminal
+// occurrence states qualify, and the ContextBefore snapshot must parse as
+// a JSON object. The caller gates on instance status.
+func rollbackableOccurrence(typ model.NodeType, occ *model.NodeInstance) bool {
+	if typ == model.NodeTypeGroup {
+		return false
+	}
+	switch occ.Status {
+	case model.NodeFinished, model.NodeFailed, model.NodeStopped:
+	default:
+		return false
+	}
+	return restorableContext(occ.ContextBefore)
+}
+
+// restorableContext reports whether raw is a JSON object (the rollback
+// endpoint restores target.ContextBefore as the instance context).
+func restorableContext(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return false
+	}
+	return true
 }
 
 func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) (*model.WorkflowInstance, error) {
@@ -472,6 +614,192 @@ func (s *instanceService) instance(ctx context.Context, id string) (*model.Workf
 	return inst, nil
 }
 
+func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*RollbackResult, error) {
+	if strings.TrimSpace(req.InstanceID) == "" {
+		return nil, fmt.Errorf("%w: instance id is required", model.ErrInvalid)
+	}
+	if strings.TrimSpace(req.TargetOccurrenceID) == "" {
+		return nil, fmt.Errorf("%w: target_occurrence_id is required", model.ErrInvalid)
+	}
+	inst, err := s.instance(ctx, req.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	switch inst.Status {
+	case model.WorkflowPaused, model.WorkflowFailed:
+	default:
+		return nil, fmt.Errorf("%w: instance %s is not paused or failed", model.ErrConflict, req.InstanceID)
+	}
+	if inst.TerminationPending {
+		return nil, fmt.Errorf("%w: instance %s has termination pending", model.ErrConflict, req.InstanceID)
+	}
+
+	// The target is an already-executed node occurrence: its row carries
+	// the graph node id and the ContextBefore snapshot to restore. Nodes
+	// that never ran (NodeDebug "not_started") have no occurrence.
+	occ, err := s.instances.GetNodeInstance(ctx, inst.ID, req.TargetOccurrenceID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNodeInstanceNotFound) {
+			return nil, fmt.Errorf("%w: occurrence %q of instance %s", model.ErrNotFound, req.TargetOccurrenceID, req.InstanceID)
+		}
+		return nil, err
+	}
+	if occ.WorkflowInstanceID != inst.ID {
+		return nil, fmt.Errorf("%w: occurrence %q of instance %s", model.ErrNotFound, req.TargetOccurrenceID, req.InstanceID)
+	}
+
+	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+	}
+	wc, err = s.materializer.Materialize(ctx, wc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+	}
+	target, err := findNode(wc.Nodes, occ.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: occurrence node %q is not in the workflow definition", model.ErrInvalid, occ.NodeID)
+	}
+	if target.Type == model.NodeTypeGroup {
+		return nil, fmt.Errorf("%w: group nodes cannot be rollback targets", model.ErrInvalid)
+	}
+	running, rerr := s.instances.GetRunningNodeInstance(ctx, inst.ID)
+	if rerr != nil && !errors.Is(rerr, repository.ErrNodeInstanceNotFound) {
+		return nil, rerr
+	}
+	hasLive := rerr == nil
+
+	frame, err := model.ParseFrame(inst.Frame)
+	if err != nil {
+		return nil, err
+	}
+
+	// Self rollback: paused on the live park itself. No-op without writes.
+	if hasLive && inst.Status == model.WorkflowPaused &&
+		running.ID == occ.ID && frame.CurrentNodeID == target.ID {
+		return &RollbackResult{
+			Status:        model.WorkflowPaused,
+			CurrentNodeID: target.ID,
+			GroupStack:    frame.GroupStack,
+		}, nil
+	}
+	if target.Type == model.NodeTypeInput {
+		// Rolling back to an input node re-arms its wait as a fresh
+		// attempt of the same finished occurrence (delivery history stays
+		// attached for audit) so the next resume re-parks it and a fresh
+		// delivery with a new idempotency key is accepted. Any other live
+		// park is superseded (closed) atomically by the repository.
+		if occ.Status != model.NodeFinished {
+			return nil, fmt.Errorf("%w: input occurrence %q is not finished", model.ErrConflict, req.TargetOccurrenceID)
+		}
+	}
+	stack, err := groupStack(wc, occ.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+	}
+	var restore map[string]any
+	if err := json.Unmarshal(occ.ContextBefore, &restore); err != nil || restore == nil {
+		return nil, fmt.Errorf("%w: occurrence %q has no restorable context", model.ErrInvalid, req.TargetOccurrenceID)
+	}
+
+	// The park reason follows the target: input targets stay parked for
+	// their delivery, everything else becomes runnable. Rolling back to a
+	// finished input occurrence re-arms it as a fresh attempt of the same
+	// row (delivery history stays attached for audit), so a fresh
+	// Idempotency-Key is accepted on resume.
+	waitingReason := model.WaitingReasonRunnable
+	rearm := false
+	if target.Type == model.NodeTypeInput {
+		waitingReason = model.WaitingReasonInput
+		rearm = true
+	}
+	// Any live attempt other than the re-armed target is superseded: the
+	// repository closes it in the same transaction so the cursor and the
+	// park never diverge.
+	supersede := hasLive && (!rearm || running.ID != occ.ID)
+	supersededOccurrence := ""
+	supersededNode := ""
+	if supersede {
+		supersededOccurrence = running.ID
+		supersededNode = running.NodeID
+	}
+	rolled, err := s.instances.RollbackInstance(ctx, repository.RollbackUpdate{
+		InstanceID:           inst.ID,
+		Frame:                model.Frame{CurrentNodeID: target.ID, GroupStack: stack},
+		Context:              occ.ContextBefore,
+		Actor:                s.actor,
+		Reason:               req.Reason,
+		FromNode:             frame.CurrentNodeID,
+		ToNode:               target.ID,
+		ToOccurrence:         occ.ID,
+		WaitingReason:        waitingReason,
+		RearmInputOccurrence: rearm,
+		SupersedeRunning:     supersede,
+		SupersededOccurrence: supersededOccurrence,
+		SupersededNode:       supersededNode,
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrInstanceNotFound) {
+			return nil, fmt.Errorf("%w: instance %s", model.ErrNotFound, req.InstanceID)
+		}
+		if errors.Is(err, repository.ErrStatusConflict) {
+			return nil, fmt.Errorf("%w: instance %s is not paused or failed", model.ErrConflict, req.InstanceID)
+		}
+		return nil, err
+	}
+	newFrame, err := model.ParseFrame(rolled.Frame)
+	if err != nil {
+		return nil, err
+	}
+	return &RollbackResult{Status: rolled.Status, CurrentNodeID: newFrame.CurrentNodeID, GroupStack: newFrame.GroupStack}, nil
+}
+
+// findNode resolves a graph node id anywhere in the materialized tree.
+func findNode(nodes []*model.NodeContent, id string) (*model.NodeContent, error) {
+	for _, n := range nodes {
+		if n.ID == id {
+			return n, nil
+		}
+		if n.Group != nil {
+			if found, err := findNode(n.Group.Nodes, id); err == nil {
+				return found, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("service: unknown node %q in workflow graph", id)
+}
+
+// groupStack recomputes the ancestor group chain of a graph node by walking
+// the materialized definition from its start node. The stack holds the
+// enclosing groups outermost-first; a top-level node yields an empty stack.
+func groupStack(wc *model.WorkflowContent, id string) ([]string, error) {
+	if id == wc.StartNodeID {
+		if _, err := findNode(wc.Nodes, id); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	var walk func(nodes []*model.NodeContent, ancestors []string) ([]string, error)
+	walk = func(nodes []*model.NodeContent, ancestors []string) ([]string, error) {
+		for _, n := range nodes {
+			if n.ID == id {
+				return ancestors, nil
+			}
+			if n.Group != nil {
+				if stack, err := walk(n.Group.Nodes, append(ancestors, n.ID)); err == nil {
+					return stack, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("service: unknown node %q in workflow graph", id)
+	}
+	return walk(wc.Nodes, nil)
+}
+
 func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*model.InputDelivery, error) {
 	if strings.TrimSpace(req.IdempotencyKey) == "" {
 		return nil, fmt.Errorf("%w: Idempotency-Key header is required", model.ErrInvalid)
@@ -528,16 +856,16 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if inputNode.Channel != source {
 		return nil, fmt.Errorf("%w: input source %q does not match input node channel %q", model.ErrConflict, source, inputNode.Channel)
 	}
-	attempt, err := s.instances.GetNodeInstanceByNode(ctx, inst.ID, inputNode.ID)
+	attempt, err := s.instances.GetLiveNodeInstanceByNode(ctx, inst.ID, inputNode.ID)
 	if err != nil {
+		if errors.Is(err, repository.ErrNodeInstanceNotFound) {
+			return nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
+		}
 		return nil, err
 	}
 
 	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
 		return nil, fmt.Errorf("%w: instance %s is not waiting for input", model.ErrConflict, req.InstanceID)
-	}
-	if attempt.Status != model.NodeRunning {
-		return nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
 	}
 
 	ctxMap, err := unmarshalJSON(inst.Context)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1538,5 +1539,892 @@ func TestExternalCallFailureRoutesToInputAndResumes(t *testing.T) {
 	}
 	if finalCtxMap["final_result"] != "recovered_value" {
 		t.Errorf("final_result = %v, want 'recovered_value'", finalCtxMap["final_result"])
+	}
+}
+
+func TestRollbackPausedToPaused(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "context.x = 1; return 1;", n2, map[string]any{"output_property": "out1"}),
+		svcNodeJSON(n2, "script", "b", "context.y = 2; return 2;", "", map[string]any{"output_property": "out2"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	eng := svcTestEngine(t, db)
+
+	// Run only n1: claim + process once, then pause while waiting.
+	claimed, err := repo.ClaimNext(ctx, "rollback-worker", time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range claimed {
+		if w.ID == inst.ID {
+			if err := eng.Process(ctx, w); err != nil {
+				t.Fatalf("Process(n1) error = %v", err)
+			}
+		}
+	}
+	occ1, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatalf("GetNodeInstanceByNode(n1) error = %v", err)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID, Reason: "retry"})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Errorf("res = %+v, want paused at %s", res, n1)
+	}
+	if len(res.GroupStack) != 0 {
+		t.Errorf("group stack = %v, want empty", res.GroupStack)
+	}
+	got, _ := svc.GetContext(ctx, inst.ID)
+	var ctxMap map[string]any
+	_ = json.Unmarshal(got.Context, &ctxMap)
+	if _, ok := ctxMap["out1"]; ok {
+		t.Errorf("context = %s, want ContextBefore without n1 output", got.Context)
+	}
+	// Resume re-executes forward: n1 runs again (Attempt 2), then n2.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	final := driveEngine(t, db, inst.ID)
+	if final.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished (error %q)", final.Status, final.Error)
+	}
+	occAfter, _ := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if occAfter.Attempt != 2 {
+		t.Errorf("n1 attempt = %d, want 2", occAfter.Attempt)
+	}
+}
+
+func TestRollbackFailedToPaused(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "throw new Error('boom');", "", nil),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{"seed":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed", cur.Status)
+	}
+	if cur.FinishedAt == nil || cur.Error == "" {
+		t.Fatalf("failed instance missing error/finished_at: %+v", cur)
+	}
+	repo := repository.NewInstanceRepository(db)
+	occ, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Errorf("res = %+v, want paused at %s", res, n1)
+	}
+	stored, _ := svc.GetStatus(ctx, inst.ID)
+	if stored.Status != model.WorkflowPaused || stored.Error != "" || stored.FinishedAt != nil {
+		t.Errorf("stored = %+v, want paused with cleared error/finished_at", stored)
+	}
+	if stored.StartedAt == nil {
+		t.Error("started_at = nil, want preserved")
+	}
+	got, _ := svc.GetContext(ctx, inst.ID)
+	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{"seed":1}`)) {
+		t.Errorf("context = %s, want restored seed", got.Context)
+	}
+	if !svcEventTypes(t, db, inst.ID)["rollback"] {
+		t.Error("event 'rollback' missing")
+	}
+}
+
+func jsonEqualCtx(t *testing.T, a, b json.RawMessage) bool {
+	t.Helper()
+	var va, vb any
+	if err := json.Unmarshal(a, &va); err != nil {
+		t.Fatalf("unmarshal %s: %v", a, err)
+	}
+	if err := json.Unmarshal(b, &vb); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	return reflect.DeepEqual(va, vb)
+}
+
+func TestRollbackNestedGroupStack(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	inner := "11111111-1111-7111-8111-111111111101"
+	mid := "11111111-1111-7111-8111-111111111102"
+	outer := "11111111-1111-7111-8111-111111111103"
+	wfID := svcCreateWorkflow(t, db, outer,
+		svcNodeJSON(outer, "group", "outer", "", "", map[string]any{
+			"start_node_id": mid,
+			"nodes": []map[string]any{
+				{"id": mid, "type": "group", "name": "mid", "start_node_id": inner,
+					"nodes": []map[string]any{
+						{"id": inner, "type": "script", "name": "leaf", "script": "throw new Error('leaf boom');"},
+					}},
+			},
+		}),
+	)
+	// The leaf throws: the instance fails while its cursor sits inside both
+	// groups, so rollback must recompute the two-level stack.
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{"seed":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed (error %q)", cur.Status, cur.Error)
+	}
+	repo := repository.NewInstanceRepository(db)
+	occ, err := repo.GetNodeInstanceByNode(ctx, inst.ID, inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ.ID, Reason: "retry leaf"})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != inner {
+		t.Errorf("res = %+v, want paused at %s", res, inner)
+	}
+	if len(res.GroupStack) != 2 || res.GroupStack[0] != outer || res.GroupStack[1] != mid {
+		t.Errorf("group stack = %v, want [%s %s]", res.GroupStack, outer, mid)
+	}
+	got, _ := svc.GetContext(ctx, inst.ID)
+	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{"seed":1}`)) {
+		t.Errorf("context = %s, want restored seed", got.Context)
+	}
+	stored, _ := svc.GetStatus(ctx, inst.ID)
+	if stored.Status != model.WorkflowPaused || stored.Error != "" || stored.FinishedAt != nil {
+		t.Errorf("stored = %+v, want paused with cleared error/finished_at", stored)
+	}
+}
+
+func TestRollbackErrors(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "return 1;", n2, nil),
+		svcNodeJSON(n2, "script", "b", "return 2;", "", nil),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	eng := svcTestEngine(t, db)
+	claimed, err := repo.ClaimNext(ctx, "rollback-worker", time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range claimed {
+		if w.ID == inst.ID {
+			if err := eng.Process(ctx, w); err != nil {
+				t.Fatalf("Process() error = %v", err)
+			}
+		}
+	}
+	occ1, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	// Unknown instance.
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: svcNewID(), TargetOccurrenceID: occ1.ID}); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("Rollback(unknown instance) error = %v, want ErrNotFound", err)
+	}
+	// Unknown occurrence.
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: svcNewID()}); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("Rollback(unknown occurrence) error = %v, want ErrNotFound", err)
+	}
+	// Empty ids.
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: "", TargetOccurrenceID: occ1.ID}); !errors.Is(err, model.ErrInvalid) {
+		t.Errorf("Rollback(empty instance) error = %v, want ErrInvalid", err)
+	}
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: ""}); !errors.Is(err, model.ErrInvalid) {
+		t.Errorf("Rollback(empty occurrence) error = %v, want ErrInvalid", err)
+	}
+	// Wrong state: resume then rollback while waiting.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID}); !errors.Is(err, model.ErrConflict) {
+		t.Errorf("Rollback(waiting) error = %v, want ErrConflict", err)
+	}
+	// not_started node (n2 never ran): no occurrence row.
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: n2}); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("Rollback(not_started node id) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRollbackParkedInputIsNoOp(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	n3 := "11111111-1111-7111-8111-111111111103"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "return 1;", n2, map[string]any{"output_property": "a"}),
+		svcNodeJSON(n2, "input", "ask", "", n3,
+			map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(n3, "script", "b", "return 1;", "", map[string]any{"output_property": "done"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on input", cur)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	occ, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := svc.GetStatus(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rolling back onto the live parked occurrence itself is a no-op:
+	// 200 paused, zero writes, park stays running.
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n2 {
+		t.Errorf("res = %+v, want paused at %s", res, n2)
+	}
+	stored, _ := svc.GetStatus(ctx, inst.ID)
+	if stored.Status != model.WorkflowPaused {
+		t.Errorf("status = %s, want still paused", stored.Status)
+	}
+	if stored.Revision != before.Revision {
+		t.Errorf("revision = %d, want unchanged %d (no-op)", stored.Revision, before.Revision)
+	}
+	frame, err := model.ParseFrame(stored.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.CurrentNodeID != n2 {
+		t.Errorf("cursor = %q, want still %q", frame.CurrentNodeID, n2)
+	}
+	running, err := repo.GetRunningNodeInstance(ctx, inst.ID)
+	if err != nil || running.ID != occ.ID {
+		t.Fatalf("running = %+v, err %v, want live park %s untouched", running, err, occ.ID)
+	}
+	if events, _ := repo.ListEvents(ctx, inst.ID); svcEventTypes(t, db, inst.ID)["rollback"] || len(events) == 0 {
+		t.Errorf("events = %d types, want no rollback event on no-op", len(events))
+	}
+	// No-op preserves the park: resume + deliver still works.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "noop-keeps-park", Payload: []byte(`{"v":1}`),
+	})
+	if err != nil || !delivery.Accepted {
+		t.Fatalf("DeliverInput() = %+v, err %v, want accepted", delivery, err)
+	}
+}
+
+func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	n3 := "11111111-1111-7111-8111-111111111103"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "context.x = 1; return 1;", n2, map[string]any{"output_property": "out"}),
+		svcNodeJSON(n2, "input", "ask", "", n3, map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(n3, "script", "b", "return 2;", "", map[string]any{"output_property": "done"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on input", cur)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	occ1, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rolling the cursor back to n1 supersedes the live n2 park: 200,
+	// park closed, cursor moved, context restored.
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID, Reason: "supersede"})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Fatalf("res = %+v, want paused at %s", res, n1)
+	}
+	stored, _ := svc.GetStatus(ctx, inst.ID)
+	if stored.Status != model.WorkflowPaused {
+		t.Errorf("status = %s, want still paused", stored.Status)
+	}
+	if stored.WaitingReason != model.WaitingReasonRunnable {
+		t.Errorf("waiting_reason = %q, want runnable", stored.WaitingReason)
+	}
+	frame, err := model.ParseFrame(stored.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.CurrentNodeID != n1 {
+		t.Errorf("cursor = %q, want %q", frame.CurrentNodeID, n1)
+	}
+	gotCtx, _ := svc.GetContext(ctx, inst.ID)
+	if !jsonEqualCtx(t, gotCtx.Context, json.RawMessage(`{}`)) {
+		t.Errorf("context = %s, want restored pre-n1 {}", gotCtx.Context)
+	}
+	closed, err := repo.GetNodeInstance(ctx, inst.ID, parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != model.NodeStopped || !closed.Cancelled {
+		t.Errorf("superseded park = %s/cancelled=%v, want stopped/true", closed.Status, closed.Cancelled)
+	}
+	if closed.Error != "superseded by rollback" {
+		t.Errorf("superseded error = %q, want supersede marker", closed.Error)
+	}
+	if _, err := repo.GetRunningNodeInstance(ctx, inst.ID); !errors.Is(err, repository.ErrNodeInstanceNotFound) {
+		t.Errorf("GetRunningNodeInstance() error = %v, want ErrNodeInstanceNotFound", err)
+	}
+	if !svcEventTypes(t, db, inst.ID)["rollback"] {
+		t.Error("event 'rollback' missing")
+	}
+	// Resume re-executes forward from n1: n1 runs again on the same
+	// occurrence row (attempt++), then re-parks on n2 as a fresh row
+	// (the superseded park stays stopped).
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want re-parked on input", cur)
+	}
+	rerun, err := repo.GetNodeInstance(ctx, inst.ID, occ1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerun.Status != model.NodeFinished || rerun.Attempt != 2 {
+		t.Errorf("rerun n1 = %s/%d, want finished/2", rerun.Status, rerun.Attempt)
+	}
+	reparked, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// GetNodeInstanceByNode returns the oldest row (the superseded park);
+	// the live re-park is the newest running row for n2.
+	if reparked.ID == parked.ID || reparked.Status != model.NodeRunning {
+		occs, lerr := repo.ListNodeInstances(ctx, inst.ID)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		for i := len(occs) - 1; i >= 0; i-- {
+			if occs[i].NodeID == n2 && occs[i].Status == model.NodeRunning {
+				cp := occs[i]
+				reparked = &cp
+				break
+			}
+		}
+	}
+	if reparked.Status != model.NodeRunning {
+		t.Errorf("repark status = %s, want running", reparked.Status)
+	}
+	if reparked.ID == parked.ID {
+		t.Errorf("repark id = %s, want fresh row (superseded park stays stopped)", reparked.ID)
+	}
+	stillClosed, err := repo.GetNodeInstance(ctx, inst.ID, parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillClosed.Status != model.NodeStopped {
+		t.Errorf("superseded park status = %s, want stopped", stillClosed.Status)
+	}
+	// Deliver to the live re-park.
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "supersede-fresh", Payload: []byte(`{"v":1}`),
+	})
+	if err != nil || !delivery.Accepted {
+		t.Fatalf("DeliverInput() = %+v, err %v, want accepted", delivery, err)
+	}
+	if delivery.NodeInstanceID == parked.ID {
+		t.Errorf("delivery landed on superseded row %s, want live re-park %s", delivery.NodeInstanceID, reparked.ID)
+	}
+}
+
+func TestRollbackToFinishedInputReparks(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	n3 := "11111111-1111-7111-8111-111111111103"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "input", "ask", "", n2,
+			map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(n2, "script", "b", "throw new Error('downstream boom');", n3, nil),
+		svcNodeJSON(n3, "script", "c", "return 2;", "", map[string]any{"output_property": "last"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on input", cur)
+	}
+	// Deliver: n2 throws, so the instance fails with the input occurrence
+	// finished behind it — the rollback-able shape.
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "repark-1", Payload: []byte(`{"v":1}`),
+	})
+	if err != nil || !delivery.Accepted {
+		t.Fatalf("DeliverInput() = %+v, err %v", delivery, err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed (error %q)", cur.Status, cur.Error)
+	}
+	occ, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if occ.Status != model.NodeFinished {
+		t.Fatalf("input occurrence status = %s, want finished", occ.Status)
+	}
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Errorf("res = %+v, want paused at %s", res, n1)
+	}
+	stored, _ := svc.GetStatus(ctx, inst.ID)
+	if stored.WaitingReason != model.WaitingReasonInput {
+		t.Errorf("waiting_reason = %q, want input (re-park)", stored.WaitingReason)
+	}
+	got, _ := svc.GetContext(ctx, inst.ID)
+	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{}`)) {
+		t.Errorf("context = %s, want restored pre-input {}", got.Context)
+	}
+	occRearmed, _ := repo.GetNodeInstance(ctx, inst.ID, occ.ID)
+	if occRearmed.Status != model.NodeRunning || occRearmed.Attempt != 2 {
+		t.Errorf("re-armed occurrence = %s/%d, want running/2", occRearmed.Status, occRearmed.Attempt)
+	}
+	// Resume re-parks on the input node; a fresh delivery with a new key
+	// is accepted on the same occurrence row.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want re-parked on input", cur)
+	}
+	delivery2, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "repark-2", Payload: []byte(`{"v":3}`),
+	})
+	if err != nil || !delivery2.Accepted {
+		t.Fatalf("second DeliverInput() = %+v, err %v", delivery2, err)
+	}
+	if delivery2.NodeInstanceID != occ.ID {
+		t.Errorf("delivery node = %s, want same occurrence %s", delivery2.NodeInstanceID, occ.ID)
+	}
+	final := driveEngine(t, db, inst.ID)
+	if final.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed again at n2 (error %q)", final.Status, final.Error)
+	}
+	gotFinal, _ := svc.GetContext(ctx, inst.ID)
+	var ctxMap map[string]any
+	_ = json.Unmarshal(gotFinal.Context, &ctxMap)
+	if gate, ok := ctxMap["gate"].(map[string]any); !ok || gate["v"] != float64(3) {
+		t.Errorf("context = %s, want fresh delivery v=3", gotFinal.Context)
+	}
+}
+
+func TestRollbackToFinishedInputSupersedesOtherLivePark(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	// n1 input (delivered, finished) -> n2 script (finished) -> n3 input
+	// parks live. Rollback to the finished n1 input must close the live n3
+	// park and re-arm n1 in the same transaction.
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	n3 := "11111111-1111-7111-8111-111111111103"
+	n4 := "11111111-1111-7111-8111-111111111104"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "input", "ask-first", "", n2,
+			map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(n2, "script", "ok", "return 1;", n3, map[string]any{"output_property": "mid"}),
+		svcNodeJSON(n3, "input", "ask-later", "", n4,
+			map[string]any{"channel": "http", "context_path": "gate2"}),
+		svcNodeJSON(n4, "script", "done", "return 1;", "", map[string]any{"output_property": "last"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on first input", cur)
+	}
+	first, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "supersede-rearm-1", Payload: []byte(`{"v":1}`),
+	})
+	if err != nil || !delivery.Accepted {
+		t.Fatalf("DeliverInput() = %+v, err %v", delivery, err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want parked on second input", cur)
+	}
+	live, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Status != model.NodeRunning {
+		t.Fatalf("n3 park status = %s, want running", live.Status)
+	}
+	finishedFirst, err := repo.GetNodeInstance(ctx, inst.ID, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishedFirst.Status != model.NodeFinished {
+		t.Fatalf("n1 occurrence status = %s, want finished", finishedFirst.Status)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: first.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
+		t.Fatalf("res = %+v, want paused at %s", res, n1)
+	}
+	closed, err := repo.GetNodeInstance(ctx, inst.ID, live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != model.NodeStopped || !closed.Cancelled {
+		t.Errorf("live n3 park = %s/cancelled=%v, want stopped/true", closed.Status, closed.Cancelled)
+	}
+	rearmed, err := repo.GetNodeInstance(ctx, inst.ID, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rearmed.Status != model.NodeRunning || rearmed.Attempt != 2 {
+		t.Errorf("re-armed n1 = %s/%d, want running/2", rearmed.Status, rearmed.Attempt)
+	}
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want re-parked on n1", cur)
+	}
+	delivery2, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "supersede-rearm-2", Payload: []byte(`{"v":2}`),
+	})
+	if err != nil || !delivery2.Accepted {
+		t.Fatalf("second DeliverInput() = %+v, err %v", delivery2, err)
+	}
+	if delivery2.NodeInstanceID != first.ID {
+		t.Errorf("delivery node = %s, want re-armed n1 %s", delivery2.NodeInstanceID, first.ID)
+	}
+}
+
+func svcTestEngine(t *testing.T, db *gorm.DB) *engine.Engine {
+	t.Helper()
+	instances := repository.NewInstanceRepository(db)
+	wfSvc := svcWorkflowService(db)
+	loader := func(ctx context.Context, id string) (*model.WorkflowContent, error) {
+		inst, err := instances.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		def, err := repository.NewWorkflowDefinitionRepository(db).GetByID(ctx, inst.WorkflowDefinitionID)
+		if err != nil {
+			return nil, err
+		}
+		wc, err := model.ParseWorkflowContent(def.Content, svcLimits)
+		if err != nil {
+			return nil, err
+		}
+		return wfSvc.Materialize(ctx, wc)
+	}
+	return engine.NewEngine(instances, executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID)
+}
+
+func TestStatusDetailNodesMap(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "context.x = 1; return 1;", n2, map[string]any{"output_property": "out1"}),
+		svcNodeJSON(n2, "script", "b", "context.y = 2; return 2;", "", map[string]any{"output_property": "out2"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	eng := svcTestEngine(t, db)
+	claimed, err := repo.ClaimNext(ctx, "nodesmap-worker", time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range claimed {
+		if w.ID == inst.ID {
+			if err := eng.Process(ctx, w); err != nil {
+				t.Fatalf("Process(n1) error = %v", err)
+			}
+		}
+	}
+	occ1, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatalf("GetNodeInstanceByNode(n1) error = %v", err)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	e1, ok := d.Nodes[n1]
+	if !ok {
+		t.Fatalf("Nodes missing %s: %v", n1, d.Nodes)
+	}
+	if e1.OccurrenceID == nil || *e1.OccurrenceID != occ1.ID {
+		t.Errorf("n1 occurrence = %v, want %s", e1.OccurrenceID, occ1.ID)
+	}
+	if e1.Status != string(model.NodeFinished) {
+		t.Errorf("n1 status = %q, want finished", e1.Status)
+	}
+	if e1.Attempt == nil || *e1.Attempt != 1 {
+		t.Errorf("n1 attempt = %v, want 1", e1.Attempt)
+	}
+	if !e1.Rollbackable {
+		t.Error("n1 rollbackable = false, want true")
+	}
+	e2, ok := d.Nodes[n2]
+	if !ok {
+		t.Fatalf("Nodes missing %s: %v", n2, d.Nodes)
+	}
+	if e2.OccurrenceID != nil {
+		t.Errorf("n2 occurrence = %v, want nil", *e2.OccurrenceID)
+	}
+	if e2.Status != "not_started" {
+		t.Errorf("n2 status = %q, want not_started", e2.Status)
+	}
+	if e2.Attempt != nil {
+		t.Errorf("n2 attempt = %v, want nil", *e2.Attempt)
+	}
+	if e2.Rollbackable {
+		t.Error("n2 rollbackable = true, want false")
+	}
+
+	// Instance gate: while waiting nothing is rollbackable.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	d, err = svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	for id, e := range d.Nodes {
+		if e.Rollbackable {
+			t.Errorf("Nodes[%s] rollbackable = true while waiting, want false", id)
+		}
+	}
+}
+
+func TestStatusDetailNodesMapNestedGroups(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	inner := "11111111-1111-7111-8111-111111111101"
+	mid := "11111111-1111-7111-8111-111111111102"
+	outer := "11111111-1111-7111-8111-111111111103"
+	wfID := svcCreateWorkflow(t, db, outer,
+		svcNodeJSON(outer, "group", "outer", "", "", map[string]any{
+			"start_node_id": mid,
+			"nodes": []map[string]any{
+				{"id": mid, "type": "group", "name": "mid", "start_node_id": inner,
+					"nodes": []map[string]any{
+						{"id": inner, "type": "script", "name": "leaf", "script": "throw new Error('leaf boom');"},
+					}},
+			},
+		}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{"seed":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed", cur.Status)
+	}
+	repo := repository.NewInstanceRepository(db)
+	occ, err := repo.GetNodeInstanceByNode(ctx, inst.ID, inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	// Groups have no occurrence rows: always not_started, never rollbackable.
+	for _, g := range []string{outer, mid} {
+		e, ok := d.Nodes[g]
+		if !ok {
+			t.Fatalf("Nodes missing group %s: %v", g, d.Nodes)
+		}
+		if e.OccurrenceID != nil || e.Status != "not_started" || e.Rollbackable {
+			t.Errorf("group %s = %+v, want not_started/nil/false", g, e)
+		}
+	}
+	leaf, ok := d.Nodes[inner]
+	if !ok {
+		t.Fatalf("Nodes missing leaf %s", inner)
+	}
+	if leaf.OccurrenceID == nil || *leaf.OccurrenceID != occ.ID {
+		t.Errorf("leaf occurrence = %v, want %s", leaf.OccurrenceID, occ.ID)
+	}
+	if leaf.Status != string(model.NodeFailed) {
+		t.Errorf("leaf status = %q, want failed", leaf.Status)
+	}
+	if !leaf.Rollbackable {
+		t.Error("leaf rollbackable = false, want true")
+	}
+}
+
+func TestStatusDetailNodesMapUnrestorableContext(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	n2 := "11111111-1111-7111-8111-111111111102"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "return 1;", n2, nil),
+		svcNodeJSON(n2, "script", "b", "return 2;", "", nil),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	eng := svcTestEngine(t, db)
+	claimed, err := repo.ClaimNext(ctx, "nodesmap-worker", time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range claimed {
+		if w.ID == inst.ID {
+			if err := eng.Process(ctx, w); err != nil {
+				t.Fatalf("Process(n1) error = %v", err)
+			}
+		}
+	}
+	occ1, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	// A null ContextBefore mirrors the rollback 422 path: identity fields
+	// stay, but the entry is not rollbackable.
+	occ1.ContextBefore = json.RawMessage("null")
+	if err := repo.UpdateNodeInstance(ctx, *occ1); err != nil {
+		t.Fatalf("UpdateNodeInstance() error = %v", err)
+	}
+	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	e, ok := d.Nodes[n1]
+	if !ok {
+		t.Fatalf("Nodes missing %s", n1)
+	}
+	if e.OccurrenceID == nil || *e.OccurrenceID != occ1.ID {
+		t.Errorf("n1 occurrence = %v, want %s", e.OccurrenceID, occ1.ID)
+	}
+	if e.Status != string(model.NodeFinished) {
+		t.Errorf("n1 status = %q, want finished", e.Status)
+	}
+	if e.Rollbackable {
+		t.Error("n1 rollbackable = true with null ContextBefore, want false")
 	}
 }

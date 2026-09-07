@@ -125,7 +125,9 @@ func (e *Engine) Process(ctx context.Context, w model.WorkflowInstance) error {
 		return e.fail(ctx, cur, "", err)
 	}
 
-	// Recovery: an interrupted attempt left running by a dead worker.
+	// Recovery: an interrupted attempt left running by a dead worker. A
+	// superseded (stopped + cancelled) row is terminal audit, never
+	// recovery fuel: skip it so the cursor re-executes forward instead.
 	attempt, err := e.instances.GetRunningNodeInstance(ctx, cur.ID)
 	if err == nil {
 		return e.recover(ctx, cur, g, &frame, counters, attempt)
@@ -232,6 +234,18 @@ func (e *Engine) runNode(ctx context.Context, cur model.WorkflowInstance, g *wor
 		}
 	} else if err != nil {
 		return err
+	} else if attempt.Status == model.NodeStopped && attempt.Cancelled {
+		// A rollback superseded this occurrence while it was parked. Rewind
+		// to a fresh occurrence row so the superseded attempt keeps its
+		// stopped audit trail instead of being resurrected.
+		a := newAttempt(cur.ID, nc, now)
+		attempt = &a
+		attempt.Status = model.NodeRunning
+		attempt.ContextBefore = marshal(ctxMap)
+		attempt.StartedAt = &now
+		if err := e.instances.InsertNodeInstance(ctx, *attempt); err != nil {
+			return err
+		}
 	} else {
 		// Loop iteration: a new attempt of the same occurrence.
 		attempt.Attempt++
@@ -269,6 +283,20 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 
 	// Input nodes re-enter waiting (they never execute on recovery).
 	if attempt.Type == string(model.NodeTypeInput) {
+		// A rollback may have moved the cursor away while this parked
+		// attempt stayed running. Re-park on the attempt's own node so
+		// the cursor and the park never diverge (DeliverInput keys off
+		// the cursor).
+		reconciledFrom := ""
+		if frame.CurrentNodeID != attempt.NodeID {
+			stack, serr := g.groupStack(attempt.NodeID)
+			if serr != nil {
+				return e.fail(ctx, cur, "", serr)
+			}
+			reconciledFrom = frame.CurrentNodeID
+			frame.CurrentNodeID = attempt.NodeID
+			frame.GroupStack = stack
+		}
 		attempt.Attempt++
 		attempt.Status = model.NodeRunning
 		attempt.ContextBefore = marshal(ctxMap)
@@ -279,6 +307,9 @@ func (e *Engine) recover(ctx context.Context, cur model.WorkflowInstance, g *wor
 			return err
 		}
 		_ = e.appendEvent(ctx, cur.ID, "node_retried", map[string]any{"node_id": nc.ID, "occurrence_id": attempt.ID, "attempt": attempt.Attempt})
+		if reconciledFrom != "" {
+			_ = e.appendEvent(ctx, cur.ID, "cursor_reconciled", map[string]any{"from_node": reconciledFrom, "to_node": attempt.NodeID, "occurrence_id": attempt.ID, "attempt": attempt.Attempt})
+		}
 		return e.inputCheckpoint(ctx, cur, frame, counters, ctxMap)
 	}
 
