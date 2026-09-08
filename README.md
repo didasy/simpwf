@@ -1,7 +1,7 @@
 # SimpWF — Durable Workflow Engine on PostgreSQL
 
 [![CI](https://github.com/didasy/simpwf/actions/workflows/ci.yml/badge.svg)](https://github.com/didasy/simpwf/actions/workflows/ci.yml)
-![Coverage](https://img.shields.io/badge/Coverage-78.3%25-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-79.7%25-brightgreen)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
