@@ -117,7 +117,13 @@ func (s *workflowDefinitionService) Materialize(ctx context.Context, wc *model.W
 		}
 		nodes = append(nodes, m)
 	}
-	materialized := &model.WorkflowContent{StartNodeID: wc.StartNodeID, Keys: wc.Keys, Nodes: nodes, StatusUpdate: wc.StatusUpdate}
+	materialized := &model.WorkflowContent{
+		StartNodeID:  wc.StartNodeID,
+		Keys:         wc.Keys,
+		Nodes:        nodes,
+		ContextMode:  wc.ContextMode,
+		StatusUpdate: wc.StatusUpdate,
+	}
 	if err := model.ValidateWorkflowContent(materialized); err != nil {
 		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}

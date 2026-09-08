@@ -14,6 +14,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"github.com/simpwf/workflow-engine/pkg/contextdiff"
 	"github.com/simpwf/workflow-engine/pkg/contextpath"
 )
 
@@ -188,6 +189,7 @@ type instanceService struct {
 	actor        string
 	limits       model.NodeLimits
 	cancels      Canceller
+	leanOptions  model.LeanOptions
 }
 
 // NewInstanceService builds the instance service. cancels may be nil; when
@@ -201,8 +203,19 @@ func NewInstanceService(
 	actor string,
 	limits model.NodeLimits,
 	cancels Canceller,
+	leanOptions model.LeanOptions,
 ) InstanceService {
-	return &instanceService{instances: instances, wfDefs: wfDefs, materializer: materializer, validator: validator, hooks: hooks, actor: actor, limits: limits, cancels: cancels}
+	return &instanceService{
+		instances:    instances,
+		wfDefs:       wfDefs,
+		materializer: materializer,
+		validator:    validator,
+		hooks:        hooks,
+		actor:        actor,
+		limits:       limits,
+		cancels:      cancels,
+		leanOptions:  leanOptions,
+	}
 }
 
 func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model.WorkflowInstance, error) {
@@ -222,7 +235,7 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 		contextRaw = json.RawMessage("{}")
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(contextRaw, &obj); err != nil {
+	if err := json.Unmarshal(contextRaw, &obj); err != nil || obj == nil {
 		return model.WorkflowInstance{}, fmt.Errorf("%w: context must be a JSON object", model.ErrInvalid)
 	}
 
@@ -231,9 +244,16 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 		return model.WorkflowInstance{}, err
 	}
 	now := nowUTC()
+	contextMode := model.ContextModeFull
+	if wc.ContextMode != nil {
+		contextMode = *wc.ContextMode
+	} else if s.leanOptions.LeanContextDefault {
+		contextMode = model.ContextModeLean
+	}
 	w := model.WorkflowInstance{
 		ID:                   mustNewID(),
 		WorkflowDefinitionID: def.ID,
+		ContextMode:          contextMode,
 		Status:               model.WorkflowWaiting,
 		WaitingReason:        model.WaitingReasonRunnable,
 		Frame:                frameRaw,
@@ -246,6 +266,17 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 	}
 	if err := s.instances.Insert(ctx, w); err != nil {
 		return model.WorkflowInstance{}, err
+	}
+	if contextMode == model.ContextModeLean {
+		// The create context is the replay base but has no history row yet.
+		// Anchor it at create so later UpdateContext baselines and
+		// post-rollback anchors replay from the true initial object instead
+		// of an empty map.
+		anchor := leanAnchorRow(contextRaw)
+		anchor.WorkflowInstanceID = w.ID
+		if err := s.instances.AppendHistory(ctx, *anchor); err != nil {
+			return model.WorkflowInstance{}, err
+		}
 	}
 	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 		ID: mustNewID(), WorkflowInstanceID: w.ID, Type: "instance_created",
@@ -291,6 +322,90 @@ func (s *instanceService) GetContext(ctx context.Context, id string) (*model.Wor
 	return s.instances.GetByID(ctx, id)
 }
 
+// leanMode reports whether the instance runs with replayable diff history.
+func leanMode(inst *model.WorkflowInstance) bool {
+	return inst != nil && inst.ContextMode == model.ContextModeLean
+}
+
+// mapHistoryError maps history replay failures to 409 conflict semantics:
+// a gap or depth overflow fails closed, never with a silent wrong restore.
+func mapHistoryError(err error) error {
+	if errors.Is(err, repository.ErrHistoryGap) || errors.Is(err, repository.ErrHistoryTooDeep) {
+		return fmt.Errorf("%w: %v", model.ErrConflict, err)
+	}
+	return err
+}
+
+// leanHistoryCursorForOccurrence resolves the non-superseded history cursor
+// for one occurrence: the earliest non-superseded row carrying that
+// occurrence id, so reconstruction returns that occurrence's before
+// context. The boolean reports presence. A positive attempt selects that
+// exact attempt row.
+func leanHistoryCursorForOccurrence(rows []model.NodeContextHistory, occurrenceID string, attempt int) (model.HistoryCursor, bool) {
+	var cursor model.HistoryCursor
+	found := false
+	for _, row := range rows {
+		if row.Superseded || row.OccurrenceID != occurrenceID {
+			continue
+		}
+		if attempt > 0 && row.Attempt != attempt {
+			continue
+		}
+		if !found || row.Cursor().Before(cursor) {
+			cursor = row.Cursor()
+			found = true
+		}
+	}
+	return cursor, found
+}
+
+// leanOccurrenceSet builds the set of occurrence ids with non-superseded
+// history rows. Callers load history once and reuse the set per node.
+func leanOccurrenceSet(rows []model.NodeContextHistory) map[string]struct{} {
+	out := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if row.Superseded || row.OccurrenceID == "" {
+			continue
+		}
+		out[row.OccurrenceID] = struct{}{}
+	}
+	return out
+}
+
+// leanReconstructBefore replays lean history up to (excluding) the target
+// cursor, mapping replay failures to 409. The create anchor (or a later
+// UpdateContext/rollback anchor) is the replay base, so the passed initial
+// seed is only a fallback for instances created before anchors existed.
+func (s *instanceService) leanReconstructBefore(ctx context.Context, inst *model.WorkflowInstance, target model.HistoryCursor) (json.RawMessage, error) {
+	initial := json.RawMessage("{}")
+	restored, err := s.instances.ReconstructBefore(ctx, inst.ID, target, initial)
+	if err != nil {
+		return nil, mapHistoryError(err)
+	}
+	return restored, nil
+}
+
+// leanAnchorRow builds a post-commit anchor snapshot row for the restored
+// full context. Occurrence id stays empty: the row is a system baseline,
+// not a node commit.
+func leanAnchorRow(restored json.RawMessage) *model.NodeContextHistory {
+	return &model.NodeContextHistory{
+		IsAnchor: true,
+		Snapshot: restored,
+		Diff:     json.RawMessage("null"),
+	}
+}
+
+// validateRestoredObject ensures the replayed context is a JSON object
+// before it becomes the instance context. Anything else fails closed.
+func validateRestoredObject(restored json.RawMessage) (map[string]any, error) {
+	var obj map[string]any
+	if err := json.Unmarshal(restored, &obj); err != nil || obj == nil {
+		return nil, fmt.Errorf("restored context is not a JSON object")
+	}
+	return obj, nil
+}
+
 // statusNodes builds the graph-node-id → occurrence map for the status
 // response. It returns nil when the definition cannot be loaded, parsed, or
 // materialized, so the status view degrades to omitting the map instead of
@@ -322,6 +437,15 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 	}
 	instanceGate := inst.Status == model.WorkflowPaused || inst.Status == model.WorkflowFailed
 	instanceGate = instanceGate && !inst.TerminationPending
+	// Lean mode gates rollbackability on history presence, not on
+	// ContextBefore parsing (lean occurrence rows store null). The history
+	// occurrence-id set loads once per call: no per-node query fan-out.
+	var leanSet map[string]struct{}
+	if leanMode(inst) && instanceGate {
+		if rows, herr := s.instances.LoadHistory(ctx, inst.ID); herr == nil {
+			leanSet = leanOccurrenceSet(rows)
+		}
+	}
 	out := make(map[string]NodeOccurrence, len(ids))
 	for _, id := range ids {
 		nc, err := findNode(wc.Nodes, id)
@@ -338,7 +462,11 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 		e.OccurrenceID = &occID
 		attempt := occ.Attempt
 		e.Attempt = &attempt
-		e.Rollbackable = instanceGate && rollbackableOccurrence(nc.Type, occ)
+		if leanSet != nil {
+			e.Rollbackable = instanceGate && leanRollbackableOccurrence(nc.Type, occ, leanSet)
+		} else {
+			e.Rollbackable = instanceGate && rollbackableOccurrence(nc.Type, occ)
+		}
 		out[id] = e
 	}
 	return out
@@ -358,6 +486,26 @@ func flattenNodeIDs(nodes []*model.NodeContent) []string {
 		}
 	}
 	return out
+}
+
+// leanRollbackableOccurrence mirrors rollbackableOccurrence for lean mode:
+// group nodes never qualify, only terminal occurrence states qualify, and
+// the occurrence must have non-superseded history (lean rows store null
+// ContextBefore, so parsing it would always fail).
+func leanRollbackableOccurrence(typ model.NodeType, occ *model.NodeInstance, set map[string]struct{}) bool {
+	if typ == model.NodeTypeGroup {
+		return false
+	}
+	switch occ.Status {
+	case model.NodeFinished, model.NodeFailed, model.NodeStopped:
+	default:
+		return false
+	}
+	if set == nil {
+		return false
+	}
+	_, ok := set[occ.ID]
+	return ok
 }
 
 // rollbackableOccurrence mirrors the rollback endpoint's target validation:
@@ -414,6 +562,16 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 			return nil, fmt.Errorf("%w: instance %s is not paused", model.ErrConflict, req.InstanceID)
 		}
 		return nil, err
+	}
+	// Lean mode appends the replaced context as a new anchor baseline so
+	// later replays start from it. The prefix stays intact: no supersede.
+	if leanMode(inst) {
+		anchor := leanAnchorRow(req.Context)
+		anchor.WorkflowInstanceID = inst.ID
+		if err := s.instances.AppendHistory(ctx, *anchor); err != nil {
+			return nil, err
+		}
+		return s.instances.GetByID(ctx, req.InstanceID)
 	}
 	return inst, nil
 }
@@ -484,6 +642,18 @@ func (s *instanceService) NodeDebug(ctx context.Context, instanceID, nodeID stri
 	d.Status = string(nodeInst.Status)
 	d.ContextBefore = nodeInst.ContextBefore
 	d.ContextAfter = nodeInst.ContextAfter
+	if leanMode(inst) {
+		// Lean occurrence rows store null ContextBefore and diff
+		// ContextAfter; reconstruct full snapshots without changing the
+		// DTO shape. Anchor targets use their snapshot, diff targets
+		// replay history then apply the occurrence diff.
+		before, after, derr := s.leanNodeDebugContexts(ctx, inst, nodeInst, selected)
+		if derr != nil {
+			return nil, derr
+		}
+		d.ContextBefore = before
+		d.ContextAfter = after
+	}
 	d.Input = nodeInst.Input
 	d.Output = nodeInst.Output
 	d.Error = nullableString(nodeInst.Error)
@@ -507,6 +677,62 @@ func nullableString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// leanNodeDebugContexts reconstructs full before/after contexts for a lean
+// occurrence. The after context replays history through the selected row;
+// the before context replays through the immediately preceding history
+// row. Anchor rows use their snapshot as the after context. Failures map
+// to 409 conflict semantics.
+func (s *instanceService) leanNodeDebugContexts(ctx context.Context, inst *model.WorkflowInstance, occ *model.NodeInstance, selected int) (json.RawMessage, json.RawMessage, error) {
+	rows, err := s.instances.LoadHistory(ctx, inst.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	target, found := leanHistoryCursorForOccurrence(rows, occ.ID, 0)
+	if !found {
+		return nil, nil, fmt.Errorf("%w: occurrence %q has no history", model.ErrConflict, occ.ID)
+	}
+	_ = selected
+	before, err := s.leanReconstructBefore(ctx, inst, target)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The selected row's own history payload is the after context: anchors
+	// carry snapshots and diffs apply on the before context. Replaying
+	// through a successor can skip this rule, so resolve directly.
+	for _, row := range rows {
+		if row.Superseded || row.OccurrenceID != occ.ID {
+			continue
+		}
+		if row.Cursor() != target {
+			continue
+		}
+		if row.IsAnchor {
+			if _, verr := validateRestoredObject(row.Snapshot); verr != nil {
+				return nil, nil, fmt.Errorf("%w: %v", model.ErrConflict, verr)
+			}
+			return before, row.Snapshot, nil
+		}
+		targetDiff, derr := contextdiff.ParseDiff(row.Diff)
+		if derr != nil {
+			return nil, nil, fmt.Errorf("%w: %v", model.ErrConflict, derr)
+		}
+		beforeMap, merr := unmarshalJSON(before)
+		if merr != nil {
+			return nil, nil, fmt.Errorf("%w: %v", model.ErrConflict, merr)
+		}
+		afterMap, aerr := contextdiff.Apply(beforeMap, targetDiff)
+		if aerr != nil {
+			return nil, nil, fmt.Errorf("%w: %v", model.ErrConflict, aerr)
+		}
+		after, merr := json.Marshal(afterMap)
+		if merr != nil {
+			return nil, nil, fmt.Errorf("%w: %v", model.ErrConflict, merr)
+		}
+		return before, after, nil
+	}
+	return nil, nil, fmt.Errorf("%w: occurrence %q has no history", model.ErrConflict, occ.ID)
 }
 
 func (s *instanceService) Pause(ctx context.Context, id string) (*ControlResult, error) {
@@ -701,9 +927,9 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
-	var restore map[string]any
-	if err := json.Unmarshal(occ.ContextBefore, &restore); err != nil || restore == nil {
-		return nil, fmt.Errorf("%w: occurrence %q has no restorable context", model.ErrInvalid, req.TargetOccurrenceID)
+	restoreCtx, restoreCursor, rerr := s.resolveRollbackContext(ctx, inst, occ, req.TargetOccurrenceID)
+	if rerr != nil {
+		return nil, rerr
 	}
 
 	// The park reason follows the target: input targets stay parked for
@@ -730,7 +956,7 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	rolled, err := s.instances.RollbackInstance(ctx, repository.RollbackUpdate{
 		InstanceID:           inst.ID,
 		Frame:                model.Frame{CurrentNodeID: target.ID, GroupStack: stack},
-		Context:              occ.ContextBefore,
+		Context:              restoreCtx,
 		Actor:                s.actor,
 		Reason:               req.Reason,
 		FromNode:             frame.CurrentNodeID,
@@ -751,11 +977,57 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 		}
 		return nil, err
 	}
+	// Lean mode supersedes the target occurrence row and everything after
+	// it, then appends a post-rollback anchor. The start anchor (create or
+	// UpdateContext baseline) is never superseded, so the next replay
+	// starts from the restored context while older non-superseded rows
+	// stay available for a second rollback to an older target.
+	if leanMode(inst) && restoreCursor != nil {
+		if serr := s.instances.SupersedeAfter(ctx, inst.ID, *restoreCursor); serr != nil {
+			return nil, mapHistoryError(serr)
+		}
+		anchor := leanAnchorRow(restoreCtx)
+		anchor.WorkflowInstanceID = inst.ID
+		if aerr := s.instances.AppendHistory(ctx, *anchor); aerr != nil {
+			return nil, aerr
+		}
+	}
 	newFrame, err := model.ParseFrame(rolled.Frame)
 	if err != nil {
 		return nil, err
 	}
 	return &RollbackResult{Status: rolled.Status, CurrentNodeID: newFrame.CurrentNodeID, GroupStack: newFrame.GroupStack}, nil
+}
+
+// resolveRollbackContext restores the full context for a rollback target.
+// Full mode restores the occurrence ContextBefore snapshot; lean mode
+// resolves the target occurrence cursor over non-superseded history and
+// replays from the instance create context, validating the result is a JSON
+// object. The returned cursor is nil for full mode.
+func (s *instanceService) resolveRollbackContext(ctx context.Context, inst *model.WorkflowInstance, occ *model.NodeInstance, targetOccurrenceID string) (json.RawMessage, *model.HistoryCursor, error) {
+	if !leanMode(inst) {
+		var restore map[string]any
+		if err := json.Unmarshal(occ.ContextBefore, &restore); err != nil || restore == nil {
+			return nil, nil, fmt.Errorf("%w: occurrence %q has no restorable context", model.ErrInvalid, targetOccurrenceID)
+		}
+		return occ.ContextBefore, nil, nil
+	}
+	rows, err := s.instances.LoadHistory(ctx, inst.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	cursor, found := leanHistoryCursorForOccurrence(rows, occ.ID, 0)
+	if !found {
+		return nil, nil, fmt.Errorf("%w: occurrence %q has no history", model.ErrConflict, targetOccurrenceID)
+	}
+	restored, err := s.leanReconstructBefore(ctx, inst, cursor)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, verr := validateRestoredObject(restored); verr != nil {
+		return nil, nil, fmt.Errorf("%w: %v", model.ErrConflict, verr)
+	}
+	return restored, &cursor, nil
 }
 
 // findNode resolves a graph node id anywhere in the materialized tree.
@@ -904,7 +1176,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	// may transform the context after the payload was written.
 	postCtx, err := s.hooks.RunPost(ctx, inputNode, newCtx, payload)
 	if err != nil {
-		return s.failAcceptedInput(ctx, inst, attempt, req, model.NodeFailed, newCtx, err)
+		return s.failAcceptedInput(ctx, inst, attempt, req, ctxMap, model.NodeFailed, newCtx, err)
 	}
 	newCtx = postCtx
 
@@ -918,7 +1190,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		if herr != nil {
 			// The input attempt finished; the structural group hook failure
 			// fails the workflow with the latest completed context.
-			return s.failAcceptedInput(ctx, inst, attempt, req, model.NodeFinished, finalCtx, herr)
+			return s.failAcceptedInput(ctx, inst, attempt, req, ctxMap, model.NodeFinished, finalCtx, herr)
 		}
 		newCtx = finalCtx
 	}
@@ -941,13 +1213,40 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		Status:         status,
 		FinishedAt:     finished,
 		CreatedBy:      s.actor,
+		History:        s.leanInputHistory(inst, ctxMap, newCtx, attempt),
 	})
+}
+
+// leanInputHistory computes the delivery diff in the service (DiffMaps of
+// the pre-delivery request context to the final context) so the repository
+// persists history atomically with delivery without duplicating diff logic.
+func (s *instanceService) leanInputHistory(inst *model.WorkflowInstance, before, after map[string]any, attempt *model.NodeInstance) *model.NodeContextHistory {
+	if !leanMode(inst) {
+		return nil
+	}
+	diff, err := contextdiff.DiffMaps(before, after)
+	if err != nil {
+		return &model.NodeContextHistory{
+			WorkflowInstanceID: inst.ID,
+			OccurrenceID:       attempt.ID,
+			NodeID:             attempt.NodeID,
+			Attempt:            attempt.Attempt,
+			Diff:               json.RawMessage(`{"set":{},"unset":[]}`),
+		}
+	}
+	return &model.NodeContextHistory{
+		WorkflowInstanceID: inst.ID,
+		OccurrenceID:       attempt.ID,
+		NodeID:             attempt.NodeID,
+		Attempt:            attempt.Attempt,
+		Diff:               diff.JSON(),
+	}
 }
 
 // failAcceptedInput records an accepted input delivery whose post processing
 // failed: the delivery stays accepted (the API returns 202), the node
 // attempt takes nodeStatus, and the workflow fails with the merged context.
-func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.WorkflowInstance, attempt *model.NodeInstance, req DeliverInput, nodeStatus model.NodeStatus, ctxMap map[string]any, cause error) (*model.InputDelivery, error) {
+func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.WorkflowInstance, attempt *model.NodeInstance, req DeliverInput, reqCtx map[string]any, nodeStatus model.NodeStatus, ctxMap map[string]any, cause error) (*model.InputDelivery, error) {
 	return s.instances.DeliverInput(ctx, repository.InputCompletion{
 		InstanceID:     inst.ID,
 		NodeInstanceID: attempt.ID,
@@ -959,6 +1258,7 @@ func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.Wor
 		NewContext:     mustMarshal(ctxMap),
 		Error:          cause.Error(),
 		CreatedBy:      s.actor,
+		History:        s.leanInputHistory(inst, reqCtx, ctxMap, attempt),
 	})
 }
 

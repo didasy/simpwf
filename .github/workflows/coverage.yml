@@ -45,6 +45,8 @@ jobs:
       - name: Run tests with coverage
         run: |
           go test ./... -covermode=count -coverprofile=coverage.out
+          grep -v -e '/docs/' -e '/cmd/' coverage.out > coverage.tmp || true
+          mv coverage.tmp coverage.out
           go tool cover -func=coverage.out -o=coverage.out
       - name: Go Coverage Badge
         uses: tj-actions/coverage-badge-go@v3

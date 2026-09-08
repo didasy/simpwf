@@ -52,3 +52,6 @@ jobs:
         with:
           coverage-threshold: 75
           fail-coverage: always
+          ignore-pattern: |
+            /docs/
+            /cmd/

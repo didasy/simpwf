@@ -96,7 +96,12 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 
 	nodeDefs := repository.NewNodeDefinitionRepository(db)
 	wfDefs := repository.NewWorkflowDefinitionRepository(db)
-	instances := repository.NewInstanceRepository(db)
+	leanOpts := model.LeanOptions{
+		LeanContextDefault: cfg.Engine.LeanContextDefault,
+		AnchorEvery:        cfg.Engine.LeanAnchorEvery,
+		ReplayMax:          cfg.Engine.LeanReplayMax,
+	}
+	instances := repository.NewInstanceRepositoryWithOptions(db, leanOpts)
 
 	nodeLimits := model.NodeLimits{
 		DefaultTimeout:   cfg.Engine.DefaultNodeTimeout,
@@ -193,8 +198,18 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 		return wfSvc.Materialize(ctx, wc)
 	}
-	eng := engine.NewEngine(instances, executors, hookRunner, limits, loader, actor)
-	instSvc := service.NewInstanceService(instances, wfDefs, wfSvc, &executor.InputExecutor{}, hookRunner, actor, nodeLimits, eng)
+	eng := engine.NewEngine(instances, executors, hookRunner, limits, loader, actor, leanOpts)
+	instSvc := service.NewInstanceService(
+		instances,
+		wfDefs,
+		wfSvc,
+		&executor.InputExecutor{},
+		hookRunner,
+		actor,
+		nodeLimits,
+		eng,
+		leanOpts,
+	)
 	hostname, _ := os.Hostname()
 
 	// Broker input consumers deliver payloads to waiting input nodes whose

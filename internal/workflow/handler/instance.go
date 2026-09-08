@@ -111,6 +111,7 @@ func (h *InstanceHandler) Status(c *gin.Context) {
 	resp := InstanceStatusResponse{
 		ID:                    inst.ID,
 		WorkflowDefinitionID:  inst.WorkflowDefinitionID,
+		ContextMode:           inst.ContextMode,
 		Status:                string(inst.Status),
 		WaitingReason:         waitingReason,
 		PauseRequested:        inst.PauseRequested,

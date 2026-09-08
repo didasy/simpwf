@@ -1,6 +1,7 @@
 package model_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
@@ -48,6 +49,38 @@ func TestParseWorkflowContentBasic(t *testing.T) {
 	}
 	if wc.Nodes[0].NextNode != topB {
 		t.Errorf("nodes[0].next_node = %q", wc.Nodes[0].NextNode)
+	}
+}
+
+func TestParseContextMode(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{`{"context_mode":"full"}`, "full"},
+		{`{"context_mode":"lean"}`, "lean"},
+	} {
+		got, err := model.ParseContextMode(json.RawMessage(tc.raw))
+		if err != nil {
+			t.Fatalf("ParseContextMode(%s) error = %v", tc.raw, err)
+		}
+		if got == nil || *got != tc.want {
+			t.Fatalf("ParseContextMode(%s) = %v, want %q", tc.raw, got, tc.want)
+		}
+	}
+	if _, err := model.ParseContextMode(json.RawMessage(`{"context_mode":"bogus"}`)); err == nil {
+		t.Fatal(`ParseContextMode(bogus) error = nil`)
+	}
+	if got, err := model.ParseContextMode(json.RawMessage(`{}`)); err != nil || got != nil {
+		t.Fatalf("ParseContextMode(absent) = %v, %v, want nil, nil", got, err)
+	}
+}
+
+func TestParseWorkflowContentCarriesContextMode(t *testing.T) {
+	raw := `{"start_node_id":"` + topA + `","context_mode":"lean","nodes":[` + scriptNode(topA, "") + `]}`
+	wc := mustParseWorkflow(t, raw)
+	if wc.ContextMode == nil || *wc.ContextMode != "lean" {
+		t.Fatalf("ContextMode = %v, want lean", wc.ContextMode)
 	}
 }
 

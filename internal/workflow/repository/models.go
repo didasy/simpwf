@@ -84,6 +84,7 @@ func (WorkflowRequestModel) TableName() string { return "workflow_requests" }
 type WorkflowInstanceModel struct {
 	ID                   string         `gorm:"column:id;type:uuid;primaryKey"`
 	WorkflowDefinitionID string         `gorm:"column:workflow_definition_id;type:uuid;not null;index"`
+	ContextMode          string         `gorm:"column:context_mode;not null;default:'full'"`
 	Status               string         `gorm:"column:status;not null;index"`
 	WaitingReason        string         `gorm:"column:waiting_reason;not null;default:''"`
 	PauseRequested       bool           `gorm:"column:pause_requested;not null;default:false"`
@@ -107,6 +108,23 @@ type WorkflowInstanceModel struct {
 
 // TableName is the workflow_instances table.
 func (WorkflowInstanceModel) TableName() string { return "workflow_instances" }
+
+// NodeContextHistoryModel stores one lean-context commit or anchor.
+type NodeContextHistoryModel struct {
+	ID                 string         `gorm:"column:id;type:uuid;primaryKey;index:idx_node_context_history_cursor,priority:3"`
+	WorkflowInstanceID string         `gorm:"column:workflow_instance_id;type:uuid;not null;index;index:idx_node_context_history_cursor,priority:1"`
+	OccurrenceID       string         `gorm:"column:occurrence_id;not null;default:'';index"`
+	NodeID             string         `gorm:"column:node_id;not null"`
+	Attempt            int            `gorm:"column:attempt;not null;default:0"`
+	IsAnchor           bool           `gorm:"column:is_anchor;not null;default:false"`
+	Snapshot           datatypes.JSON `gorm:"column:snapshot;type:jsonb;not null;default:'null'"`
+	Diff               datatypes.JSON `gorm:"column:diff;type:jsonb;not null;default:'null'"`
+	Superseded         bool           `gorm:"column:superseded;not null;default:false;index"`
+	CreatedAt          time.Time      `gorm:"column:created_at;not null;index:idx_node_context_history_cursor,priority:2"`
+}
+
+// TableName is the node_context_history table.
+func (NodeContextHistoryModel) TableName() string { return "node_context_history" }
 
 // NodeInstanceModel persists model.NodeInstance.
 type NodeInstanceModel struct {

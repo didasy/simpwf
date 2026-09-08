@@ -44,6 +44,8 @@ type Checkpoint struct {
 	Context              json.RawMessage
 	Error                string
 	FinishedAt           *time.Time
+	// History is appended atomically with the checkpoint when non-nil.
+	History *model.NodeContextHistory
 }
 
 // InputCompletion is an atomic input delivery: the delivery row plus, when
@@ -68,6 +70,8 @@ type InputCompletion struct {
 	NewContext json.RawMessage
 	Status     model.WorkflowStatus
 	FinishedAt *time.Time
+	// History is appended atomically with input completion when non-nil.
+	History *model.NodeContextHistory
 }
 
 // ContextUpdate is an atomic replacement of a paused instance's context: the
@@ -121,8 +125,21 @@ func newRepoID() string {
 	return id
 }
 
+// HistoryRepository persists and replays lean-context history.
+type HistoryRepository interface {
+	// AppendHistory appends one immutable context anchor or diff.
+	AppendHistory(ctx context.Context, h model.NodeContextHistory) error
+	// LoadHistory returns all history rows ordered by (created_at, id).
+	LoadHistory(ctx context.Context, instanceID string) ([]model.NodeContextHistory, error)
+	// ReconstructBefore restores context immediately before target.
+	ReconstructBefore(ctx context.Context, instanceID string, target model.HistoryCursor, initial json.RawMessage) (json.RawMessage, error)
+	// SupersedeAfter marks later non-superseded history rows superseded.
+	SupersedeAfter(ctx context.Context, instanceID string, target model.HistoryCursor) error
+}
+
 // InstanceRepository is the durable state store for workflow instances.
 type InstanceRepository interface {
+	HistoryRepository
 	// Insert creates a new instance (terminal states are not enforced here).
 	Insert(ctx context.Context, w model.WorkflowInstance) error
 	// GetByID loads one instance.
@@ -228,10 +245,25 @@ type InstanceRepository interface {
 	ListEvents(ctx context.Context, workflowInstanceID string) ([]model.WorkflowInstanceEvent, error)
 }
 
-type instanceRepo struct{ db *gorm.DB }
+type instanceRepo struct {
+	db        *gorm.DB
+	replayMax int
+}
 
 // NewInstanceRepository builds the GORM-backed instance repository.
-func NewInstanceRepository(db *gorm.DB) InstanceRepository { return &instanceRepo{db: db} }
+func NewInstanceRepository(db *gorm.DB) InstanceRepository {
+	return NewInstanceRepositoryWithOptions(db, model.LeanOptions{})
+}
+
+// NewInstanceRepositoryWithOptions builds the repository with lean replay
+// limits. Zero or negative ReplayMax uses the default.
+func NewInstanceRepositoryWithOptions(db *gorm.DB, opts model.LeanOptions) InstanceRepository {
+	replayMax := opts.ReplayMax
+	if replayMax <= 0 {
+		replayMax = defaultHistoryReplayMax
+	}
+	return &instanceRepo{db: db, replayMax: replayMax}
+}
 
 func (r *instanceRepo) Insert(ctx context.Context, w model.WorkflowInstance) error {
 	m := WorkflowInstanceToModel(w)
@@ -538,6 +570,9 @@ func (r *instanceRepo) Checkpoint(ctx context.Context, c Checkpoint) error {
 		if res.RowsAffected != 1 {
 			return r.diagnoseFence(ctx, tx, c.InstanceID, c.WorkerID, c.Revision)
 		}
+		if err := appendHistoryTx(tx, c.InstanceID, c.History, now); err != nil {
+			return err
+		}
 		from := statusWithReason{status: c.FromStatus, waitingReason: c.FromWaitingReason}
 		to := statusWithReason{status: c.Status, waitingReason: c.WaitingReason}
 		return r.enqueueStatusUpdate(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, now)
@@ -839,6 +874,9 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		if upd.RowsAffected == 0 {
 			return ErrStatusConflict
 		}
+		if err := appendHistoryTx(tx, c.InstanceID, c.History, now); err != nil {
+			return err
+		}
 		from := statusWithReason{status: model.WorkflowWaiting, waitingReason: model.WaitingReasonInput}
 		to := statusWithReason{status: c.Status, waitingReason: model.WaitingReasonRunnable}
 		events := []string{model.StatusUpdateEventInputReceived}
@@ -934,6 +972,9 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 		}
 		if upd.RowsAffected == 0 {
 			return ErrStatusConflict
+		}
+		if err := appendHistoryTx(tx, c.InstanceID, c.History, now); err != nil {
+			return err
 		}
 		from := statusWithReason{status: model.WorkflowWaiting, waitingReason: model.WaitingReasonInput}
 		to := statusWithReason{status: model.WorkflowFailed, waitingReason: model.WaitingReasonRunnable}

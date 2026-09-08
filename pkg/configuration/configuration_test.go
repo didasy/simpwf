@@ -172,6 +172,31 @@ func TestLoadEngineDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadLeanContextEnvDefaultOverridesConfigFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  lean_context_default: false
+`)
+	setenv(t, "SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT", "true")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Engine.LeanContextDefault {
+		t.Error("lean_context_default = false, want true from environment")
+	}
+	if cfg.Engine.LeanAnchorEvery != 20 {
+		t.Errorf("lean_anchor_every = %d, want 20", cfg.Engine.LeanAnchorEvery)
+	}
+	if cfg.Engine.LeanReplayMax != 500 {
+		t.Errorf("lean_replay_max = %d, want 500", cfg.Engine.LeanReplayMax)
+	}
+}
+
 func TestLoadEngineSettingsFromEnv(t *testing.T) {
 	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
 	setenv(t, "SIMPWF_ENGINE_MAX_PER_NODE_EXECUTIONS", "50")

@@ -100,6 +100,7 @@ type InstanceSummaryResponse struct {
 type InstanceStatusResponse struct {
 	ID                    string                            `json:"id"`
 	WorkflowDefinitionID  string                            `json:"workflow_definition_id"`
+	ContextMode           string                            `json:"context_mode"`
 	Status                string                            `json:"status"`
 	WaitingReason         *string                           `json:"waiting_reason"`
 	PauseRequested        bool                              `json:"pause_requested"`

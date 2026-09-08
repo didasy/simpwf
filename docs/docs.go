@@ -1360,6 +1360,9 @@ const docTemplate = `{
                 "attempt": {
                     "type": "integer"
                 },
+                "context_mode": {
+                    "type": "string"
+                },
                 "counters": {
                     "type": "array",
                     "items": {

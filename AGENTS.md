@@ -64,18 +64,19 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-## 5. Notes
+## 5. Tooling (mandatory)
 
-**These are important notes and must be followed.**
+### Skills
+- Before any response or action, invoke Skill tool twice with exact names `caveman`, then `using-superpowers`. Never Read skill files.
 
-Always use these skills:
+### jcodemunch (code search first)
+- Session start: call `jcodemunch_guide` once, then `resolve_repo` with the absolute folder path to confirm the index is present (`list_repos` as fallback).
+- This repo index: `local/simpwf-3c83eba5`, source root `/home/didasy/project/simpwf`.
+- Discovery order: `search_symbols` → `get_context_bundle` (or `get_symbol_source`) → `search_text` (literals/comments; `is_regex=true` for regex) → `find_references`/`find_importers` (usages) → `get_ranked_context` (task context within token budget) → `get_file_tree`/`get_repo_outline` (structure).
+- Never use Grep/Glob for code discovery in an indexed repo. Use Read only on the exact file about to edit (Edit requires a prior Read in the same conversation).
+- Re-index: after editing source files, call `index_folder` with the absolute folder path. Never call `index_repo` with a local path (GitHub URLs only). Skip re-indexing for read-only work when the index is present.
+- Deferred schemas: if a jcodemunch tool call fails, load it first via ToolSearch `select:<name>`.
 
-- caveman
-- superpowers
-
-Before doing any work. 
-
-Always update jcodemunch index before doing any changes and after any changes to source code files.
-
-Use github mcp when accessing github and jcodemunch mcp to find things in the source codes.
+### GitHub
+- Use `default.github___*` tools for all GitHub reads/writes. Never the `gh` CLI, curl, WebSearch, or FetchUrl for GitHub.
 

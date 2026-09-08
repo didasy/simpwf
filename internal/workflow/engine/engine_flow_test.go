@@ -13,6 +13,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"github.com/simpwf/workflow-engine/pkg/contextdiff"
 	"gorm.io/gorm"
 )
 
@@ -66,6 +67,166 @@ func TestEngineRunsChainToFinish(t *testing.T) {
 			t.Errorf("attempt = %+v, want finished attempt 1", a)
 		}
 	}
+}
+
+func TestEngineLeanScriptStoresDiffAndHistory(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "diff", "delete context.gone; context.nested = {x: 2}; return 'ok';", "", "out", nil),
+	)
+	instanceID := insertInstanceWithMode(t, db, wfID, n1, map[string]any{"gone": true, "keep": 1}, "lean")
+	e, instances := testEngineWithOptions(t, db, model.DefaultLimits(), model.LeanOptions{AnchorEvery: 20, ReplayMax: 500})
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
+	}
+
+	attempt, err := instances.GetNodeInstanceByNode(context.Background(), instanceID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(attempt.ContextBefore) != "null" {
+		t.Errorf("context_before = %s, want null", attempt.ContextBefore)
+	}
+	diff, err := contextdiff.ParseDiff(attempt.ContextAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := diff.Set["out"]; !ok {
+		t.Errorf("diff set = %v, want output property", diff.Set)
+	}
+	if _, ok := diff.Set["nested"]; !ok {
+		t.Errorf("diff set = %v, want nested", diff.Set)
+	}
+	if len(diff.Unset) != 1 || diff.Unset[0] != "gone" {
+		t.Errorf("diff unset = %v, want [gone]", diff.Unset)
+	}
+
+	history, err := instances.LoadHistory(context.Background(), instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history rows = %d, want 1", len(history))
+	}
+	if history[0].OccurrenceID != attempt.ID || history[0].Attempt != 1 || history[0].IsAnchor {
+		t.Errorf("history = %+v, want node attempt diff", history[0])
+	}
+}
+
+func TestEngineLeanRetryKeepsHistoryPerAttempt(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "loop", "context.n = (context.n || 0) + 1; return context.n;", n1, "out", nil),
+	)
+	instanceID := insertInstanceWithMode(t, db, wfID, n1, map[string]any{}, "lean")
+	limits := model.DefaultLimits()
+	limits.MaxPerNodeExecutions = 2
+	e, instances := testEngineWithOptions(t, db, limits, model.LeanOptions{AnchorEvery: 20, ReplayMax: 500})
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed (error %q)", cur.Status, cur.Error)
+	}
+
+	attempts, err := instances.ListNodeInstances(context.Background(), instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Attempt != 2 {
+		t.Fatalf("node instances = %+v, want one occurrence at attempt 2", attempts)
+	}
+	history, err := instances.LoadHistory(context.Background(), instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var occurrenceAttempts []int
+	for _, row := range history {
+		if row.OccurrenceID == attempts[0].ID {
+			occurrenceAttempts = append(occurrenceAttempts, row.Attempt)
+		}
+	}
+	if len(occurrenceAttempts) != 2 || occurrenceAttempts[0] != 1 || occurrenceAttempts[1] != 2 {
+		t.Errorf("history occurrence attempts = %v, want [1 2]", occurrenceAttempts)
+	}
+}
+
+func TestEngineLeanSystemCommitsAndPeriodicAnchor(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, g1,
+		nodeJSON(g1, "group", "main", "", n2, "", map[string]any{
+			"start_node_id": n3,
+			"nodes": []map[string]any{
+				{"id": n3, "type": "script", "name": "inner", "script": "return 1;", "output_property": "inner"},
+			},
+		}),
+		nodeJSON(n2, "script", "after", "return 'after';", "", "after", nil),
+	)
+	instanceID := insertInstanceWithMode(t, db, wfID, g1, map[string]any{}, "lean")
+	e, instances := testEngineWithOptions(t, db, model.DefaultLimits(), model.LeanOptions{AnchorEvery: 2, ReplayMax: 500})
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
+	}
+	history, err := instances.LoadHistory(context.Background(), instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("history rows = %d, want group enter plus two node/context commits", len(history))
+	}
+	if history[0].OccurrenceID != "" || history[0].NodeID != g1 {
+		t.Errorf("group history = %+v, want system commit for %s", history[0], g1)
+	}
+	if !history[1].IsAnchor || string(history[1].Snapshot) == "null" {
+		t.Errorf("history[1] = %+v, want periodic anchor", history[1])
+	}
+	for i, row := range history {
+		if i != 1 && row.IsAnchor {
+			t.Errorf("history[%d] unexpectedly anchor: %+v", i, row)
+		}
+	}
+}
+
+func TestEngineLeanInputParkStoresEmptyDiff(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "input", "ask", "", n2, "", map[string]any{
+			"channel": "http", "context_path": "webhook",
+		}),
+		nodeJSON(n2, "script", "after", "return 'ok';", "", "after", nil),
+	)
+	instanceID := insertInstanceWithMode(t, db, wfID, n1, map[string]any{}, "lean")
+	e, instances := testEngineWithOptions(t, db, model.DefaultLimits(), model.LeanOptions{AnchorEvery: 20, ReplayMax: 500})
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("status = %s/%s, want waiting/input", cur.Status, cur.WaitingReason)
+	}
+	attempt, err := instances.GetNodeInstanceByNode(context.Background(), instanceID, n1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(attempt.ContextBefore) != "null" {
+		t.Errorf("context_before = %s, want null", attempt.ContextBefore)
+	}
+	diff, err := contextdiff.ParseDiff(attempt.ContextAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.Empty() {
+		t.Errorf("input context diff = %+v, want empty", diff)
+	}
+	history, err := instances.LoadHistory(context.Background(), instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].OccurrenceID != attempt.ID || history[0].Attempt != attempt.Attempt || !contextdiffMustEmpty(history[0].Diff) {
+		t.Errorf("history = %+v, want one empty diff", history)
+	}
+}
+
+func contextdiffMustEmpty(raw json.RawMessage) bool {
+	diff, err := contextdiff.ParseDiff(raw)
+	return err == nil && diff.Empty()
 }
 
 func TestEngineConditionsRoute(t *testing.T) {
@@ -701,6 +862,25 @@ func TestEnginePostHookFailureFailsWorkflow(t *testing.T) {
 	}
 	if after["out"] != float64(7) {
 		t.Errorf("context_after = %v, want merged native output preserved", after)
+	}
+}
+
+func TestEngineFullFailureDoesNotCommitPreHookContext(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "boom", "throw new Error('script boom');", "", "out", map[string]any{
+			"pre_script": map[string]any{"script": "context.partial = true;"},
+		}),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	e, _ := testEngine(t, db, model.DefaultLimits())
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed", cur.Status)
+	}
+	ctx := instanceContext(t, db, instanceID)
+	if _, ok := ctx["partial"]; ok {
+		t.Errorf("context = %v, want pre-hook mutation omitted on full failure", ctx)
 	}
 }
 
