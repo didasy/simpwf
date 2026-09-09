@@ -267,8 +267,7 @@ configured `output_queue` with `NodeInstanceId` (the workflow instance id) /
 `IdempotencyKey` headers and the stable `<instance_id>:<occurrence_id>`
 execution id as AMQP `message_id` and receipt `message_id`). The publish result
 (`{channel, destination, message_id}`) is written to the workflow context
-through the normal `output_property` behavior (default: the node occurrence
-id, not the graph node id). A broker-disabled deployment
+through the normal `output_property` behavior (default: the graph node id). A broker-disabled deployment
 or a publish error fails the node like any other execution error.
 
 ## Pollers
