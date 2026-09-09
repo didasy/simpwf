@@ -1477,3 +1477,40 @@ func TestEngineRecoveryReconcilesGroupedInputStack(t *testing.T) {
 		t.Errorf("frame = %+v, want current %s stack [%s]", frame, n2, g1)
 	}
 }
+
+func TestEngineBlankOutputPropertyDefaultsToNodeID(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "noname", "return 42;", "", "", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	e, _ := testEngine(t, db, model.DefaultLimits())
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
+	}
+	ctx := instanceContext(t, db, instanceID)
+	if ctx[n1] != float64(42) {
+		t.Errorf("context[%q] = %v, want 42", n1, ctx[n1])
+	}
+	if len(ctx) != 1 {
+		t.Errorf("context = %v, want exactly one key (no orphan UUID key)", ctx)
+	}
+}
+
+func TestEngineWhitespaceOutputPropertyDefaultsToNodeID(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "noname", "return 42;", "", "   ", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	e, _ := testEngine(t, db, model.DefaultLimits())
+	cur := runEngine(t, db, e, instanceID)
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
+	}
+	ctx := instanceContext(t, db, instanceID)
+	if ctx[n1] != float64(42) {
+		t.Errorf("context[%q] = %v, want 42", n1, ctx[n1])
+	}
+}

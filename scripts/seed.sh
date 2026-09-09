@@ -29,6 +29,15 @@ node_definitions=$(cat <<'JSON'
       "timeout": "30s"
     }
   },
+  "script_no_output": {
+    "name": "add-lucky-number",
+    "type": "script",
+    "content": {
+      "type": "script",
+      "script": "return Math.floor(Math.random() * 1000);",
+      "timeout": "30s"
+    }
+  },
   "conditions": {
     "name": "route-by-total",
     "type": "conditions",
@@ -107,7 +116,12 @@ workflow_template=$(cat <<'JSON'
       {
         "id": "019fea40-ddb2-7b4b-98fb-1c01a04d33e8",
         "name": "calculate-total",
-        "output_property": "total"
+        "output_property": "total",
+        "next_node": "019fea42-0000-7016-8814-16cbe5663eff"
+      },
+      {
+        "id": "019fea42-0000-7016-8814-16cbe5663eff",
+        "name": "add-lucky-number"
       }
     ]
   },

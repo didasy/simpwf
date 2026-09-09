@@ -162,7 +162,8 @@ positive integer → exact attempt; `0`/negative/garbage → `400`; beyond lates
   occurrence; not usable as a rollback target), `selected_attempt`/`latest_attempt` `null`, `attempt_count: 0`,
   snapshots `null`.
 - Executed node → `context_before`, `context_after`, `input`, `output`, `error`, `recovery_policy`, `recovery_result`,
-  `cancelled`, `started_at`, `finished_at`, `stopped_at`, `duration_ms`, audit timestamps.
+  `cancelled`, `started_at`, `finished_at`, `stopped_at`, `duration_ms`, audit timestamps. Per-type `output` shapes
+  are listed under "Node outputs" in `fields.md`.
 
 ### `PUT /v1/workflow/instance/{id}/input` → `202`
 

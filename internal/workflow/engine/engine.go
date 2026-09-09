@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -485,9 +486,9 @@ func (e *Engine) executeStep(ctx context.Context, cur model.WorkflowInstance, g 
 		if res.Context != nil {
 			outCtx = res.Context
 		}
-		key := nc.OutputProperty
+		key := strings.TrimSpace(nc.OutputProperty)
 		if key == "" {
-			key = attempt.ID
+			key = nc.ID
 		}
 		outCtx[key] = res.Output
 		hookOutput = res.Output

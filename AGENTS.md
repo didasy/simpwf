@@ -64,7 +64,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-## 5. Tooling (mandatory)
+## 5. Git Discipline (mandatory)
+
+**Never commit or stage on your own. User owns all commits.**
+
+- No `git commit`, `git stage`, `git add`, `git stash`, or anything that stages (no `-a`, `--amend`, `reset`, `restore --staged`).
+- Leave working tree dirty. User reviews, then user commits.
+- Exception only: user explicitly asks ("commit this", "stage this"). Then do only what they asked, nothing extra.
+
+## 6. Tooling (mandatory)
 
 ### Skills
 - Before any response or action, invoke Skill tool twice with exact names `caveman`, then `using-superpowers`. Never Read skill files.
