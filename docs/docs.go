@@ -1340,6 +1340,17 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_workflow_handler.InputFormDTO": {
+            "type": "object",
+            "properties": {
+                "schema": {
+                    "type": "object"
+                },
+                "ui": {
+                    "type": "object"
+                }
+            }
+        },
         "internal_workflow_handler.InstanceContextResponse": {
             "type": "object",
             "properties": {
@@ -1401,6 +1412,9 @@ const docTemplate = `{
                 },
                 "pause_requested": {
                     "type": "boolean"
+                },
+                "pending_input": {
+                    "$ref": "#/definitions/internal_workflow_handler.PendingInputResponse"
                 },
                 "started_at": {
                     "type": "string"
@@ -1683,6 +1697,23 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.PendingInputResponse": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string"
+                },
+                "context_path": {
+                    "type": "string"
+                },
+                "form": {
+                    "$ref": "#/definitions/internal_workflow_handler.InputFormDTO"
+                },
+                "node_id": {
                     "type": "string"
                 }
             }

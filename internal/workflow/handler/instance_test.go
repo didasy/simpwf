@@ -153,6 +153,105 @@ func TestInstanceStatus(t *testing.T) {
 	}
 }
 
+func TestInstanceStatusPendingInputWithForm(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status: model.WorkflowWaiting, WaitingReason: model.WaitingReasonInput,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		Frame:     json.RawMessage(`{"current_node_id":"x"}`),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	detail := &service.StatusDetail{Instance: inst, PendingInput: &service.PendingInput{
+		NodeID: "node-1", Channel: "http", ContextPath: "user",
+		Form: &model.InputForm{
+			Schema: json.RawMessage(`{"type":"object","required":["email"]}`),
+			UI:     json.RawMessage(`{"order":["email"]}`),
+		},
+	}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	pi, ok := raw["pending_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending_input missing: %v", raw)
+	}
+	if pi["node_id"] != "node-1" || pi["channel"] != "http" || pi["context_path"] != "user" {
+		t.Errorf("pending_input identity = %v", pi)
+	}
+	form, ok := pi["form"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending_input.form missing: %v", pi)
+	}
+	schema, ok := form["schema"].(map[string]any)
+	if !ok || schema["type"] != "object" {
+		t.Errorf("form.schema = %v, want object schema", form["schema"])
+	}
+}
+
+func TestInstanceStatusPendingInputFormNull(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status: model.WorkflowWaiting, WaitingReason: model.WaitingReasonInput,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		Frame:     json.RawMessage(`{"current_node_id":"x"}`),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	detail := &service.StatusDetail{Instance: inst, PendingInput: &service.PendingInput{
+		NodeID: "node-1", Channel: "http", ContextPath: "user",
+	}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	pi, ok := raw["pending_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("pending_input missing: %v", raw)
+	}
+	form, present := pi["form"]
+	if !present {
+		t.Fatalf("form key missing, want present-with-null: %v", pi)
+	}
+	if form != nil {
+		t.Errorf("form = %v, want null for formless input node", form)
+	}
+}
+
+func TestInstanceStatusPendingInputOmittedWhenNotWaiting(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status:    model.WorkflowFinished,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	detail := &service.StatusDetail{Instance: inst}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := raw["pending_input"]; present {
+		t.Errorf("pending_input present = %v, want omitted when not waiting", raw["pending_input"])
+	}
+}
+
 func TestInstanceStatusNotFound(t *testing.T) {
 	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{
 		statusErr: model.ErrNotFound,

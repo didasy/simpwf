@@ -766,3 +766,66 @@ func TestParseNodeContentOnFailureReferencedNode(t *testing.T) {
 		t.Error("referenced script with on_failure error = nil, want error")
 	}
 }
+
+func TestParseInputNodeFormAccepted(t *testing.T) {
+	nc := mustParseContent(t, `{
+		"type": "input",
+		"channel": "http",
+		"context_path": "user",
+		"form": {
+			"schema": {"type":"object","required":["email"],"properties":{"email":{"type":"string","format":"email"}}},
+			"ui": {"order":["email"]}
+		}
+	}`)
+	if nc.Form == nil {
+		t.Fatal("form = nil, want parsed form")
+	}
+	if !strings.Contains(string(nc.Form.Schema), `"email"`) {
+		t.Errorf("form schema not stored: %s", nc.Form.Schema)
+	}
+	if !strings.Contains(string(nc.Form.UI), `"order"`) {
+		t.Errorf("form ui not stored: %s", nc.Form.UI)
+	}
+}
+
+func TestParseInputNodeFormRejectsInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"missing schema", `{"type":"input","channel":"http","context_path":"x","form":{"ui":{}}}`, "schema"},
+		{"empty schema", `{"type":"input","channel":"http","context_path":"x","form":{"schema":{}}}`, "schema"},
+		{"non-object schema", `{"type":"input","channel":"http","context_path":"x","form":{"schema":[]}}`, "schema"},
+		{"invalid json schema", `{"type":"input","channel":"http","context_path":"x","form":{"schema":{"type":"object","properties":{"name":{"type":"string","pattern":"(["}}}}}`, "schema"},
+		{"non-object ui", `{"type":"input","channel":"http","context_path":"x","form":{"schema":{"type":"object"},"ui":[1,2]}}`, "ui"},
+	}
+	for _, c := range cases {
+		_, err := model.ParseNodeContent([]byte(c.raw), testLimits)
+		if err == nil {
+			t.Errorf("%s: error = nil, want error", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: error = %q, want mention of %q", c.name, err, c.want)
+		}
+	}
+}
+
+func TestParseFormRejectsNonInputTypes(t *testing.T) {
+	raw := `{"type":"script","script":"return 1;","form":{"schema":{"type":"object"}}}`
+	if _, err := model.ParseNodeContent([]byte(raw), testLimits); err == nil {
+		t.Error("script with form: error = nil, want error")
+	} else if !strings.Contains(err.Error(), "form") {
+		t.Errorf("script with form: error = %q, want mention of form", err)
+	}
+}
+
+func TestParseFormRejectsReference(t *testing.T) {
+	raw := `{"node_definition_id":"11111111-1111-7111-8111-111111111111","form":{"schema":{"type":"object"}}}`
+	if _, err := model.ParseNodeContent([]byte(raw), testLimits); err == nil {
+		t.Error("reference with form: error = nil, want error")
+	} else if !strings.Contains(err.Error(), "inline executable") {
+		t.Errorf("reference with form: error = %q, want inline-executable rejection", err)
+	}
+}

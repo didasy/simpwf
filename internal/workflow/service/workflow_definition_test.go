@@ -231,6 +231,42 @@ func TestMaterializeMergesNodeDefinition(t *testing.T) {
 	}
 }
 
+func TestMaterializeInheritsInputForm(t *testing.T) {
+	ndRepo := newFakeNodeRepo()
+	ndRepo.defs[nodeDefA] = model.NodeDefinition{
+		ID: nodeDefA, Name: "shared-input", Version: 1, LineageID: lineageID,
+		Type: "input", Content: json.RawMessage(`{"type":"input","channel":"http","context_path":"user",
+			"form":{"schema":{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}},"ui":{"order":["email"]}}}`),
+	}
+	svc := newWorkflowService(newFakeWorkflowRepo(), ndRepo)
+
+	content := `{"start_node_id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","nodes":[
+		{"id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","node_definition_id":"` + nodeDefA + `","next_node":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"},
+		{"id":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb","type":"script","script":"return 2;"}
+	]}`
+	wc, err := model.ParseWorkflowContent([]byte(content), testLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := svc.Materialize(context.Background(), wc)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v", err)
+	}
+	first := merged.Nodes[0]
+	if first.Type != model.NodeTypeInput {
+		t.Fatalf("type = %s, want input", first.Type)
+	}
+	if first.Form == nil {
+		t.Fatal("form = nil, want inherited form")
+	}
+	if got := string(first.Form.Schema); got != `{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}` {
+		t.Errorf("schema = %s", got)
+	}
+	if got := string(first.Form.UI); got != `{"order":["email"]}` {
+		t.Errorf("ui = %s", got)
+	}
+}
+
 func TestMaterializeValidatesConditionDefinitionWithWorkflowKeys(t *testing.T) {
 	ndRepo := newFakeNodeRepo()
 	ndRepo.defs[nodeDefA] = model.NodeDefinition{

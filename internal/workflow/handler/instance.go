@@ -122,6 +122,7 @@ func (h *InstanceHandler) Status(c *gin.Context) {
 		Attempt:               d.Attempt,
 		Counters:              inst.Counters,
 		Nodes:                 toNodeOccurrenceResponses(d.Nodes),
+		PendingInput:          toPendingInputResponse(d.PendingInput),
 		Error:                 errorMsg,
 		StartedAt:             inst.StartedAt,
 		FinishedAt:            inst.FinishedAt,
@@ -357,6 +358,24 @@ func toNodeOccurrenceResponses(nodes map[string]service.NodeOccurrence) map[stri
 		}
 	}
 	return out
+}
+
+// toPendingInputResponse maps the waiting-input contract onto the openapi
+// PendingInput schema. Nil stays nil so the field is omitted; a formless
+// input node renders form as JSON null.
+func toPendingInputResponse(p *service.PendingInput) *PendingInputResponse {
+	if p == nil {
+		return nil
+	}
+	resp := &PendingInputResponse{
+		NodeID:      p.NodeID,
+		Channel:     p.Channel,
+		ContextPath: p.ContextPath,
+	}
+	if p.Form != nil {
+		resp.Form = &InputFormDTO{Schema: p.Form.Schema, UI: p.Form.UI}
+	}
+	return resp
 }
 
 // toInstanceListQuery converts a parsed list query into the repository query.

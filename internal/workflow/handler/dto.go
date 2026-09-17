@@ -111,6 +111,7 @@ type InstanceStatusResponse struct {
 	Attempt               int                               `json:"attempt"`
 	Counters              json.RawMessage                   `json:"counters"`
 	Nodes                 map[string]NodeOccurrenceResponse `json:"nodes,omitempty"`
+	PendingInput          *PendingInputResponse             `json:"pending_input,omitempty"`
 	Error                 *string                           `json:"error"`
 	StartedAt             *time.Time                        `json:"started_at"`
 	FinishedAt            *time.Time                        `json:"finished_at"`
@@ -118,6 +119,23 @@ type InstanceStatusResponse struct {
 	UpdatedBy             string                            `json:"updated_by"`
 	CreatedAt             time.Time                         `json:"created_at"`
 	UpdatedAt             time.Time                         `json:"updated_at"`
+}
+
+// PendingInputResponse is the waiting-input contract on status: the frontend
+// renders its dynamic form from Form. Form is null when the input node
+// carries no form contract; pending_input itself is omitted unless the
+// instance waits on an input node.
+type PendingInputResponse struct {
+	NodeID      string        `json:"node_id"`
+	Channel     string        `json:"channel"`
+	ContextPath string        `json:"context_path"`
+	Form        *InputFormDTO `json:"form"`
+}
+
+// InputFormDTO carries the raw schema contract plus opaque ui render hints.
+type InputFormDTO struct {
+	Schema json.RawMessage `json:"schema" swaggertype:"object"`
+	UI     json.RawMessage `json:"ui,omitempty" swaggertype:"object"`
 }
 
 // NodeOccurrenceResponse maps a workflow graph node id to its executed

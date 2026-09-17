@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/simpwf/workflow-engine/pkg/contextpath"
 	"github.com/simpwf/workflow-engine/pkg/ids"
 )
@@ -69,6 +70,7 @@ type NodeContent struct {
 	Channel          string            // input
 	ContextPath      string            // input: target context path
 	Validation       *ValidationScript // input
+	Form             *InputForm        // input: dynamic form contract (schema + ui hints)
 	HTTP             *HTTPConfig       // external_call
 	Execution        *ExecutionConfig  // external_call
 	OutputProperty   string
@@ -110,6 +112,15 @@ type Condition struct {
 // ValidationScript validates an input payload.
 type ValidationScript struct {
 	Script string
+}
+
+// InputForm is the dynamic-form contract of an input node. Schema is a JSON
+// Schema (draft 2020-12) payload contract; UI carries opaque frontend render
+// hints. Both are versioned with the definition content snapshot, so v1/v2
+// carry their own form.
+type InputForm struct {
+	Schema json.RawMessage `json:"schema"`
+	UI     json.RawMessage `json:"ui,omitempty"`
 }
 
 // HookScript is an optional lifecycle context-transform script. A pre hook
@@ -201,6 +212,7 @@ type rawNode struct {
 	Channel          *string                  `json:"channel"`
 	ContextPath      *string                  `json:"context_path"`
 	Validation       *rawValidation           `json:"validation"`
+	Form             *rawForm                 `json:"form"`
 	HTTPConfig       *rawHTTPConfig           `json:"http_config"`
 	ExecutionConfig  *rawExecutionConfig      `json:"execution_config"`
 	PollerHTTP       *rawPollerHTTPConfig     `json:"http"`
@@ -225,6 +237,11 @@ type rawCondition struct {
 
 type rawValidation struct {
 	Script string `json:"script"`
+}
+
+type rawForm struct {
+	Schema json.RawMessage `json:"schema"`
+	UI     json.RawMessage `json:"ui"`
 }
 
 type rawHTTPConfig struct {
@@ -343,7 +360,7 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		if r.Type != "" && r.Type != string(NodeTypeExternalCall) && r.Type != string(NodeTypePoller) && nc.OnFailure != nil {
 			return nil, fmt.Errorf("node type %q does not support on_failure", r.Type)
 		}
-		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
+		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
 			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil {
 			return nil, errors.New("node referencing a node_definition_id cannot carry inline executable fields")
 		}
@@ -435,6 +452,11 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 			}
 			nc.Validation = &ValidationScript{Script: r.Validation.Script}
 		}
+		form, err := parseInputForm(r.Form)
+		if err != nil {
+			return nil, err
+		}
+		nc.Form = form
 		nc.Timeout = limits.ConditionTimeout
 
 	case NodeTypeOutput:
@@ -669,7 +691,60 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		}
 		nc.Group = g
 	}
+	if nc.Type != NodeTypeInput && r.Form != nil {
+		return nil, fmt.Errorf("node type %q does not support form", nc.Type)
+	}
 	return nc, nil
+}
+
+// parseInputForm resolves the optional form contract of an input node. The
+// schema must be a non-empty JSON object that compiles as a JSON Schema
+// (draft 2020-12); ui, when present, must be a JSON object of opaque render
+// hints. Raw copies are stored so status responses serve exact bytes.
+func parseInputForm(raw *rawForm) (*InputForm, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if len(raw.Schema) == 0 || strings.TrimSpace(string(raw.Schema)) == "" || string(raw.Schema) == "null" {
+		return nil, errors.New("form.schema is required")
+	}
+	trimmed := strings.TrimSpace(string(raw.Schema))
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil, errors.New("form.schema must be an object")
+	}
+	if trimmed == "{}" {
+		return nil, errors.New("form.schema must be a non-empty object")
+	}
+	var schemaDoc any
+	if err := json.Unmarshal(raw.Schema, &schemaDoc); err != nil {
+		return nil, fmt.Errorf("form.schema must be valid JSON: %w", err)
+	}
+	if _, ok := schemaDoc.(map[string]any); !ok {
+		return nil, errors.New("form.schema must be an object")
+	}
+	c := jsonschema.NewCompiler()
+	c.DefaultDraft(jsonschema.Draft2020)
+	if err := c.AddResource("form.json", schemaDoc); err != nil {
+		return nil, fmt.Errorf("form.schema is not a valid JSON Schema: %w", err)
+	}
+	if _, err := c.Compile("form.json"); err != nil {
+		return nil, fmt.Errorf("form.schema is not a valid JSON Schema: %w", err)
+	}
+	form := &InputForm{Schema: append(json.RawMessage(nil), raw.Schema...)}
+	if len(raw.UI) > 0 {
+		if string(raw.UI) == "null" {
+			return nil, errors.New("form.ui must be an object")
+		}
+		var uiDoc any
+		if err := json.Unmarshal(raw.UI, &uiDoc); err != nil {
+			return nil, fmt.Errorf("form.ui must be valid JSON: %w", err)
+		}
+		if _, ok := uiDoc.(map[string]any); !ok {
+			return nil, errors.New("form.ui must be an object")
+		}
+		form.UI = append(json.RawMessage(nil), raw.UI...)
+	}
+	return form, nil
 }
 
 // parseHookScript resolves a pre/post lifecycle hook object. The returned

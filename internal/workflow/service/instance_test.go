@@ -455,6 +455,120 @@ func TestDeliverInputRejectsWithMessage(t *testing.T) {
 	}
 }
 
+func TestDeliverInputFormSchemaRejects(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	// Script would pass any payload; schema must reject first and the script
+	// must never run (script returns rejection for payloads it sees).
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
+			"channel": "http", "context_path": "webhook",
+			"validation": map[string]any{
+				"script": "input = JSON.parse(input); return 'script saw it';",
+			},
+			"form": map[string]any{
+				"schema": map[string]any{
+					"type": "object", "required": []string{"email"},
+					"properties": map[string]any{"email": map[string]any{"type": "string"}},
+				},
+			},
+		}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst.ID)
+
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "schema-bad-1", Payload: []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if delivery.Accepted {
+		t.Errorf("delivery = %+v, want schema rejection", delivery)
+	}
+	if !strings.Contains(delivery.Error, "schema validation failed") {
+		t.Errorf("delivery.Error = %q, want schema failure (script must not run)", delivery.Error)
+	}
+	cur, _ := svc.GetStatus(ctx, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Errorf("instance = %+v, want still waiting on input", cur)
+	}
+}
+
+func TestDeliverInputFormSchemaPassScriptReject(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
+			"channel": "http", "context_path": "webhook",
+			"validation": map[string]any{
+				"script": "input = JSON.parse(input); if (!input.approved) { return 'not approved'; };",
+			},
+			"form": map[string]any{
+				"schema": map[string]any{
+					"type": "object", "required": []string{"email"},
+					"properties": map[string]any{"email": map[string]any{"type": "string"}},
+				},
+			},
+		}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst.ID)
+
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "schema-ok-script-bad", Payload: []byte(`{"email":"a@b.c"}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if delivery.Accepted || delivery.Error != "not approved" {
+		t.Errorf("delivery = %+v, want script rejection after schema pass", delivery)
+	}
+}
+
+func TestDeliverInputFormSchemaPassScriptPass(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
+			"channel": "http", "context_path": "webhook",
+			"form": map[string]any{
+				"schema": map[string]any{
+					"type": "object", "required": []string{"email"},
+					"properties": map[string]any{"email": map[string]any{"type": "string"}},
+				},
+			},
+		}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst.ID)
+
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "schema-ok-1", Payload: []byte(`{"email":"a@b.c"}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if !delivery.Accepted {
+		t.Errorf("delivery = %+v, want accepted", delivery)
+	}
+}
+
 func TestDeliverInputIdempotentReplay(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
@@ -480,13 +594,63 @@ func TestDeliverInputIdempotentReplay(t *testing.T) {
 	driveEngine(t, db, inst.ID) // completes the workflow
 
 	replay, err := svc.DeliverInput(ctx, service.DeliverInput{
-		InstanceID: inst.ID, IdempotencyKey: "key-1", Payload: []byte(`{"ok":2}`),
+		InstanceID: inst.ID, IdempotencyKey: "key-1", Payload: []byte(`{"ok":1}`),
 	})
 	if err != nil {
 		t.Fatalf("replay error = %v", err)
 	}
 	if replay.Accepted != first.Accepted || replay.ID != first.ID {
 		t.Errorf("replay = %+v, want the originally recorded delivery %+v", replay, first)
+	}
+
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "key-1", Payload: []byte(`{"ok":2}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Errorf("DeliverInput() error = %v, want conflict on key reuse with new payload", err)
+	}
+}
+
+func TestDeliverInputReplayKeyWithNewPayloadConflicts(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102",
+			map[string]any{
+				"channel": "http", "context_path": "webhook",
+				"form": map[string]any{
+					"schema": map[string]any{
+						"type": "object", "required": []string{"title", "body"},
+						"properties": map[string]any{
+							"title": map[string]any{"type": "string"},
+							"body":  map[string]any{"type": "string"},
+						},
+					},
+				},
+			}),
+		svcNodeJSON("11111111-1111-7111-8111-111111111102", "script", "after", "return 1;", "", map[string]any{"output_property": "after"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst.ID)
+
+	rejected, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "retry-1", Payload: []byte(`{"title":"wow"}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if rejected.Accepted {
+		t.Fatalf("delivery = %+v, want schema rejection", rejected)
+	}
+
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "retry-1", Payload: []byte(`{"title":"wow","body":"fixed"}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Errorf("DeliverInput() error = %v, want conflict on key reuse with new payload", err)
 	}
 }
 
@@ -2364,6 +2528,98 @@ func TestStatusDetailNodesMap(t *testing.T) {
 		if e.Rollbackable {
 			t.Errorf("Nodes[%s] rollbackable = true while waiting, want false", id)
 		}
+	}
+}
+
+func TestStatusDetailPendingInputWithForm(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "input", "ask", "", "", map[string]any{
+			"channel": "http", "context_path": "user",
+			"form": map[string]any{
+				"schema": map[string]any{
+					"type": "object", "required": []string{"email"},
+					"properties": map[string]any{"email": map[string]any{"type": "string"}},
+				},
+				"ui": map[string]any{"order": []string{"email"}},
+			},
+		}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst.ID)
+
+	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	if d.PendingInput == nil {
+		t.Fatal("PendingInput = nil, want waiting-input contract")
+	}
+	pi := d.PendingInput
+	if pi.NodeID != n1 || pi.Channel != "http" || pi.ContextPath != "user" {
+		t.Errorf("pending input = %+v, want node/channel/path", pi)
+	}
+	if pi.Form == nil || !strings.Contains(string(pi.Form.Schema), `"email"`) {
+		t.Errorf("form schema = %+v, want exact schema bytes", pi.Form)
+	}
+	if pi.Form == nil || !strings.Contains(string(pi.Form.UI), `"order"`) {
+		t.Errorf("form ui = %+v, want exact ui bytes", pi.Form)
+	}
+}
+
+func TestStatusDetailPendingInputNilWhenNotWaitingOnInput(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	// Non-waiting instance: script workflow runs to finished.
+	n1 := "11111111-1111-7111-8111-111111111101"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "script", "a", "return 1;", "", map[string]any{"output_property": "out"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst.ID)
+
+	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	if d.PendingInput != nil {
+		t.Errorf("PendingInput = %+v, want nil when not waiting on input", d.PendingInput)
+	}
+
+	// Waiting without form: pending input present, form nil.
+	n2 := "11111111-1111-7111-8111-111111111102"
+	wfID2 := svcCreateWorkflow(t, db, n2,
+		svcNodeJSON(n2, "input", "ask", "", "", map[string]any{
+			"channel": "http", "context_path": "webhook",
+		}),
+	)
+	inst2, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveEngine(t, db, inst2.ID)
+
+	d2, err := svc.GetStatusDetail(ctx, inst2.ID)
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	if d2.PendingInput == nil {
+		t.Fatal("PendingInput = nil, want present for formless waiting input")
+	}
+	if d2.PendingInput.Form != nil {
+		t.Errorf("Form = %+v, want nil for formless input node", d2.PendingInput.Form)
 	}
 }
 
