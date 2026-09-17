@@ -3,15 +3,18 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/engine"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
+	"github.com/simpwf/workflow-engine/internal/workflow/form"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/contextdiff"
@@ -51,6 +54,19 @@ type StatusDetail struct {
 	// occurrence state. Nil when the definition cannot be loaded, so the
 	// status response omits the map instead of failing.
 	Nodes map[string]NodeOccurrence
+	// PendingInput describes the input the instance waits for. Non-nil only
+	// when the instance waits on an input node; Form is nil when that node
+	// carries no form contract.
+	PendingInput *PendingInput
+}
+
+// PendingInput is the waiting-input contract served on status: the frontend
+// renders its dynamic form from Form, then delivers the payload.
+type PendingInput struct {
+	NodeID      string
+	Channel     string
+	ContextPath string
+	Form        *model.InputForm
 }
 
 // NodeOccurrence is the per-node status view: the already-executed
@@ -315,7 +331,43 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string) (*Stat
 	nodeInstanceID := attempt.ID
 	d.CurrentNodeInstanceID = &nodeInstanceID
 	d.Attempt = attempt.Attempt
+	d.PendingInput = s.pendingInput(ctx, inst, frame.CurrentNodeID)
 	return d, nil
+}
+
+// pendingInput resolves the waiting-input contract for status responses. It
+// returns nil unless the instance waits on an input node, and on any graph
+// load failure (status never fails for graph reasons).
+func (s *instanceService) pendingInput(ctx context.Context, inst *model.WorkflowInstance, currentNodeID string) *PendingInput {
+	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
+		return nil
+	}
+	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
+	if err != nil {
+		return nil
+	}
+	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
+	if err != nil {
+		return nil
+	}
+	wc, err = s.materializer.Materialize(ctx, wc)
+	if err != nil {
+		return nil
+	}
+	graph := &contentGraph{wc: wc}
+	node, err := graph.Node(currentNodeID)
+	if err != nil {
+		return nil
+	}
+	if node.Type != model.NodeTypeInput {
+		return nil
+	}
+	return &PendingInput{
+		NodeID:      node.ID,
+		Channel:     node.Channel,
+		ContextPath: node.ContextPath,
+		Form:        node.Form,
+	}
 }
 
 func (s *instanceService) GetContext(ctx context.Context, id string) (*model.WorkflowInstance, error) {
@@ -1084,9 +1136,14 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		return nil, err
 	}
 
-	// Idempotent replay: an already recorded delivery for this key wins
-	// regardless of the current instance state.
+	// Idempotent replay: an already recorded delivery for this key returns
+	// the stored result. Reusing a key with a different payload is a
+	// client error (409): the first delivery wins, so a corrected payload
+	// needs a fresh key.
 	if existing, err := s.instances.GetDeliveryByKey(ctx, inst.ID, req.IdempotencyKey); err == nil {
+		if !jsonEqual(existing.Payload, req.Payload) {
+			return nil, fmt.Errorf("%w: Idempotency-Key %q was already used with a different payload", model.ErrConflict, req.IdempotencyKey)
+		}
 		return existing, nil
 	} else if !errors.Is(err, repository.ErrDeliveryNotFound) {
 		return nil, err
@@ -1143,6 +1200,22 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	ctxMap, err := unmarshalJSON(inst.Context)
 	if err != nil {
 		return nil, err
+	}
+	// Schema-first enforcement: the form schema rejects bad payloads before
+	// the validation script runs. Rejection persists Accepted=false, same as
+	// a script rejection; the script never runs after a schema failure.
+	if inputNode.Form != nil {
+		if err := form.Validate(inputNode, req.Payload); err != nil {
+			return s.instances.DeliverInput(ctx, repository.InputCompletion{
+				InstanceID:     inst.ID,
+				NodeInstanceID: attempt.ID,
+				IdempotencyKey: req.IdempotencyKey,
+				Payload:        req.Payload,
+				Accepted:       false,
+				Error:          err.Error(),
+				CreatedBy:      s.actor,
+			})
+		}
 	}
 	vr, err := s.validator.Validate(ctx, executor.Request{Node: inputNode, Context: ctxMap, Payload: req.Payload})
 	if err != nil {
@@ -1345,4 +1418,18 @@ func mustMarshal(v any) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return b
+}
+
+// jsonEqual compares two JSON payloads semantically: whitespace and key
+// order do not count as a difference. Either side failing to parse falls
+// back to a trimmed byte comparison.
+func jsonEqual(a, b json.RawMessage) bool {
+	var va, vb any
+	if err := json.Unmarshal(a, &va); err != nil {
+		return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
+	}
+	if err := json.Unmarshal(b, &vb); err != nil {
+		return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
+	}
+	return reflect.DeepEqual(va, vb)
 }

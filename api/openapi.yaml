@@ -353,7 +353,13 @@ paths:
       summary: Deliver input to a waiting input node
       description: |
         Raw JSON body; requires Idempotency-Key header. Accepted payload is
-        written to the waiting input node's context_path.
+        written to the waiting input node's context_path. When the input
+        node carries a form contract, the payload is validated against the
+        form schema first, then the validation script; schema and script
+        failures return 422 with the rejection message. Reusing an
+        Idempotency-Key with a different payload returns 409; retries must
+        reuse the same key with the identical payload, and a corrected
+        payload needs a fresh key.
       parameters:
         - $ref: "#/components/parameters/InstanceID"
         - name: Idempotency-Key
@@ -742,6 +748,14 @@ components:
           nullable: true
           description: Graph node id to occurrence state (omitted when the definition cannot be loaded)
           additionalProperties: { $ref: "#/components/schemas/NodeOccurrence" }
+        pending_input:
+          $ref: "#/components/schemas/PendingInput"
+          nullable: true
+          description: |
+            Waiting-input contract (omitted unless the instance waits on an
+            input node). The frontend renders its dynamic form from
+            pending_input.form, then delivers the payload. form is null
+            when the input node carries no form contract.
         error: { type: string, nullable: true }
         started_at: { type: string, format: date-time, nullable: true }
         finished_at: { type: string, format: date-time, nullable: true }
@@ -765,6 +779,28 @@ components:
         rollbackable:
           type: boolean
           description: Advisory rollback target hint; the rollback endpoint stays the source of truth
+    PendingInput:
+      type: object
+      required: [node_id, channel, context_path]
+      properties:
+        node_id: { type: string, format: uuid }
+        channel: { type: string }
+        context_path: { type: string }
+        form:
+          $ref: "#/components/schemas/InputForm"
+          nullable: true
+          description: Dynamic form contract (null when the input node carries none)
+    InputForm:
+      type: object
+      required: [schema]
+      properties:
+        schema:
+          type: object
+          description: JSON Schema (draft 2020-12) payload contract, versioned with the definition
+        ui:
+          type: object
+          nullable: true
+          description: Opaque frontend render hints (label, order, widget)
     InstanceContext:
       type: object
       required: [id, context]

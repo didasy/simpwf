@@ -62,6 +62,23 @@ node_definitions=$(cat <<'JSON'
       "type": "input",
       "channel": "http",
       "context_path": "new_post",
+      "form": {
+        "schema": {
+          "type": "object",
+          "required": ["title", "body"],
+          "properties": {
+            "title": {"type": "string", "minLength": 1},
+            "body": {"type": "string", "minLength": 1}
+          }
+        },
+        "ui": {
+          "order": ["title", "body"],
+          "fields": {
+            "title": {"label": "Title", "placeholder": "Post title"},
+            "body": {"label": "Body", "widget": "textarea", "placeholder": "Write something..."}
+          }
+        }
+      },
       "validation": {
         "script": "return input != null && Object.prototype.toString.call(input) === '[object Object]';"
       }

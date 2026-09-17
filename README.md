@@ -54,7 +54,8 @@ status notifications. Both stay fully disabled when their DSN is absent.
   validation.
 - Node types: `script` (Goja ES5.1 sandbox, no `eval`), `conditions`
   (exactly-one-match routing), `input` (HTTP webhook, Redis pub/sub, or
-  RabbitMQ queue with validation script and `Idempotency-Key` dedupe),
+  RabbitMQ queue with optional `form` contract — JSON Schema plus ui hints
+  — plus validation script and `Idempotency-Key` dedupe),
   `output` (publish a context value to Redis or RabbitMQ, returns a
   receipt), nested `group`, `external_call` (outbound HTTP or allowlisted
   command), and `poller` (active wait over HTTP, Redis, or RabbitMQ until
