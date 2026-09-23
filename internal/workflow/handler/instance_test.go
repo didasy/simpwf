@@ -22,6 +22,7 @@ const (
 
 // fakeInstanceSvc is an in-memory InstanceService for handler tests.
 type fakeInstanceSvc struct {
+	createReq    *service.CreateInstance
 	createInst   model.WorkflowInstance
 	createErr    error
 	statusInst   *model.WorkflowInstance
@@ -49,7 +50,8 @@ type fakeInstanceSvc struct {
 	listErr      error
 }
 
-func (f *fakeInstanceSvc) Create(_ context.Context, _ service.CreateInstance) (model.WorkflowInstance, error) {
+func (f *fakeInstanceSvc) Create(_ context.Context, req service.CreateInstance) (model.WorkflowInstance, error) {
+	f.createReq = &req
 	return f.createInst, f.createErr
 }
 func (f *fakeInstanceSvc) GetStatus(_ context.Context, _ string) (*model.WorkflowInstance, error) {
@@ -89,9 +91,10 @@ func (f *fakeInstanceSvc) List(_ context.Context, q repository.InstanceListQuery
 }
 
 func TestInstanceCreateAccepted(t *testing.T) {
-	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{
+	svc := &fakeInstanceSvc{
 		createInst: model.WorkflowInstance{ID: instanceID, Status: model.WorkflowWaiting},
-	}})
+	}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
 	w := performJSON(r, http.MethodPost, "/v1/workflow/instance",
 		`{"workflow_definition_id":"`+wfDefID+`"}`, nil)
 	if w.Code != http.StatusAccepted {
@@ -104,6 +107,31 @@ func TestInstanceCreateAccepted(t *testing.T) {
 	if resp.ID != instanceID || resp.Status != "waiting" {
 		t.Errorf("resp = %+v", resp)
 	}
+	if svc.createReq == nil || svc.createReq.Debug {
+		t.Errorf("createReq = %+v, want debug false", svc.createReq)
+	}
+}
+
+func TestInstanceCreateDebug(t *testing.T) {
+	svc := &fakeInstanceSvc{
+		createInst: model.WorkflowInstance{ID: instanceID, Status: model.WorkflowPaused, Debug: true},
+	}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
+	w := performJSON(r, http.MethodPost, "/v1/workflow/instance",
+		`{"workflow_definition_id":"`+wfDefID+`","debug":true}`, nil)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	var resp CreateInstanceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID != instanceID || resp.Status != "paused" {
+		t.Errorf("resp = %+v, want paused debug instance", resp)
+	}
+	if svc.createReq == nil || !svc.createReq.Debug {
+		t.Errorf("createReq = %+v, want debug true", svc.createReq)
+	}
 }
 
 func TestInstanceCreateInvalidBody(t *testing.T) {
@@ -111,6 +139,31 @@ func TestInstanceCreateInvalidBody(t *testing.T) {
 	w := performJSON(r, http.MethodPost, "/v1/workflow/instance", `not json`, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestInstanceStatusDebug(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status: model.WorkflowPaused, WaitingReason: model.WaitingReasonRunnable,
+		ContextMode: model.ContextModeFull, Debug: true,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		Frame:     json.RawMessage(`{"current_node_id":"x"}`),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	detail := &service.StatusDetail{Instance: inst}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp InstanceStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Debug || resp.Status != "paused" {
+		t.Errorf("resp = %+v, want debug true status paused", resp)
 	}
 }
 
@@ -742,6 +795,7 @@ func TestInstanceListCompactSummary(t *testing.T) {
 		WaitingReason:        model.WaitingReasonInput,
 		PauseRequested:       true,
 		TerminationPending:   true,
+		Debug:                true,
 		Error:                "boom",
 		StartedAt:            &now,
 		FinishedAt:           &now,
@@ -777,6 +831,9 @@ func TestInstanceListCompactSummary(t *testing.T) {
 	}
 	if !item.PauseRequested || !item.TerminationPending {
 		t.Errorf("flags = pause %v termination %v, want true/true", item.PauseRequested, item.TerminationPending)
+	}
+	if !item.Debug {
+		t.Errorf("debug = false, want true carried into summary")
 	}
 	if item.Error == nil || *item.Error != "boom" {
 		t.Errorf("error = %v, want boom", item.Error)

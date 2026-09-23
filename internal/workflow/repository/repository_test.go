@@ -189,6 +189,7 @@ func TestWorkflowInstanceMapperRoundTrip(t *testing.T) {
 		WaitingReason:        model.WaitingReasonRunnable,
 		PauseRequested:       true,
 		TerminationPending:   false,
+		Debug:                true,
 		CurrentGroupID:       "33333333-3333-7333-8333-333333333333",
 		CurrentNodeID:        "44444444-4444-7444-8444-444444444444",
 		CreatedBy:            "55555555-5555-7555-8555-555555555555",
@@ -208,6 +209,9 @@ func TestWorkflowInstanceMapperRoundTrip(t *testing.T) {
 	}
 	if !got.PauseRequested || got.TerminationPending {
 		t.Errorf("pause flags mismatch: %+v", got)
+	}
+	if !got.Debug {
+		t.Errorf("debug mismatch: %+v, want true", got)
 	}
 	if got.CurrentGroupID != in.CurrentGroupID || got.CurrentNodeID != in.CurrentNodeID {
 		t.Errorf("cursor mismatch: %+v", got)

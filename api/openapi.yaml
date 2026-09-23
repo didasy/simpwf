@@ -742,6 +742,11 @@ components:
       properties:
         workflow_definition_id: { type: string, format: uuid }
         context: { type: object }
+        debug:
+          type: boolean
+          description: |
+            Step-through run: the instance starts paused and re-pauses
+            after every node until termination. Immutable after create.
     CreateInstanceResponse:
       type: object
       required: [id, status]
@@ -750,7 +755,7 @@ components:
         status: { type: string }
     InstanceSummary:
       type: object
-      required: [id, workflow_definition_id, status, waiting_reason, pause_requested, termination_pending, error, created_by, updated_by, created_at, updated_at]
+      required: [id, workflow_definition_id, status, waiting_reason, pause_requested, termination_pending, debug, error, created_by, updated_by, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         workflow_definition_id: { type: string, format: uuid }
@@ -758,6 +763,7 @@ components:
         waiting_reason: { type: string, nullable: true }
         pause_requested: { type: boolean }
         termination_pending: { type: boolean }
+        debug: { type: boolean }
         error: { type: string, nullable: true }
         started_at: { type: string, format: date-time, nullable: true }
         finished_at: { type: string, format: date-time, nullable: true }
@@ -798,7 +804,7 @@ components:
         stopped_runs: { type: integer }
     InstanceStatus:
       type: object
-      required: [id, workflow_definition_id, context_mode, status, waiting_reason, pause_requested, termination_pending, attempt, counters, created_by, updated_by, created_at, updated_at]
+      required: [id, workflow_definition_id, context_mode, debug, status, waiting_reason, pause_requested, termination_pending, attempt, counters, created_by, updated_by, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         workflow_definition_id: { type: string, format: uuid }
@@ -806,6 +812,9 @@ components:
           type: string
           enum: [full, lean]
           description: Snapshotted at instance create from the definition context_mode or SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT
+        debug:
+          type: boolean
+          description: Step-through run created with debug true; re-pauses after every node
         status: { type: string, enum: [waiting, running, paused, finished, failed, stopped] }
         waiting_reason: { type: string, nullable: true }
         pause_requested: { type: boolean }

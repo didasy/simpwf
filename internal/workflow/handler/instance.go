@@ -42,6 +42,7 @@ func (h *InstanceHandler) Create(c *gin.Context) {
 	inst, err := h.svc.Create(c.Request.Context(), service.CreateInstance{
 		WorkflowDefinitionID: req.WorkflowDefinitionID,
 		Context:              req.Context,
+		Debug:                req.Debug,
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -112,6 +113,7 @@ func (h *InstanceHandler) Status(c *gin.Context) {
 		ID:                    inst.ID,
 		WorkflowDefinitionID:  inst.WorkflowDefinitionID,
 		ContextMode:           inst.ContextMode,
+		Debug:                 inst.Debug,
 		Status:                string(inst.Status),
 		WaitingReason:         waitingReason,
 		PauseRequested:        inst.PauseRequested,
@@ -399,6 +401,7 @@ func toInstanceSummaryResponse(inst model.WorkflowInstance) InstanceSummaryRespo
 		WaitingReason:        nullableString(string(inst.WaitingReason)),
 		PauseRequested:       inst.PauseRequested,
 		TerminationPending:   inst.TerminationPending,
+		Debug:                inst.Debug,
 		Error:                nullableString(inst.Error),
 		StartedAt:            inst.StartedAt,
 		FinishedAt:           inst.FinishedAt,

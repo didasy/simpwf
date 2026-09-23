@@ -170,6 +170,19 @@ failed --> paused: rollback only (explicit exception to CanWorkflowTransition)
 
 Node statuses: `waiting -> running -> finished | failed | stopped`.
 
+- **Debug step-through**: `POST /v1/workflow/instance` accepts optional
+  `"debug": true` (immutable after create, exposed as `debug` on status and
+  list). A debug instance is created `paused` (nothing runs before the first
+  `resume`), and every `resume` advances exactly one engine transition
+  before the instance re-pauses: `nextStatus` forces `paused` for debug runs
+  on node completions, failure routes, and group entries, while input parks
+  stay `waiting`/`input` so `PUT .../input` keeps working (a debug delivery
+  that advances the cursor parks `paused`, a terminal delivery stays
+  terminal). Each debug pause appends a `paused` audit event carrying
+  `{"debug":true,"node_id":...}`; `pause_requested` stays false. Status-update
+  outbox transitions (`running -> paused`) flow through the normal `paused`
+  notification path.
+
 - **Rollback**: `POST /v1/workflow/instance/{id}/rollback` moves a paused or
   failed instance's cursor back to an already-executed node occurrence so the
   next `resume` re-executes forward from there. The instance always lands

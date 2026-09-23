@@ -101,7 +101,12 @@ Every `GET` list returns the same envelope:
 2. Create a workflow definition (`POST /v1/workflow/definition`) with `start_node_id`, `nodes`, optional `keys`,
    optional `context_mode`, optional `status_update`. Full sample: `workflow.yaml` at repo root.
 3. Start an instance (`POST /v1/workflow/instance`) with `workflow_definition_id` and optional `context` object.
-4. Poll `GET .../status` until `status` is `paused` (input wait), `finished`, `failed`, or `stopped`. `nodes` map shows
+   Normal runs start `waiting`. Pass `"debug": true` for a step-through run: it starts `paused` (runnable,
+   `waiting_reason: null`) and re-pauses after every node until termination, so each `POST .../resume` advances
+   exactly one step. Input parks still surface as `waiting` / `"input"` on debug runs, so the input flow below is
+   unchanged.
+4. Poll `GET .../status` until `status` is `paused` (`waiting_reason == "input"` = input wait, `null` = operator
+   pause or debug step pause), `finished`, `failed`, or `stopped`. `nodes` map shows
    per-graph-node progress.
 5. If `waiting_reason == "input"`, find the parked input node (status entry with occurrence in `waiting`), then
    `PUT .../input` with the payload and a fresh `Idempotency-Key`.
@@ -127,4 +132,5 @@ failed --rollback--> paused (only exception to terminal immutability)
 Enable controls by status: pause on `waiting`/`running`; resume on `paused`; stop on `waiting`/`running`/`paused`;
 context replace and rollback on `paused` only (rollback also on `failed`); input delivery only when `waiting` with
 `waiting_reason == "input"`. `finished`/`failed`/`stopped` accept no controls except rollback on `failed`.
-`termination_pending == true` blocks rollback.
+`termination_pending == true` blocks rollback. Debug runs start `paused` and re-pause after every resume-driven
+step, so resume stays the primary control until termination.

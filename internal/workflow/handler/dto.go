@@ -69,6 +69,9 @@ type ListResponse[T any] struct {
 type CreateInstanceRequest struct {
 	WorkflowDefinitionID string          `json:"workflow_definition_id"`
 	Context              json.RawMessage `json:"context,omitempty"`
+	// Debug starts a step-through run: paused at create, re-paused after
+	// every node until termination. Immutable after create.
+	Debug bool `json:"debug,omitempty"`
 }
 
 // CreateInstanceResponse is the 202 body.
@@ -87,6 +90,7 @@ type InstanceSummaryResponse struct {
 	WaitingReason        *string    `json:"waiting_reason"`
 	PauseRequested       bool       `json:"pause_requested"`
 	TerminationPending   bool       `json:"termination_pending"`
+	Debug                bool       `json:"debug"`
 	Error                *string    `json:"error"`
 	StartedAt            *time.Time `json:"started_at"`
 	FinishedAt           *time.Time `json:"finished_at"`
@@ -101,6 +105,7 @@ type InstanceStatusResponse struct {
 	ID                    string                            `json:"id"`
 	WorkflowDefinitionID  string                            `json:"workflow_definition_id"`
 	ContextMode           string                            `json:"context_mode"`
+	Debug                 bool                              `json:"debug"`
 	Status                string                            `json:"status"`
 	WaitingReason         *string                           `json:"waiting_reason"`
 	PauseRequested        bool                              `json:"pause_requested"`

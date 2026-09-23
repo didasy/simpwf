@@ -176,6 +176,32 @@ func driveEngineWithExecLimits(t *testing.T, db *gorm.DB, instanceID string, exe
 	return driveEngineWithExecLimitsAndOptions(t, db, instanceID, execLimits, model.LeanOptions{})
 }
 
+// driveOne processes a single claimed transition, mirroring one
+// dispatcher pickup. Debug tests use it to assert step-through pauses
+// instead of driving to settle.
+func driveOne(t *testing.T, db *gorm.DB, w model.WorkflowInstance) error {
+	t.Helper()
+	instances := repository.NewInstanceRepository(db)
+	wfSvc := svcWorkflowService(db)
+	loader := func(ctx context.Context, id string) (*model.WorkflowContent, error) {
+		inst, err := instances.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		def, err := repository.NewWorkflowDefinitionRepository(db).GetByID(ctx, inst.WorkflowDefinitionID)
+		if err != nil {
+			return nil, err
+		}
+		wc, err := model.ParseWorkflowContent(def.Content, svcLimits)
+		if err != nil {
+			return nil, err
+		}
+		return wfSvc.Materialize(ctx, wc)
+	}
+	e := engine.NewEngine(instances, executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, model.LeanOptions{})
+	return e.Process(context.Background(), w)
+}
+
 func driveEngineWithExecLimitsAndOptions(t *testing.T, db *gorm.DB, instanceID string, execLimits executor.Limits, leanOptions model.LeanOptions) model.WorkflowInstance {
 	t.Helper()
 	ctx := context.Background()
@@ -259,6 +285,132 @@ func TestCreateInstance(t *testing.T) {
 	}
 	if got.CreatedBy != svcSysUserID || got.UpdatedBy != svcSysUserID {
 		t.Errorf("persisted audit actors = %q/%q, want %q", got.CreatedBy, got.UpdatedBy, svcSysUserID)
+	}
+}
+
+func TestCreateInstanceDebugStartsPaused(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	svc := svcInstanceService(db)
+
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Debug: true})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if !inst.Debug {
+		t.Error("Debug = false, want true")
+	}
+	if inst.Status != model.WorkflowPaused {
+		t.Errorf("status = %s, want paused for debug create", inst.Status)
+	}
+	if inst.WaitingReason != model.WaitingReasonRunnable {
+		t.Errorf("waiting_reason = %s, want runnable", inst.WaitingReason)
+	}
+	if inst.PauseRequested || inst.TerminationPending {
+		t.Errorf("pause/termination flags = %v/%v, want false/false", inst.PauseRequested, inst.TerminationPending)
+	}
+	got, err := svc.GetStatus(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+	if !got.Debug || got.Status != model.WorkflowPaused {
+		t.Errorf("persisted = debug %v status %s, want true paused", got.Debug, got.Status)
+	}
+	events, err := repository.NewInstanceRepository(db).ListEvents(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	for _, ev := range events {
+		if ev.Type != "instance_created" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(ev.Data, &data); err != nil {
+			t.Fatalf("unmarshal instance_created event: %v", err)
+		}
+		if data["debug"] != true {
+			t.Errorf("instance_created event = %s, want debug:true marker", ev.Data)
+		}
+	}
+
+	plain, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if plain.Debug || plain.Status != model.WorkflowWaiting {
+		t.Errorf("plain create = debug %v status %s, want false waiting", plain.Debug, plain.Status)
+	}
+}
+
+func TestCreateDebugInputDeliversThenStepPauses(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102",
+			map[string]any{"channel": "http", "context_path": "webhook"}),
+		svcNodeJSON("11111111-1111-7111-8111-111111111102", "script", "middle", "return 'ok';", "11111111-1111-7111-8111-111111111103", map[string]any{"output_property": "after"}),
+		svcNodeJSON("11111111-1111-7111-8111-111111111103", "script", "last", "return 'done';", "", map[string]any{"output_property": "last"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Status != model.WorkflowPaused {
+		t.Fatalf("status = %s, want paused at debug create", inst.Status)
+	}
+
+	// Resume runs the input node, which parks waiting/input (not paused)
+	// so the delivery below is accepted.
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur := driveEngineWithExecLimitsAndOptions(t, db, inst.ID, executor.Limits{}, model.LeanOptions{})
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want waiting on input", cur)
+	}
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "dbg-key-1", Payload: []byte(`{"success":true}`),
+	}); err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	// A debug delivery that advances the cursor parks paused, so the
+	// script node after the input still waits for a resume.
+	got, err := svc.GetStatus(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.WorkflowPaused || got.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("status = %s/%s after delivery, want paused/runnable", got.Status, got.WaitingReason)
+	}
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	claimed, err := repo.ClaimNext(ctx, "dbg-worker", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v", len(claimed), err)
+	}
+	if err := driveOne(t, db, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	got, err = svc.GetStatus(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.WorkflowPaused {
+		t.Fatalf("status = %s after delivered step, want paused", got.Status)
+	}
+	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur = driveEngineWithExecLimitsAndOptions(t, db, inst.ID, executor.Limits{}, model.LeanOptions{})
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished after final resume", cur.Status)
 	}
 }
 
