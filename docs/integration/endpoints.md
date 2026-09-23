@@ -94,14 +94,21 @@ Malformed UUID → `400`. Referenced by any request or instance → `409`. Unkno
 
 ### `POST /v1/workflow/instance` → `202`
 
-Starts a run. Status is always `waiting` at creation.
+Starts a run. Normal runs start `waiting`; step-through runs (`"debug": true`) start `paused`.
 
-| Body field             | Required | Rule                                                                                                                       |
-| ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `workflow_definition_id` | yes      | Non-blank string. Blank → `422`. Unknown id → `404` (no `400` here; a malformed UUID can surface as `500`, same caveat as status). |
-| `context`                | no       | JSON object. Omitted/`null` → `{}`. Arrays, scalars, malformed JSON → `422`.                                                     |
+| Body field             | Required | Rule                                                                                                                                                                                                                                       |
+| ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `workflow_definition_id` | yes      | Non-blank string. Blank → `422`. Unknown id → `404` (no `400` here; a malformed UUID can surface as `500`, same caveat as status).                                                                                                                 |
+| `context`                | no       | JSON object. Omitted/`null` → `{}`. Arrays, scalars, malformed JSON → `422`.                                                                                                                                                                     |
+| `debug`                  | no       | Boolean. Omitted/`false` → normal run. `true` → step-through run: starts `paused` (runnable, `waiting_reason: null`), and each `POST .../resume` advances exactly one engine transition before re-pausing until termination. Immutable after create. |
 
-Definition with unparsable content → `422`. Response `{id, status}` (`status` is `"waiting"`).
+Definition with unparsable content → `422`. Response `{id, status}` (`"waiting"`, or `"paused"` for a debug run).
+
+Debug stepping: input parks stay `waiting` / `"input"` (never force-paused), so `PUT .../input` works unchanged; an
+accepted input delivery that advances the cursor lands `paused` instead of `waiting`, while a terminal delivery stays
+terminal. Debug pauses carry `pause_requested: false`, unlike a deferred operator pause (`pause_requested: true`).
+All other controls behave as usual: context replace and rollback apply wherever `paused` allows them, and pause is
+idempotent on a step-paused instance.
 
 FE note: the instance snapshots `context_mode` at creation (definition value wins, else server default). Later
 definition edits never affect running instances.
@@ -116,7 +123,8 @@ definition edits never affect running instances.
 | `workflow_definition_id` | Single UUID.                                                                                                    |
 | `status`                 | Repeatable enum: `waiting`, `running`, `paused`, `finished`, `failed`, `stopped`.                                           |
 
-Bad param → `400`. Items are compact summaries: no `context`, frame, counters, or node detail. Nullables
+Bad param → `400`. Items are compact summaries: no `context`, frame, counters, or node detail. Each item carries
+the `debug` step-through flag. Nullables
 (`waiting_reason`, `error`, `started_at`, `finished_at`) render `null` when empty.
 
 ### `GET /v1/workflow/instance/{id}/status` → `200`
@@ -125,8 +133,8 @@ Unknown id → `404`. No UUID format check on this route: any shape that matches
 surface as `500` if the database rejects the literal instead of returning zero rows, so only send ids the API gave you).
 Response:
 
-- Identity, `status` enum, `context_mode` (`full`/`lean`, snapshotted at creation), `waiting_reason` (`null` = runnable,
-  `"input"` = parked).
+- Identity, `status` enum, `context_mode` (`full`/`lean`, snapshotted at creation), `debug` (step-through flag,
+  immutable after create), `waiting_reason` (`null` = runnable, `"input"` = parked).
 - `pause_requested`, `termination_pending`, `current_group_id`, `current_node_id`, `current_node_instance_id`
   (`"<instance>:<occurrence>"`, `null` when unresolvable).
 - `attempt`, `counters` (`{"total":N,"nodes":{...}}`), `error` (`null` when empty), `started_at`/`finished_at`, audit
@@ -197,7 +205,9 @@ malformed-UUID caveat as status (only send back ids the API gave you).
 ### `POST /v1/workflow/instance/{id}/resume` → `200`
 
 Paused → `waiting`. Already waiting → `200` idempotent. Running with a pending pause clears the request. Unknown id →
-`404` (same `409` caveat as pause). Terminal → `409`. Response `{status}`.
+`404` (same `409` caveat as pause). Terminal → `409`. Response `{status}`. On debug runs each resume advances
+exactly one step before the instance re-pauses, so keep offering resume while `debug` is true and status returns to
+`paused`.
 
 ### `POST /v1/workflow/instance/{id}/stop` → `200`
 

@@ -1338,6 +1338,10 @@ const docTemplate = `{
                         "type": "integer"
                     }
                 },
+                "debug": {
+                    "description": "Debug starts a step-through run: paused at create, re-paused after\nevery node until termination. Immutable after create.",
+                    "type": "boolean"
+                },
                 "workflow_definition_id": {
                     "type": "string"
                 }
@@ -1451,6 +1455,9 @@ const docTemplate = `{
                 "current_node_instance_id": {
                     "type": "string"
                 },
+                "debug": {
+                    "type": "boolean"
+                },
                 "error": {
                     "type": "string"
                 },
@@ -1503,6 +1510,9 @@ const docTemplate = `{
                 },
                 "created_by": {
                     "type": "string"
+                },
+                "debug": {
+                    "type": "boolean"
                 },
                 "error": {
                     "type": "string"

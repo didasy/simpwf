@@ -317,7 +317,7 @@ func (r *instanceRepo) List(ctx context.Context, q InstanceListQuery) ([]model.W
 	}
 
 	var rows []WorkflowInstanceModel
-	if err := query.Select(`"id", "workflow_definition_id", "status", "waiting_reason", "pause_requested", "termination_pending", "error", "started_at", "finished_at", "created_by", "updated_by", "created_at", "updated_at"`).
+	if err := query.Select(`"id", "workflow_definition_id", "status", "waiting_reason", "pause_requested", "termination_pending", "error", "started_at", "finished_at", "created_by", "updated_by", "created_at", "updated_at", "debug"`).
 		Order(order + `, "id" ASC`).
 		Offset((page - 1) * perPage).
 		Limit(perPage).

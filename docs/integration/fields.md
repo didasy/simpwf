@@ -138,6 +138,8 @@ url/method/key/channel/queue. Header names and body property names never render.
 ## Response-only shapes
 
 - `counters`: `{"total": N, "nodes": {"<graph-node-id>": N}}`.
+- `debug`: boolean on instance status and list items. `true` = step-through run created with `"debug": true`.
+  Immutable after create. Response-only: no list filter or `order` key for it.
 - `current_node_instance_id`: `"<instance-id>:<occurrence-id>"`, `null` when unresolvable.
 - Rollback `rollbackable` hint: true only when the instance is paused/failed without `termination_pending`, the node is
   not a group, the occurrence is `finished`/`failed`/`stopped`, and its `context_before` parses as a JSON object.

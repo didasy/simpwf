@@ -6,6 +6,11 @@ definitions:
         items:
           type: integer
         type: array
+      debug:
+        description: |-
+          Debug starts a step-through run: paused at create, re-paused after
+          every node until termination. Immutable after create.
+        type: boolean
       workflow_definition_id:
         type: string
     type: object
@@ -79,6 +84,8 @@ definitions:
         type: string
       current_node_instance_id:
         type: string
+      debug:
+        type: boolean
       error:
         type: string
       finished_at:
@@ -114,6 +121,8 @@ definitions:
         type: string
       created_by:
         type: string
+      debug:
+        type: boolean
       error:
         type: string
       finished_at:

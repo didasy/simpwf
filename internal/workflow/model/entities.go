@@ -58,10 +58,13 @@ type WorkflowRequest struct {
 }
 
 // WorkflowInstance is a single execution of a workflow definition.
+// Debug marks a step-through run: the instance starts paused and the
+// engine re-pauses after every node transition until termination.
 type WorkflowInstance struct {
 	ID                   string
 	WorkflowDefinitionID string
 	ContextMode          string
+	Debug                bool
 	Status               WorkflowStatus
 	WaitingReason        WaitingReason
 	PauseRequested       bool

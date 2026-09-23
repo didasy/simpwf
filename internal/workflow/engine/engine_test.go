@@ -249,6 +249,137 @@ func runEngine(t *testing.T, db *gorm.DB, e *engine.Engine, instanceID string) m
 	return model.WorkflowInstance{}
 }
 
+// TestEngineDebugStepThrough proves a debug instance re-pauses after
+// every node: one resume advances exactly one script node, and the
+// debug-paused checkpoint carries a debug-marked paused event.
+func TestEngineDebugStepThrough(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "one", "return 1;", n2, "o1", nil),
+		nodeJSON(n2, "script", "two", "return 2;", n3, "o2", nil),
+		nodeJSON(n3, "script", "three", "return 3;", "", "o3", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	instances := repository.NewInstanceRepository(db)
+	ctx := context.Background()
+	if err := db.Model(&repository.WorkflowInstanceModel{}).
+		Where("id = ?", instanceID).Update("debug", true).Error; err != nil {
+		t.Fatalf("mark debug: %v", err)
+	}
+	e, _ := testEngine(t, db, model.DefaultLimits())
+
+	// Drive one step per resume: claim -> process -> expect paused.
+	step := func(wantNode string) {
+		t.Helper()
+		if err := instances.Resume(ctx, instanceID); err != nil {
+			t.Fatalf("Resume() error = %v", err)
+		}
+		claimed, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim = %d, err %v", len(claimed), err)
+		}
+		if err := e.Process(ctx, claimed[0]); err != nil {
+			t.Fatalf("Process() error = %v", err)
+		}
+		cur, err := instances.GetByID(ctx, instanceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cur.Status != model.WorkflowPaused {
+			t.Fatalf("status = %s after %s, want paused", cur.Status, wantNode)
+		}
+		var ctxMap map[string]any
+		if err := json.Unmarshal(cur.Context, &ctxMap); err != nil {
+			t.Fatal(err)
+		}
+		if ctxMap[wantNode] == nil {
+			t.Errorf("context missing output %q after step: %s", wantNode, cur.Context)
+		}
+	}
+
+	step("o1")
+	step("o2")
+
+	// Final resume runs the last node to finished, not paused.
+	if err := instances.Resume(ctx, instanceID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	claimed, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v", len(claimed), err)
+	}
+	if err := e.Process(ctx, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	cur, err := instances.GetByID(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowFinished {
+		t.Errorf("status = %s, want finished after last step", cur.Status)
+	}
+
+	events, err := instances.ListEvents(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugPauses := 0
+	for _, ev := range events {
+		if ev.Type != "paused" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(ev.Data, &data); err != nil {
+			t.Fatalf("unmarshal paused event: %v", err)
+		}
+		if data["debug"] == true {
+			debugPauses++
+		}
+	}
+	if debugPauses != 2 {
+		t.Errorf("debug paused events = %d, want 2 (one per non-terminal step)", debugPauses)
+	}
+}
+
+// TestEngineDebugInputParksWaiting proves the input exception: a debug
+// instance reaching an input node parks waiting/input (not paused) so
+// DeliverInput keeps working; the step after delivery re-pauses.
+func TestEngineDebugInputParksWaiting(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "input", "ask", "", n2, "", map[string]any{
+			"channel": "http", "context_path": "webhook",
+		}),
+		nodeJSON(n2, "script", "after", "return 'ok';", "", "after", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	instances := repository.NewInstanceRepository(db)
+	ctx := context.Background()
+	if err := db.Model(&repository.WorkflowInstanceModel{}).
+		Where("id = ?", instanceID).Update("debug", true).Error; err != nil {
+		t.Fatalf("mark debug: %v", err)
+	}
+	e, _ := testEngine(t, db, model.DefaultLimits())
+
+	if err := instances.Resume(ctx, instanceID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	claimed, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v", len(claimed), err)
+	}
+	if err := e.Process(ctx, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	cur, err := instances.GetByID(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("status = %s/%s, want waiting/input (no force-pause on input park)", cur.Status, cur.WaitingReason)
+	}
+}
+
 // TestEnginePollerRendersReservedIDs proves poller configuration templates
 // can interpolate the reserved automatic roots workflow_instance_id and
 // node_instance_id, that the reserved values always win over same-named

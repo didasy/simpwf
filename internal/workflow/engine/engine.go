@@ -767,6 +767,8 @@ func (e *Engine) failWithContext(ctx context.Context, cur model.WorkflowInstance
 }
 
 // checkpoint commits the transition under the worker's lease and revision.
+// A debug step that lands paused appends a debug-marked paused event so
+// UIs can tell step-through pauses from operator pauses.
 func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, frame *model.Frame, counters model.Counters, ctxMap map[string]any, status model.WorkflowStatus, reason model.WaitingReason, errMsg string, finished *time.Time, commit *contextCommit) error {
 	var history *model.NodeContextHistory
 	var err error
@@ -785,6 +787,7 @@ func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, fra
 		FromWaitingReason:    cur.WaitingReason,
 		Status:               status,
 		WaitingReason:        reason,
+		PauseRequested:       cur.PauseRequested,
 		Frame:                *frame,
 		Counters:             counters,
 		Context:              marshal(ctxMap),
@@ -797,7 +800,23 @@ func (e *Engine) checkpoint(ctx context.Context, cur model.WorkflowInstance, fra
 		// Stop won the race; the worker is fenced and aborts silently.
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if status == model.WorkflowPaused && reason != model.WaitingReasonInput && cur.Debug && !cur.PauseRequested {
+		// The checkpoint releases the lease, so append outside the
+		// cancelled Process scope to survive dispatcher shutdown.
+		_ = e.appendEvent(context.WithoutCancel(ctx), cur.ID, "paused", map[string]any{"debug": true, "node_id": commitNodeID(commit)})
+	}
+	return nil
+}
+
+// commitNodeID extracts the stepped node for the debug paused event.
+func commitNodeID(commit *contextCommit) string {
+	if commit == nil {
+		return ""
+	}
+	return commit.nodeID
 }
 
 // inputCheckpoint parks the cursor waiting (or paused) on an input node.
@@ -855,9 +874,12 @@ func emptyDiffJSON() json.RawMessage {
 	return json.RawMessage(`{"set":{},"unset":[]}`)
 }
 
-// nextStatus decides the post-checkpoint status, honoring a deferred pause.
+// nextStatus decides the post-checkpoint status, honoring a deferred
+// pause and debug step-through: debug runs re-pause after every node
+// transition so each resume advances exactly one step. Input parks go
+// through inputCheckpoint, never here.
 func (e *Engine) nextStatus(cur model.WorkflowInstance) model.WorkflowStatus {
-	if cur.PauseRequested {
+	if cur.PauseRequested || cur.Debug {
 		return model.WorkflowPaused
 	}
 	return model.WorkflowWaiting

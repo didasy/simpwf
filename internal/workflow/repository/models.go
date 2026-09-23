@@ -85,6 +85,7 @@ type WorkflowInstanceModel struct {
 	ID                   string         `gorm:"column:id;type:uuid;primaryKey"`
 	WorkflowDefinitionID string         `gorm:"column:workflow_definition_id;type:uuid;not null;index"`
 	ContextMode          string         `gorm:"column:context_mode;not null;default:'full'"`
+	Debug                bool           `gorm:"column:debug;not null;default:false"`
 	Status               string         `gorm:"column:status;not null;index"`
 	WaitingReason        string         `gorm:"column:waiting_reason;not null;default:''"`
 	PauseRequested       bool           `gorm:"column:pause_requested;not null;default:false"`

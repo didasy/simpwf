@@ -21,10 +21,13 @@ import (
 	"github.com/simpwf/workflow-engine/pkg/contextpath"
 )
 
-// CreateInstance starts a workflow instance.
+// CreateInstance starts a workflow instance. Debug marks a step-through
+// run: the instance starts paused and re-pauses after every node until
+// termination. It is immutable after create.
 type CreateInstance struct {
 	WorkflowDefinitionID string
 	Context              json.RawMessage
+	Debug                bool
 }
 
 // UpdateContext replaces the full context of a paused instance. Reason is an
@@ -234,6 +237,15 @@ func NewInstanceService(
 	}
 }
 
+// createdEventData renders the instance_created audit payload. Debug runs
+// carry debug:true so step-through runs are distinguishable in the trail.
+func createdEventData(definitionID string, debug bool) json.RawMessage {
+	if !debug {
+		return json.RawMessage(`{"workflow_definition_id":"` + definitionID + `"}`)
+	}
+	return json.RawMessage(`{"workflow_definition_id":"` + definitionID + `","debug":true}`)
+}
+
 func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model.WorkflowInstance, error) {
 	if strings.TrimSpace(req.WorkflowDefinitionID) == "" {
 		return model.WorkflowInstance{}, fmt.Errorf("%w: workflow_definition_id is required", model.ErrInvalid)
@@ -270,6 +282,7 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 		ID:                   mustNewID(),
 		WorkflowDefinitionID: def.ID,
 		ContextMode:          contextMode,
+		Debug:                req.Debug,
 		Status:               model.WorkflowWaiting,
 		WaitingReason:        model.WaitingReasonRunnable,
 		Frame:                frameRaw,
@@ -279,6 +292,12 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 		UpdatedBy:            s.actor,
 		CreatedAt:            now,
 		UpdatedAt:            now,
+	}
+	if req.Debug {
+		// Debug runs start paused so nothing executes before the first
+		// manual resume. The dispatcher only claims waiting/runnable
+		// rows, so the instance parks until resumed.
+		w.Status = model.WorkflowPaused
 	}
 	if err := s.instances.Insert(ctx, w); err != nil {
 		return model.WorkflowInstance{}, err
@@ -296,7 +315,7 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 	}
 	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 		ID: mustNewID(), WorkflowInstanceID: w.ID, Type: "instance_created",
-		Data:      json.RawMessage(`{"workflow_definition_id":"` + def.ID + `"}`),
+		Data:      createdEventData(def.ID, req.Debug),
 		CreatedBy: s.actor, CreatedAt: now,
 	})
 	return w, nil
@@ -1273,6 +1292,11 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		status = model.WorkflowFinished
 		t := nowUTC()
 		finished = &t
+	} else if inst.Debug {
+		// Step-through: a delivery that advances the cursor parks
+		// paused, not runnable, so the next node waits for a resume.
+		// A delivery that finishes the workflow stays terminal.
+		status = model.WorkflowPaused
 	}
 
 	return s.instances.DeliverInput(ctx, repository.InputCompletion{
