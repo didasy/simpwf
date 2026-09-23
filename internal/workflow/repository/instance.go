@@ -149,6 +149,10 @@ type InstanceRepository interface {
 	// the page by Page/PerPage. Total is the count of matches before
 	// pagination.
 	List(ctx context.Context, q InstanceListQuery) ([]model.WorkflowInstance, int64, error)
+	// StatisticsSummary aggregates instance counts, success rate, average
+	// terminal duration, active (waiting+running+paused) count, and per-day
+	// buckets over a creation-time window.
+	StatisticsSummary(ctx context.Context, q StatisticsQuery) (StatisticsResult, error)
 	// ReplaceContext atomically replaces the context of a paused instance,
 	// increments its revision, and appends a context_updated audit event
 	// carrying the actor and optional reason (never the context values).

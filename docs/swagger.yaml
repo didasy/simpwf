@@ -323,6 +323,42 @@ definitions:
       status:
         type: string
     type: object
+  internal_workflow_handler.RunsPerDayResponse:
+    properties:
+      date:
+        type: string
+      failed_runs:
+        type: integer
+      finished_runs:
+        type: integer
+      stopped_runs:
+        type: integer
+      total_runs:
+        type: integer
+    type: object
+  internal_workflow_handler.StatisticsSummaryResponse:
+    properties:
+      active_runs:
+        type: integer
+      average_duration_ms:
+        type: number
+      failed_runs:
+        type: integer
+      finished_runs:
+        type: integer
+      runs_per_day:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.RunsPerDayResponse'
+        type: array
+      stopped_runs:
+        type: integer
+      success_rate:
+        type: number
+      terminal_runs:
+        type: integer
+      total_runs:
+        type: integer
+    type: object
   internal_workflow_handler.StopResponse:
     properties:
       status:
@@ -556,6 +592,41 @@ paths:
       summary: Get node definition
       tags:
       - node-definitions
+  /v1/statistics:
+    get:
+      parameters:
+      - description: Inclusive window start (RFC3339)
+        in: query
+        name: created_from
+        type: string
+      - description: Inclusive window end (RFC3339)
+        in: query
+        name: created_to
+        type: string
+      - description: 'Runs-per-day direction: date or -date'
+        in: query
+        name: order
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.StatisticsSummaryResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get workflow run statistics
+      tags:
+      - statistics
   /v1/workflow/definition:
     get:
       parameters:

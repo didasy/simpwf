@@ -324,6 +324,62 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/statistics": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "statistics"
+                ],
+                "summary": "Get workflow run statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Inclusive window start (RFC3339)",
+                        "name": "created_from",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive window end (RFC3339)",
+                        "name": "created_to",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Runs-per-day direction: date or -date",
+                        "name": "order",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.StatisticsSummaryResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/workflow/definition": {
             "get": {
                 "security": [
@@ -1765,6 +1821,61 @@ const docTemplate = `{
                 },
                 "status": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.RunsPerDayResponse": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string"
+                },
+                "failed_runs": {
+                    "type": "integer"
+                },
+                "finished_runs": {
+                    "type": "integer"
+                },
+                "stopped_runs": {
+                    "type": "integer"
+                },
+                "total_runs": {
+                    "type": "integer"
+                }
+            }
+        },
+        "internal_workflow_handler.StatisticsSummaryResponse": {
+            "type": "object",
+            "properties": {
+                "active_runs": {
+                    "type": "integer"
+                },
+                "average_duration_ms": {
+                    "type": "number"
+                },
+                "failed_runs": {
+                    "type": "integer"
+                },
+                "finished_runs": {
+                    "type": "integer"
+                },
+                "runs_per_day": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_workflow_handler.RunsPerDayResponse"
+                    }
+                },
+                "stopped_runs": {
+                    "type": "integer"
+                },
+                "success_rate": {
+                    "type": "number"
+                },
+                "terminal_runs": {
+                    "type": "integer"
+                },
+                "total_runs": {
+                    "type": "integer"
                 }
             }
         },
