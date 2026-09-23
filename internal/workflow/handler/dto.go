@@ -218,3 +218,28 @@ type NodeDebugResponse struct {
 	CreatedAt              time.Time       `json:"created_at"`
 	UpdatedAt              time.Time       `json:"updated_at"`
 }
+
+// -- statistics ---------------------------------------------------------------
+
+// StatisticsSummaryResponse is the GET /v1/statistics body.
+// ActiveRuns counts waiting+running+paused instances in the same window.
+type StatisticsSummaryResponse struct {
+	TotalRuns         int64                `json:"total_runs"`
+	FinishedRuns      int64                `json:"finished_runs"`
+	FailedRuns        int64                `json:"failed_runs"`
+	StoppedRuns       int64                `json:"stopped_runs"`
+	TerminalRuns      int64                `json:"terminal_runs"`
+	ActiveRuns        int64                `json:"active_runs"`
+	SuccessRate       *float64             `json:"success_rate"`
+	AverageDurationMS *float64             `json:"average_duration_ms"`
+	RunsPerDay        []RunsPerDayResponse `json:"runs_per_day"`
+}
+
+// RunsPerDayResponse is one calendar-day bucket (Date is YYYY-MM-DD).
+type RunsPerDayResponse struct {
+	Date         string `json:"date"`
+	TotalRuns    int64  `json:"total_runs"`
+	FinishedRuns int64  `json:"finished_runs"`
+	FailedRuns   int64  `json:"failed_runs"`
+	StoppedRuns  int64  `json:"stopped_runs"`
+}

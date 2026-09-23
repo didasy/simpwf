@@ -20,11 +20,11 @@ Reusable immutable steps. New versions point at `previous_version_id`; one child
 
 ### `POST /v1/node/definition` → `201`
 
-| Body field            | Required | Rule                                                                                               |
-| --------------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `name`                | yes      | Non-blank string. No max length.                                                                   |
-| `type`                | yes      | Enum, see `fields.md`. Must match content shape.                                                   |
-| `content`             | yes      | Object. Per-type rules, see `fields.md`. Must not carry `keys`.                                    |
+| Body field          | Required | Rule                                                                                         |
+| ------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| `name`                | yes      | Non-blank string. No max length.                                                             |
+| `type`                | yes      | Enum, see `fields.md`. Must match content shape.                                               |
+| `content`             | yes      | Object. Per-type rules, see `fields.md`. Must not carry `keys`.                                  |
 | `previous_version_id` | no       | UUID of existing definition. Sets `version = prev + 1`, inherits `lineage_id`. Unknown id → `404`. |
 
 Malformed JSON → `400`. Blank name/type/content → `422`. Bad type or content → `422`. Response is the full definition
@@ -37,17 +37,17 @@ metadata.
 
 ### `GET /v1/node/definition` → `200`
 
-| Query         | Rule                                                                                                                               |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `page`        | Integer `>= 1`, default `1`.                                                                                                       |
-| `per_page`    | Integer `1`–`200`, default `50`.                                                                                                   |
+| Query       | Rule                                                                                                             |
+| ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| `page`        | Integer `>= 1`, default `1`.                                                                                         |
+| `per_page`    | Integer `1`–`200`, default `50`.                                                                                       |
 | `order`       | Allowlist: `id`, `name`, `version`, `lineage_id`, `type`, `created_at`, `updated_at`, optional leading `-`. Default `-created_at`. |
-| `id`          | Repeatable UUID, max 100.                                                                                                          |
-| `name`        | Exact match, case-sensitive.                                                                                                       |
-| `lineage_id`  | Single UUID.                                                                                                                       |
-| `version`     | Integer `>= 1`.                                                                                                                    |
-| `latest_only` | Boolean.                                                                                                                           |
-| `type`        | Node-type string filter.                                                                                                           |
+| `id`          | Repeatable UUID, max 100.                                                                                        |
+| `name`        | Exact match, case-sensitive.                                                                                     |
+| `lineage_id`  | Single UUID.                                                                                                     |
+| `version`     | Integer `>= 1`.                                                                                                    |
+| `latest_only` | Boolean.                                                                                                         |
+| `type`        | Node-type string filter.                                                                                         |
 
 Bad param → `400`. Envelope `{items, page, per_page, total, total_pages}`.
 
@@ -65,11 +65,11 @@ Immutable graphs. Same versioning semantics as node definitions.
 
 ### `POST /v1/workflow/definition` → `201`
 
-| Body field            | Required | Rule                                                                                                                                                                                     |
-| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`                | yes      | Non-blank string. No max length.                                                                                                                                                         |
+| Body field          | Required | Rule                                                                                                                                                                         |
+| ------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                | yes      | Non-blank string. No max length.                                                                                                                                             |
 | `content`             | yes      | Object: `start_node_id` (UUID, required), `nodes` (non-empty array, required), `keys` (optional), `context_mode` (optional enum), `status_update` (optional). Full rules in `fields.md`. |
-| `previous_version_id` | no       | UUID of existing definition. Unknown id → `404`.                                                                                                                                         |
+| `previous_version_id` | no       | UUID of existing definition. Unknown id → `404`.                                                                                                                               |
 
 Malformed JSON → `400`. Blank name/content → `422`. Bad content (bad links, unknown `node_definition_id`, type mismatch
 on references) → `422`. Response is the full definition (same shape as node definition minus `type`).
@@ -96,10 +96,10 @@ Malformed UUID → `400`. Referenced by any request or instance → `409`. Unkno
 
 Starts a run. Status is always `waiting` at creation.
 
-| Body field               | Required | Rule                                                                                                                               |
-| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Body field             | Required | Rule                                                                                                                       |
+| ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `workflow_definition_id` | yes      | Non-blank string. Blank → `422`. Unknown id → `404` (no `400` here; a malformed UUID can surface as `500`, same caveat as status). |
-| `context`                | no       | JSON object. Omitted/`null` → `{}`. Arrays, scalars, malformed JSON → `422`.                                                       |
+| `context`                | no       | JSON object. Omitted/`null` → `{}`. Arrays, scalars, malformed JSON → `422`.                                                     |
 
 Definition with unparsable content → `422`. Response `{id, status}` (`status` is `"waiting"`).
 
@@ -108,13 +108,13 @@ definition edits never affect running instances.
 
 ### `GET /v1/workflow/instance` → `200`
 
-| Query                    | Rule                                                                                                                          |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `page` / `per_page`      | Same as definitions (`>= 1` / `1`–`200`, defaults `1` / `50`).                                                                |
+| Query                  | Rule                                                                                                            |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `page` / `per_page`        | Same as definitions (`>= 1` / `1`–`200`, defaults `1` / `50`).                                                            |
 | `order`                  | Allowlist: `id`, `workflow_definition_id`, `status`, `created_at`, `updated_at`, optional leading `-`. Default `-created_at`. |
-| `id`                     | Repeatable UUID, max 100.                                                                                                     |
-| `workflow_definition_id` | Single UUID.                                                                                                                  |
-| `status`                 | Repeatable enum: `waiting`, `running`, `paused`, `finished`, `failed`, `stopped`.                                             |
+| `id`                     | Repeatable UUID, max 100.                                                                                       |
+| `workflow_definition_id` | Single UUID.                                                                                                    |
+| `status`                 | Repeatable enum: `waiting`, `running`, `paused`, `finished`, `failed`, `stopped`.                                           |
 
 Bad param → `400`. Items are compact summaries: no `context`, frame, counters, or node detail. Nullables
 (`waiting_reason`, `error`, `started_at`, `finished_at`) render `null` when empty.
@@ -144,10 +144,10 @@ Unknown → `404`. Same caveat as status: no UUID format check here, so a malfor
 
 Full replacement on paused instances only. Keys absent from the body are dropped.
 
-| Item                             | Rule                                                                                                                |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Body                             | Required. Must be a JSON object. Empty body or invalid JSON → `400`. Valid non-object JSON (array, scalar) → `422`. |
-| `X-Context-Update-Reason` header | Optional string. Audit annotation only; context values never enter the audit trail.                                 |
+| Item                           | Rule                                                                                                            |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Body                           | Required. Must be a JSON object. Empty body or invalid JSON → `400`. Valid non-object JSON (array, scalar) → `422`. |
+| `X-Context-Update-Reason` header | Optional string. Audit annotation only; context values never enter the audit trail.                             |
 
 Unknown id → `404`. Not paused (including concurrent resume/stop winning the race) → `409`. Response `{id, context}`
 with the replaced context.
@@ -171,10 +171,10 @@ Delivers a payload to the parked input node. Only works when the instance is `wa
 and the node channel is `http` (this endpoint always delivers as source `http`; `redis`/`rabbitmq` channels are fed by
 brokers, never by FE).
 
-| Item                     | Rule                                                                                                                                                       |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Item                   | Rule                                                                                                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Idempotency-Key` header | Required, non-blank → else `422`. Replays return the originally recorded delivery regardless of current state. Use a fresh key per genuinely new delivery. |
-| Body                     | Required. Any valid JSON (object, array, scalar). Empty body → `422`. Invalid JSON → `422`.                                                                |
+| Body                   | Required. Any valid JSON (object, array, scalar). Empty body → `422`. Invalid JSON → `422`.                                                                  |
 
 Validation-script rejection → `422` with the rejection message in the problem detail (delivery recorded as
 `accepted: false`). Wrong state (terminal, not parked, parked on non-input node, channel mismatch, no live attempt) →
@@ -210,13 +210,54 @@ Finished/failed → `409`. Unknown id → `404` (same `409` caveat as pause). Re
 Moves a paused or failed instance back to an already-executed occurrence. Instance is always `paused` afterwards (failed
 becomes paused, error cleared).
 
-| Body field             | Required | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Body field           | Required | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `target_occurrence_id` | yes      | Real executed occurrence id (from the status `nodes` map or an executed debug response). Never-ran `not_started` ids are rejected (`404`, no occurrence row). Blank/missing/malformed body → `400`. Unknown occurrence or occurrence of another instance → `404`. Group node or occurrence whose node left the definition → `422`. Input occurrence that is not finished → `409`. Unrestorable context or history gap/overflow on lean instances → `422`/`409` (history failures map to `409`). |
-| `reason`               | no       | Optional audit annotation on the rollback event only.                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `reason`               | no       | Optional audit annotation on the rollback event only.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Guards: instance must be paused/failed → else `409`; `termination_pending` → `409`. Rolling back onto the currently
 parked input occurrence is a no-op `200` (no writes). Any other target atomically supersedes the live park (closed as
 stopped/cancelled, `"superseded by rollback"`). Context is restored from the target's `context_before`; input targets
 re-arm as a fresh attempt (`waiting_reason: "input"`, fresh `Idempotency-Key` accepted); other targets become runnable.
 Response `{status:"paused", current_node_id}`. Resume afterwards to re-execute.
+
+## Statistics
+
+Read-only aggregate for dashboards. Same auth as every other `/v1/*` route. No writes, no state guards,
+no `409`/`422` paths: bad query → `400`, service failure → `500`.
+
+### `GET /v1/statistics` → `200`
+
+Aggregate run counts over an inclusive creation window. No pagination.
+
+| Query        | Rule                                                                                           |
+| ------------ | ---------------------------------------------------------------------------------------------- |
+| `created_from` | Optional RFC3339 timestamp, inclusive lower bound on instance `created_at`. Garbage → `400`.       |
+| `created_to`   | Optional RFC3339 timestamp, inclusive upper bound on instance `created_at`. Garbage → `400`.       |
+| `order`        | `date` or `-date` only, default `-date`. Selects `runs_per_day` bucket direction. Anything else → `400`. |
+
+`created_from` after `created_to` → `400`. Response:
+
+```json
+{
+  "total_runs": 5,
+  "finished_runs": 1,
+  "failed_runs": 1,
+  "stopped_runs": 1,
+  "terminal_runs": 3,
+  "active_runs": 2,
+  "success_rate": 0.3333333333333333,
+  "average_duration_ms": 90000,
+  "runs_per_day": [
+    {"date": "2026-09-21", "total_runs": 2, "finished_runs": 0, "failed_runs": 0, "stopped_runs": 1},
+    {"date": "2026-09-20", "total_runs": 3, "finished_runs": 1, "failed_runs": 1, "stopped_runs": 0}
+  ]
+}
+```
+
+- `total_runs` counts every status; `terminal_runs` = finished + failed + stopped. `active_runs` = waiting + running
+  + paused in the same creation window. Narrow windows can report `active_runs: 0` while workers are busy globally.
+- `success_rate` = finished / terminal, `null` when terminal is 0. `average_duration_ms` = mean
+  `finished_at - started_at` in ms over terminal runs with both timestamps set, `null` when none qualify.
+- `runs_per_day` buckets group by calendar day of `created_at` (`date` is `YYYY-MM-DD`), ordered by `order`. Empty
+  window returns zeros with `runs_per_day: []` (empty array, never `null`).

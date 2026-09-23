@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
+	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/ids"
 )
 
@@ -203,4 +205,55 @@ func ParseInstanceListQuery(c *gin.Context) (*InstanceListQuery, error) {
 		}
 	}
 	return q, nil
+}
+
+// StatisticsSummaryQuery is the parsed GET /v1/statistics query: an
+// optional inclusive creation window plus the runs-per-day bucket order.
+type StatisticsSummaryQuery struct {
+	Window repository.StatisticsQuery
+	Order  string
+}
+
+// parseCreatedWindow parses the shared created_from/created_to RFC3339
+// window. Bounds are inclusive; from after to is rejected.
+func parseCreatedWindow(c *gin.Context) (*time.Time, *time.Time, error) {
+	var from, to *time.Time
+	if v := c.Query("created_from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return nil, nil, fmt.Errorf("query: created_from %q is not a valid RFC3339 timestamp", v)
+		}
+		from = &t
+	}
+	if v := c.Query("created_to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return nil, nil, fmt.Errorf("query: created_to %q is not a valid RFC3339 timestamp", v)
+		}
+		to = &t
+	}
+	if from != nil && to != nil && from.After(*to) {
+		return nil, nil, errors.New("query: created_from must not be after created_to")
+	}
+	return from, to, nil
+}
+
+// ParseStatisticsSummaryQuery parses and validates the aggregate query.
+// Order selects the runs-per-day bucket direction ("date"/"-date").
+func ParseStatisticsSummaryQuery(c *gin.Context) (*StatisticsSummaryQuery, error) {
+	from, to, err := parseCreatedWindow(c)
+	if err != nil {
+		return nil, err
+	}
+	order := "-date"
+	if v := c.Query("order"); v != "" {
+		if v != "date" && v != "-date" {
+			return nil, fmt.Errorf("query: order %q is not allowlisted", v)
+		}
+		order = v
+	}
+	return &StatisticsSummaryQuery{
+		Window: repository.StatisticsQuery{From: from, To: to, Order: order},
+		Order:  order,
+	}, nil
 }

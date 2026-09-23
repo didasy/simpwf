@@ -210,6 +210,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		eng,
 		leanOpts,
 	)
+	statsSvc := service.NewStatisticsService(instances)
 	hostname, _ := os.Hostname()
 
 	// Broker input consumers deliver payloads to waiting input nodes whose
@@ -311,6 +312,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		NodeDefinitions:     nodeSvc,
 		WorkflowDefinitions: wfSvc,
 		Instances:           instSvc,
+		Statistics:          statsSvc,
 		SwaggerEnabled:      cfg.Infra.HTTP.SwaggerEnabled,
 		Auth:                cfg.Auth,
 	})

@@ -10,13 +10,14 @@ import (
 	_ "github.com/simpwf/workflow-engine/docs"
 )
 
-// Deps carries the handlers the router wires. Services are added by later
-// implementation tasks; the router stays a thin registration layer.
+// Deps carries the handlers the router wires. The router stays a thin
+// registration layer.
 type Deps struct {
 	Health              *Health
 	NodeDefinitions     service.NodeDefinitionService
 	WorkflowDefinitions service.WorkflowDefinitionService
 	Instances           service.InstanceService
+	Statistics          service.StatisticsService
 	SwaggerEnabled      bool
 	Auth                configuration.Auth
 }
@@ -71,6 +72,12 @@ func NewRouter(deps Deps) *gin.Engine {
 		group.POST("/:id/resume", instances.Resume)
 		group.POST("/:id/stop", instances.Stop)
 		group.POST("/:id/rollback", instances.Rollback)
+	}
+
+	if deps.Statistics != nil {
+		stats := NewStatisticsHandler(deps.Statistics)
+		group := v1.Group("/statistics")
+		group.GET("", stats.Summary)
 	}
 
 	return r

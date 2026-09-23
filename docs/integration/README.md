@@ -27,7 +27,8 @@ code). Where this guide and `openapi.yaml` disagree, this guide follows code.
   `11111111-1111-7111-8111-111111111101`. Uppercase or non-canonical forms are rejected wherever an id is validated.
 - Timestamps are RFC 3339 date-time strings (`created_at`, `updated_at`, `started_at`, `finished_at`, `stopped_at`).
 - Nullable fields render as JSON `null` when empty (`waiting_reason`, `error`, `started_at`, `finished_at`,
-  `previous_version_id`, `occurrence_id`, `attempt`, snapshots, `input`/`output`, `duration_ms`). `waiting_reason: null`
+  `previous_version_id`, `occurrence_id`, `attempt`, snapshots, `input`/`output`, `duration_ms`, statistics
+  `success_rate`/`average_duration_ms`). `waiting_reason: null`
   means runnable.
 - `PUT /v1/workflow/instance/{id}/context` is full replacement, not merge. Keys absent from the body are dropped.
 - `PUT /v1/workflow/instance/{id}/input` accepts any valid JSON body (object, array, scalar). Every other JSON-object
@@ -49,19 +50,19 @@ Error content type is `application/problem+json`:
 
 Status mapping:
 
-| Status | Meaning here                                                                                                       |
-| ------ | ------------------------------------------------------------------------------------------------------------------ |
-| 200    | OK (includes pause-immediate, resume, stop, rollback, node debug)                                                  |
-| 201    | Definition created                                                                                                 |
-| 202    | Accepted: instance created, input accepted, pause deferred (node still running)                                    |
-| 204    | Deleted, empty body                                                                                                |
+| Status | Meaning here                                                                                                   |
+| ------ | -------------------------------------------------------------------------------------------------------------- |
+| 200    | OK (includes pause-immediate, resume, stop, rollback, node debug, statistics)                                  |
+| 201    | Definition created                                                                                             |
+| 202    | Accepted: instance created, input accepted, pause deferred (node still running)                                |
+| 204    | Deleted, empty body                                                                                            |
 | 400    | Malformed JSON, malformed query param, invalid path uuid on definition routes (`GET`/`DELETE .../definition/{id}`) |
-| 401    | Missing/invalid `X-Api-Token` (auth enabled)                                                                       |
-| 404    | Unknown id (definition, instance, occurrence, attempt beyond latest)                                               |
-| 409    | State conflict: delete while referenced, control on terminal instance, context/input/rollback guard failed         |
-| 422    | Semantic validation failure (bad enum, bad content, bad payload, missing required field)                           |
-| 500    | Server error (includes malformed instance path ids the database rejects instead of returning zero rows)            |
-| 503    | `GET /health/ready` only: database unreachable                                                                     |
+| 401    | Missing/invalid `X-Api-Token` (auth enabled)                                                                     |
+| 404    | Unknown id (definition, instance, occurrence, attempt beyond latest)                                           |
+| 409    | State conflict: delete while referenced, control on terminal instance, context/input/rollback guard failed     |
+| 422    | Semantic validation failure (bad enum, bad content, bad payload, missing required field)                       |
+| 500    | Server error (includes malformed instance path ids the database rejects instead of returning zero rows)        |
+| 503    | `GET /health/ready` only: database unreachable                                                                   |
 
 Rule of thumb for FE: `400` = fix the request shape, `422` = fix the values, `409` = refresh state first (instance moved
 on), `404` on a just-created id = treat as gone and refresh the list.
@@ -88,7 +89,10 @@ Every `GET` list returns the same envelope:
 - `name`: exact-match string filter (definitions only), case-sensitive.
 - `lineage_id`: single uuid. `version`: integer `>= 1`. `latest_only`: boolean (`true`/`false`; `strconv.ParseBool`
   forms accepted).
+- `created_from` / `created_to`: statistics summary only. Optional inclusive RFC3339 window on instance `created_at`.
 - `total_pages` is `ceil(total / per_page)`.
+- Exception: `GET /v1/statistics` (aggregate summary) has no `items` envelope and no pagination; its `order`
+  (`date` / `-date`) sorts the `runs_per_day` buckets, not rows.
 
 ## Happy-path flow
 
@@ -106,6 +110,7 @@ Every `GET` list returns the same envelope:
    `POST .../rollback`, then `POST .../resume`.
 8. Inspect any step: `GET .../status/node/{node_id}` (`context_before`, `context_after`, `input`, `output`, `error`,
    attempts).
+9. Dashboard: `GET /v1/statistics` for KPI cards (`active_runs` for live load) and `runs_per_day` charts over the `created_from`/`created_to` window.
 
 ## Instance lifecycle (for button state)
 

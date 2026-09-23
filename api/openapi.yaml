@@ -18,6 +18,7 @@ tags:
   - name: Controls
   - name: Node Debug
   - name: Health
+  - name: Statistics
 paths:
   /health/live:
     get:
@@ -245,6 +246,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstanceList"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/statistics:
+    get:
+      tags: [Statistics]
+      operationId: getStatisticsSummary
+      security:
+        - ApiKeyAuth: []
+      summary: Get workflow run statistics
+      description: |
+        Aggregate run counts over an inclusive creation window
+        (created_from..created_to, RFC3339). success_rate is
+        finished/terminal; average_duration_ms averages finished_at minus
+        started_at in milliseconds over terminal runs with both timestamps
+        set. active_runs counts waiting+running+paused instances in the same
+        window. runs_per_day buckets are ordered by date (default descending).
+      parameters:
+        - $ref: "#/components/parameters/CreatedFrom"
+        - $ref: "#/components/parameters/CreatedTo"
+        - $ref: "#/components/parameters/StatisticsOrder"
+      responses:
+        "200":
+          description: Statistics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatisticsSummary"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/workflow/instance/{id}/status:
@@ -558,6 +586,31 @@ components:
         description: Repeatable status filter
       style: form
       explode: true
+    CreatedFrom:
+      name: created_from
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+        description: Inclusive window start (RFC3339) on instance creation time
+    CreatedTo:
+      name: created_to
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+        description: Inclusive window end (RFC3339) on instance creation time
+    StatisticsOrder:
+      name: order
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [date, -date]
+        default: -date
+        description: Runs-per-day bucket direction
     DefinitionID:
       name: id
       in: path
@@ -721,6 +774,28 @@ components:
         per_page: { type: integer }
         total: { type: integer }
         total_pages: { type: integer }
+    StatisticsSummary:
+      type: object
+      required: [total_runs, finished_runs, failed_runs, stopped_runs, terminal_runs, active_runs, runs_per_day]
+      properties:
+        total_runs: { type: integer }
+        finished_runs: { type: integer }
+        failed_runs: { type: integer }
+        stopped_runs: { type: integer }
+        terminal_runs: { type: integer }
+        active_runs: { type: integer, description: waiting+running+paused instances in the same creation window }
+        success_rate: { type: number, nullable: true }
+        average_duration_ms: { type: number, nullable: true }
+        runs_per_day: { type: array, items: { $ref: "#/components/schemas/RunsPerDay" } }
+    RunsPerDay:
+      type: object
+      required: [date, total_runs, finished_runs, failed_runs, stopped_runs]
+      properties:
+        date: { type: string, description: Calendar day YYYY-MM-DD }
+        total_runs: { type: integer }
+        finished_runs: { type: integer }
+        failed_runs: { type: integer }
+        stopped_runs: { type: integer }
     InstanceStatus:
       type: object
       required: [id, workflow_definition_id, context_mode, status, waiting_reason, pause_requested, termination_pending, attempt, counters, created_by, updated_by, created_at, updated_at]
