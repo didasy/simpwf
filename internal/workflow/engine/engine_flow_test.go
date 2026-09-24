@@ -1070,7 +1070,7 @@ func TestEngineHTTP500RoutesToOnFailureInput(t *testing.T) {
 			"post_script": map[string]any{"script": "context.post_ran = true;"},
 		}),
 		nodeJSON(n2, "input", "fallback-input", "", n3, "", map[string]any{
-			"channel":      "http",
+			"channel":         "http",
 			"output_property": "manual_fix",
 		}),
 		nodeJSON(n3, "script", "done", "return 'done';", "", "out", nil),
@@ -1167,7 +1167,7 @@ func TestEnginePollerExhaustionRoutesToOnFailureInput(t *testing.T) {
 			"post_script": map[string]any{"script": "context.post_ran = true;"},
 		}),
 		nodeJSON(n2, "input", "fallback-input", "", n3, "", map[string]any{
-			"channel":      "http",
+			"channel":         "http",
 			"output_property": "manual_fix",
 		}),
 		nodeJSON(n3, "script", "done", "return 'done';", "", "out", nil),
