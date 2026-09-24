@@ -165,7 +165,9 @@ func (s *workflowDefinitionService) materializeNode(ctx context.Context, n *mode
 			merged.PostScriptSet = true
 		}
 		merged.NextNode = n.NextNode
-		merged.OutputProperty = n.OutputProperty
+		if strings.TrimSpace(n.OutputProperty) != "" {
+			merged.OutputProperty = n.OutputProperty
+		}
 		if n.OnFailure != nil {
 			if merged.Type != model.NodeTypeExternalCall && merged.Type != model.NodeTypePoller {
 				return nil, fmt.Errorf("%w: node %s is %s which does not support on_failure", model.ErrInvalid, n.ID, merged.Type)

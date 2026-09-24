@@ -13,7 +13,7 @@ func inputNode(validation string) *model.NodeContent {
 	if validation != "" {
 		v = &model.ValidationScript{Script: validation}
 	}
-	return &model.NodeContent{Type: model.NodeTypeInput, Channel: "http", ContextPath: "webhook", Validation: v, Timeout: testTimeout}
+	return &model.NodeContent{Type: model.NodeTypeInput, Channel: "http", OutputProperty: "webhook", Validation: v, Timeout: testTimeout}
 }
 
 func TestInputValidationSuccess(t *testing.T) {

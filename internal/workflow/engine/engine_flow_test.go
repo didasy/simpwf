@@ -191,7 +191,7 @@ func TestEngineLeanInputParkStoresEmptyDiff(t *testing.T) {
 	db := setupEngineDB(t)
 	wfID := createWorkflow(t, db, n1,
 		nodeJSON(n1, "input", "ask", "", n2, "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 		}),
 		nodeJSON(n2, "script", "after", "return 'ok';", "", "after", nil),
 	)
@@ -432,7 +432,7 @@ func TestEngineInputWaits(t *testing.T) {
 	db := setupEngineDB(t)
 	wfID := createWorkflow(t, db, n1,
 		nodeJSON(n1, "input", "ask", "", n2, "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 		}),
 		nodeJSON(n2, "script", "after", "return 'ok';", "", "after", nil),
 	)
@@ -1070,8 +1070,8 @@ func TestEngineHTTP500RoutesToOnFailureInput(t *testing.T) {
 			"post_script": map[string]any{"script": "context.post_ran = true;"},
 		}),
 		nodeJSON(n2, "input", "fallback-input", "", n3, "", map[string]any{
-			"channel":      "http",
-			"context_path": "manual.fix",
+			"channel":         "http",
+			"output_property": "manual_fix",
 		}),
 		nodeJSON(n3, "script", "done", "return 'done';", "", "out", nil),
 	)
@@ -1167,8 +1167,8 @@ func TestEnginePollerExhaustionRoutesToOnFailureInput(t *testing.T) {
 			"post_script": map[string]any{"script": "context.post_ran = true;"},
 		}),
 		nodeJSON(n2, "input", "fallback-input", "", n3, "", map[string]any{
-			"channel":      "http",
-			"context_path": "manual.fix",
+			"channel":         "http",
+			"output_property": "manual_fix",
 		}),
 		nodeJSON(n3, "script", "done", "return 'done';", "", "out", nil),
 	)
@@ -1368,7 +1368,7 @@ func TestEngineRecoveryReconcilesStaleCursorToParkedInput(t *testing.T) {
 	db := setupEngineDB(t)
 	wfID := createWorkflow(t, db, n1,
 		nodeJSON(n1, "script", "a", "context.x = 1; return 1;", n2, "out", nil),
-		nodeJSON(n2, "input", "ask", "", n3, "", map[string]any{"channel": "http", "context_path": "gate"}),
+		nodeJSON(n2, "input", "ask", "", n3, "", map[string]any{"channel": "http", "output_property": "gate"}),
 		nodeJSON(n3, "script", "b", "return 2;", "", "done", nil),
 	)
 	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
@@ -1440,7 +1440,7 @@ func TestEngineRecoveryReconcilesStaleCursorToParkedInput(t *testing.T) {
 func TestEngineRecoveryReconcilesGroupedInputStack(t *testing.T) {
 	db := setupEngineDB(t)
 	grp := `{"id": "` + g1 + `", "type": "group", "name": "g", "start_node_id": "` + n2 + `", "next_node": "` + n3 + `", "nodes": [
-		{"id": "` + n2 + `", "type": "input", "name": "ask", "channel": "http", "context_path": "gate", "next_node": ""},
+		{"id": "` + n2 + `", "type": "input", "name": "ask", "channel": "http", "output_property": "gate", "next_node": ""},
 		{"id": "` + n4 + `", "type": "script", "name": "skip", "script": "return 0;", "next_node": ""}]}`
 	wfID := createWorkflow(t, db, n1,
 		nodeJSON(n1, "script", "a", "context.x = 1; return 1;", g1, "out", nil),

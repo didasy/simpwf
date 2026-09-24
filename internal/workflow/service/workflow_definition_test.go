@@ -231,11 +231,47 @@ func TestMaterializeMergesNodeDefinition(t *testing.T) {
 	}
 }
 
+func TestMaterializeInheritsOutputProperty(t *testing.T) {
+	ndRepo := newFakeNodeRepo()
+	ndRepo.defs[nodeDefA] = model.NodeDefinition{
+		ID: nodeDefA, Name: "shared-input", Version: 1, LineageID: lineageID,
+		Type: "input", Content: json.RawMessage(`{"type":"input","channel":"http","output_property":"new_post"}`),
+	}
+	svc := newWorkflowService(newFakeWorkflowRepo(), ndRepo)
+
+	materialize := func(t *testing.T, occurrence string) *model.NodeContent {
+		t.Helper()
+		content := `{"start_node_id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","nodes":[
+			{"id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","node_definition_id":"` + nodeDefA + `","next_node":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"` + occurrence + `},
+			{"id":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb","type":"script","script":"return 2;"}
+		]}`
+		wc, err := model.ParseWorkflowContent([]byte(content), testLimits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, err := svc.Materialize(context.Background(), wc)
+		if err != nil {
+			t.Fatalf("Materialize() error = %v", err)
+		}
+		return merged.Nodes[0]
+	}
+
+	if got := materialize(t, "").OutputProperty; got != "new_post" {
+		t.Errorf("omitted output_property = %q, want inherited new_post", got)
+	}
+	if got := materialize(t, `,"output_property":"custom"`).OutputProperty; got != "custom" {
+		t.Errorf("explicit output_property = %q, want custom override", got)
+	}
+	if got := materialize(t, `,"output_property":"   "`).OutputProperty; got != "new_post" {
+		t.Errorf("whitespace output_property = %q, want inherited new_post", got)
+	}
+}
+
 func TestMaterializeInheritsInputForm(t *testing.T) {
 	ndRepo := newFakeNodeRepo()
 	ndRepo.defs[nodeDefA] = model.NodeDefinition{
 		ID: nodeDefA, Name: "shared-input", Version: 1, LineageID: lineageID,
-		Type: "input", Content: json.RawMessage(`{"type":"input","channel":"http","context_path":"user",
+		Type: "input", Content: json.RawMessage(`{"type":"input","channel":"http","output_property":"user",
 			"form":{"schema":{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}},"ui":{"order":["email"]}}}`),
 	}
 	svc := newWorkflowService(newFakeWorkflowRepo(), ndRepo)
@@ -541,7 +577,7 @@ func TestMaterializeOccurrenceOnFailureSurvives(t *testing.T) {
 	content := `{"start_node_id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","nodes":[
 		{"id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","node_definition_id":"` + nodeDefA + `","next_node":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb","on_failure":{"next_node":"cccccccc-cccc-7ccc-8ccc-cccccccccccc","output_property":"err"}},
 		{"id":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb","type":"script","script":"return 1;"},
-		{"id":"cccccccc-cccc-7ccc-8ccc-cccccccccccc","type":"input","channel":"http","context_path":"fix"}
+		{"id":"cccccccc-cccc-7ccc-8ccc-cccccccccccc","type":"input","channel":"http","output_property":"fix"}
 	]}`
 	wc, err := model.ParseWorkflowContent([]byte(content), testLimits)
 	if err != nil {
@@ -571,7 +607,7 @@ func TestMaterializeOccurrenceOnFailureRejectsUnsupportedDefinitionType(t *testi
 	content := `{"start_node_id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","nodes":[
 		{"id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","node_definition_id":"` + nodeDefA + `","next_node":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb","on_failure":{"next_node":"cccccccc-cccc-7ccc-8ccc-cccccccccccc","output_property":"err"}},
 		{"id":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb","type":"script","script":"return 1;"},
-		{"id":"cccccccc-cccc-7ccc-8ccc-cccccccccccc","type":"input","channel":"http","context_path":"fix"}
+		{"id":"cccccccc-cccc-7ccc-8ccc-cccccccccccc","type":"input","channel":"http","output_property":"fix"}
 	]}`
 	wc, err := model.ParseWorkflowContent([]byte(content), testLimits)
 	if err != nil {

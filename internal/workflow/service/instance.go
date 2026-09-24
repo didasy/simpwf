@@ -18,7 +18,6 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/contextdiff"
-	"github.com/simpwf/workflow-engine/pkg/contextpath"
 )
 
 // CreateInstance starts a workflow instance. Debug marks a step-through
@@ -66,10 +65,10 @@ type StatusDetail struct {
 // PendingInput is the waiting-input contract served on status: the frontend
 // renders its dynamic form from Form, then delivers the payload.
 type PendingInput struct {
-	NodeID      string
-	Channel     string
-	ContextPath string
-	Form        *model.InputForm
+	NodeID         string
+	Channel        string
+	OutputProperty string
+	Form           *model.InputForm
 }
 
 // NodeOccurrence is the per-node status view: the already-executed
@@ -381,11 +380,15 @@ func (s *instanceService) pendingInput(ctx context.Context, inst *model.Workflow
 	if node.Type != model.NodeTypeInput {
 		return nil
 	}
+	key := strings.TrimSpace(node.OutputProperty)
+	if key == "" {
+		key = node.ID
+	}
 	return &PendingInput{
-		NodeID:      node.ID,
-		Channel:     node.Channel,
-		ContextPath: node.ContextPath,
-		Form:        node.Form,
+		NodeID:         node.ID,
+		Channel:        node.Channel,
+		OutputProperty: key,
+		Form:           node.Form,
 	}
 }
 
@@ -1260,9 +1263,11 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := contextpath.Set(newCtx, inputNode.ContextPath, payload); err != nil {
-		return nil, fmt.Errorf("%w: write input to context_path: %v", model.ErrInvalid, err)
+	key := strings.TrimSpace(inputNode.OutputProperty)
+	if key == "" {
+		key = inputNode.ID
 	}
+	newCtx[key] = payload
 
 	// The post hook sees the accepted payload as a frozen output global and
 	// may transform the context after the payload was written.

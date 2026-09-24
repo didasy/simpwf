@@ -348,7 +348,7 @@ func TestEngineDebugInputParksWaiting(t *testing.T) {
 	db := setupEngineDB(t)
 	wfID := createWorkflow(t, db, n1,
 		nodeJSON(n1, "input", "ask", "", n2, "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 		}),
 		nodeJSON(n2, "script", "after", "return 'ok';", "", "after", nil),
 	)

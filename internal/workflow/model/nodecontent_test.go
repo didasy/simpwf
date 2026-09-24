@@ -144,12 +144,12 @@ func TestParseInputNode(t *testing.T) {
 	nc := mustParseContent(t, `{
 		"type": "input",
 		"channel": "http",
-		"context_path": "webhook.data",
+		"output_property": "webhook",
 		"validation": {"script": "input = JSON.parse(input); if (!input.success) { return 'failed'; };"},
 		"next_node": "11111111-1111-7111-8111-111111111111"
 	}`)
-	if nc.Channel != "http" || nc.ContextPath != "webhook.data" {
-		t.Errorf("channel/context_path mismatch: %+v", nc)
+	if nc.Channel != "http" || nc.OutputProperty != "webhook" {
+		t.Errorf("channel/output_property mismatch: %+v", nc)
 	}
 	if nc.Validation == nil || nc.Validation.Script == "" {
 		t.Errorf("validation mismatch: %+v", nc.Validation)
@@ -158,22 +158,22 @@ func TestParseInputNode(t *testing.T) {
 
 func TestParseInputNodeAcceptsBrokerChannels(t *testing.T) {
 	for _, channel := range []string{"http", "redis", "rabbitmq"} {
-		nc := mustParseContent(t, `{"type":"input","channel":"`+channel+`","context_path":"x"}`)
+		nc := mustParseContent(t, `{"type":"input","channel":"`+channel+`","output_property":"x"}`)
 		if nc.Channel != channel {
 			t.Errorf("channel = %q, want %q", nc.Channel, channel)
 		}
 	}
 	for _, channel := range []string{"kafka", "ftp", "amqp"} {
-		raw := `{"type":"input","channel":"` + channel + `","context_path":"x"}`
+		raw := `{"type":"input","channel":"` + channel + `","output_property":"x"}`
 		if _, err := model.ParseNodeContent([]byte(raw), testLimits); err == nil {
 			t.Errorf("ParseNodeContent(channel=%s) error = nil, want error", channel)
 		}
 	}
-	if _, err := model.ParseNodeContent([]byte(`{"type":"input","context_path":"x"}`), testLimits); err == nil {
+	if _, err := model.ParseNodeContent([]byte(`{"type":"input","output_property":"x"}`), testLimits); err == nil {
 		t.Error("input without channel error = nil, want error")
 	}
-	if _, err := model.ParseNodeContent([]byte(`{"type":"input","channel":"http"}`), testLimits); err == nil {
-		t.Error("input without context_path error = nil, want error")
+	if _, err := model.ParseNodeContent([]byte(`{"type":"input","channel":"http","context_path":"x"}`), testLimits); err == nil {
+		t.Error("input with context_path error = nil, want error")
 	}
 }
 
@@ -313,9 +313,9 @@ func TestParseOutputNodeRejectsInvalidConfig(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{"missing channel", `{"type":"output","context_path":"x"}`, "channel"},
-		{"http channel", `{"type":"output","channel":"http","context_path":"x"}`, "channel"},
-		{"empty channel", `{"type":"output","channel":"","context_path":"x"}`, "channel"},
+		{"missing channel", `{"type":"output","output_property":"x"}`, "channel"},
+		{"http channel", `{"type":"output","channel":"http","output_property":"x"}`, "channel"},
+		{"empty channel", `{"type":"output","channel":"","output_property":"x"}`, "channel"},
 		{"missing context_path", `{"type":"output","channel":"redis"}`, "context_path"},
 		{"empty context_path", `{"type":"output","channel":"redis","context_path":"  "}`, "context_path"},
 	}
@@ -529,9 +529,9 @@ func TestParseHooksOnEveryNodeType(t *testing.T) {
 	}{
 		{"script", `{"type":"script","script":"return 1;","pre_script":` + pre + `,"post_script":` + post + `}`},
 		{"conditions", `{"type":"conditions","conditions":[{"key":"a","condition":"return true;"},{"key":"b","condition":"return false;"}],"pre_script":` + pre + `,"post_script":` + post + `}`},
-		{"input", `{"type":"input","channel":"http","context_path":"x","pre_script":` + pre + `,"post_script":` + post + `}`},
+		{"input", `{"type":"input","channel":"http","output_property":"x","pre_script":` + pre + `,"post_script":` + post + `}`},
 		{"external_call", `{"type":"external_call","http_config":{"url":"https://example.com/x"},"pre_script":` + pre + `,"post_script":` + post + `}`},
-		{"output", `{"type":"output","channel":"redis","context_path":"x","pre_script":` + pre + `,"post_script":` + post + `}`},
+		{"output", `{"type":"output","channel":"redis","context_path":"x","output_property":"x","pre_script":` + pre + `,"post_script":` + post + `}`},
 		{"poller", `{"type":"poller","http":{"url":"https://example.com/x","until":"return true;"},"pre_script":` + pre + `,"post_script":` + post + `}`},
 		{"group", `{"type":"group","start_node_id":"11111111-1111-7111-8111-111111111111","nodes":[{"id":"11111111-1111-7111-8111-111111111111","type":"script","script":"return 1;","pre_script":` + pre + `}],"pre_script":` + pre + `,"post_script":` + post + `}`},
 	}
@@ -708,8 +708,8 @@ func TestParseNodeContentOnFailureRejectsUnsupportedTypes(t *testing.T) {
 	}{
 		{"script", `{"type":"script","script":"return 1;","on_failure":{"next_node":"11111111-1111-7111-8111-111111111111","output_property":"err"}}`},
 		{"conditions", `{"type":"conditions","conditions":[{"key":"a","condition":"return true;"},{"key":"b","condition":"return false;"}],"on_failure":{"next_node":"11111111-1111-7111-8111-111111111111","output_property":"err"}}`},
-		{"input", `{"type":"input","channel":"http","context_path":"x","on_failure":{"next_node":"11111111-1111-7111-8111-111111111111","output_property":"err"}}`},
-		{"output", `{"type":"output","channel":"redis","context_path":"x","on_failure":{"next_node":"11111111-1111-7111-8111-111111111111","output_property":"err"}}`},
+		{"input", `{"type":"input","channel":"http","output_property":"x","on_failure":{"next_node":"11111111-1111-7111-8111-111111111111","output_property":"err"}}`},
+		{"output", `{"type":"output","channel":"redis","output_property":"x","on_failure":{"next_node":"11111111-1111-7111-8111-111111111111","output_property":"err"}}`},
 		{"group", `{"type":"group","start_node_id":"11111111-1111-7111-8111-111111111111","nodes":[{"id":"11111111-1111-7111-8111-111111111111","type":"script","script":"return 1;"}],"on_failure":{"next_node":"22222222-2222-7222-8222-222222222222","output_property":"err"}}`},
 	}
 	for _, c := range cases {
@@ -771,7 +771,7 @@ func TestParseInputNodeFormAccepted(t *testing.T) {
 	nc := mustParseContent(t, `{
 		"type": "input",
 		"channel": "http",
-		"context_path": "user",
+		"output_property": "user",
 		"form": {
 			"schema": {"type":"object","required":["email"],"properties":{"email":{"type":"string","format":"email"}}},
 			"ui": {"order":["email"]}
@@ -794,11 +794,11 @@ func TestParseInputNodeFormRejectsInvalid(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{"missing schema", `{"type":"input","channel":"http","context_path":"x","form":{"ui":{}}}`, "schema"},
-		{"empty schema", `{"type":"input","channel":"http","context_path":"x","form":{"schema":{}}}`, "schema"},
-		{"non-object schema", `{"type":"input","channel":"http","context_path":"x","form":{"schema":[]}}`, "schema"},
-		{"invalid json schema", `{"type":"input","channel":"http","context_path":"x","form":{"schema":{"type":"object","properties":{"name":{"type":"string","pattern":"(["}}}}}`, "schema"},
-		{"non-object ui", `{"type":"input","channel":"http","context_path":"x","form":{"schema":{"type":"object"},"ui":[1,2]}}`, "ui"},
+		{"missing schema", `{"type":"input","channel":"http","output_property":"x","form":{"ui":{}}}`, "schema"},
+		{"empty schema", `{"type":"input","channel":"http","output_property":"x","form":{"schema":{}}}`, "schema"},
+		{"non-object schema", `{"type":"input","channel":"http","output_property":"x","form":{"schema":[]}}`, "schema"},
+		{"invalid json schema", `{"type":"input","channel":"http","output_property":"x","form":{"schema":{"type":"object","properties":{"name":{"type":"string","pattern":"(["}}}}}`, "schema"},
+		{"non-object ui", `{"type":"input","channel":"http","output_property":"x","form":{"schema":{"type":"object"},"ui":[1,2]}}`, "ui"},
 	}
 	for _, c := range cases {
 		_, err := model.ParseNodeContent([]byte(c.raw), testLimits)
@@ -827,5 +827,50 @@ func TestParseFormRejectsReference(t *testing.T) {
 		t.Error("reference with form: error = nil, want error")
 	} else if !strings.Contains(err.Error(), "inline executable") {
 		t.Errorf("reference with form: error = %q, want inline-executable rejection", err)
+	}
+}
+
+func TestParseInputNodeRejectsContextPath(t *testing.T) {
+	bad := []string{
+		`{"type":"input","channel":"http","context_path":"x"}`,
+		`{"type":"input","channel":"http","context_path":"x","output_property":"y"}`,
+		`{"node_definition_id":"11111111-1111-7111-8111-111111111111","context_path":"x"}`,
+	}
+	for _, raw := range bad {
+		_, err := model.ParseNodeContent([]byte(raw), testLimits)
+		if err == nil {
+			t.Errorf("ParseNodeContent(%s) error = nil, want context_path rejection", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "input node does not support context_path") {
+			t.Errorf("ParseNodeContent(%s) error = %q, want context_path rejection", raw, err)
+		}
+	}
+}
+
+func TestParseInputNodeRejectsDottedOutputProperty(t *testing.T) {
+	raw := `{"type":"input","channel":"http","output_property":"a.b"}`
+	_, err := model.ParseNodeContent([]byte(raw), testLimits)
+	if err == nil {
+		t.Error("dotted output_property error = nil, want error")
+	} else if !strings.Contains(err.Error(), "bare key") {
+		t.Errorf("dotted output_property error = %q, want bare-key rejection", err)
+	}
+}
+
+func TestParseInputNodeBlankOutputPropertyAllowed(t *testing.T) {
+	for _, raw := range []string{
+		`{"type":"input","channel":"http"}`,
+		`{"type":"input","channel":"http","output_property":""}`,
+		`{"type":"input","channel":"http","output_property":"   "}`,
+	} {
+		nc := mustParseContent(t, raw)
+		if nc.OutputProperty != "" {
+			t.Errorf("ParseNodeContent(%s) output_property = %q, want blank", raw, nc.OutputProperty)
+		}
+	}
+	nc := mustParseContent(t, `{"type":"input","channel":"http","output_property":"  padded  "}`)
+	if nc.OutputProperty != "padded" {
+		t.Errorf("output_property = %q, want trimmed", nc.OutputProperty)
 	}
 }

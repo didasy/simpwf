@@ -68,7 +68,7 @@ type NodeContent struct {
 	Script           string            // script
 	Conditions       []Condition       // conditions
 	Channel          string            // input
-	ContextPath      string            // input: target context path
+	ContextPath      string            // output: source context path
 	Validation       *ValidationScript // input
 	Form             *InputForm        // input: dynamic form contract (schema + ui hints)
 	HTTP             *HTTPConfig       // external_call
@@ -360,6 +360,9 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		if r.Type != "" && r.Type != string(NodeTypeExternalCall) && r.Type != string(NodeTypePoller) && nc.OnFailure != nil {
 			return nil, fmt.Errorf("node type %q does not support on_failure", r.Type)
 		}
+		if r.ContextPath != nil {
+			return nil, errors.New("input node does not support context_path; use output_property")
+		}
 		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
 			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil {
 			return nil, errors.New("node referencing a node_definition_id cannot carry inline executable fields")
@@ -441,11 +444,18 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		default:
 			return nil, fmt.Errorf("input channel %q is not supported (allowed: http, redis, rabbitmq)", *r.Channel)
 		}
-		if r.ContextPath == nil || strings.TrimSpace(*r.ContextPath) == "" {
-			return nil, errors.New("input node requires a context_path")
+		if r.ContextPath != nil {
+			return nil, errors.New("input node does not support context_path; use output_property")
+		}
+		if r.OutputProperty != nil && strings.TrimSpace(*r.OutputProperty) != "" && !contextpath.ValidKey(strings.TrimSpace(*r.OutputProperty)) {
+			return nil, errors.New("input output_property must be a bare key")
 		}
 		nc.Channel = *r.Channel
-		nc.ContextPath = *r.ContextPath
+		if strings.TrimSpace(nc.OutputProperty) != "" {
+			nc.OutputProperty = strings.TrimSpace(nc.OutputProperty)
+		} else {
+			nc.OutputProperty = ""
+		}
 		if r.Validation != nil {
 			if strings.TrimSpace(r.Validation.Script) == "" {
 				return nil, errors.New("input validation script must be non-empty")

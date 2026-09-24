@@ -19,7 +19,7 @@ func formNode(t *testing.T, content string) *model.NodeContent {
 }
 
 func TestValidateAcceptsMatchingPayload(t *testing.T) {
-	nc := formNode(t, `{"type":"input","channel":"http","context_path":"user",
+	nc := formNode(t, `{"type":"input","channel":"http","output_property":"user",
 		"form":{"schema":{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}}}`)
 	if err := form.Validate(nc, []byte(`{"email":"a@b.c"}`)); err != nil {
 		t.Errorf("Validate() error = %v, want nil", err)
@@ -27,7 +27,7 @@ func TestValidateAcceptsMatchingPayload(t *testing.T) {
 }
 
 func TestValidateRejectsMismatch(t *testing.T) {
-	nc := formNode(t, `{"type":"input","channel":"http","context_path":"user",
+	nc := formNode(t, `{"type":"input","channel":"http","output_property":"user",
 		"form":{"schema":{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}}}`)
 	err := form.Validate(nc, []byte(`{}`))
 	if err == nil {
@@ -39,7 +39,7 @@ func TestValidateRejectsMismatch(t *testing.T) {
 }
 
 func TestValidateMissingPropertyOmitsRootLocation(t *testing.T) {
-	nc := formNode(t, `{"type":"input","channel":"http","context_path":"user",
+	nc := formNode(t, `{"type":"input","channel":"http","output_property":"user",
 		"form":{"schema":{"type":"object","required":["title","body"],"properties":{"title":{"type":"string"},"body":{"type":"string"}}}}}`)
 	err := form.Validate(nc, []byte(`{"title":"wow"}`))
 	if err == nil {
@@ -54,7 +54,7 @@ func TestValidateMissingPropertyOmitsRootLocation(t *testing.T) {
 }
 
 func TestValidateNilWithoutForm(t *testing.T) {
-	nc := formNode(t, `{"type":"input","channel":"http","context_path":"user"}`)
+	nc := formNode(t, `{"type":"input","channel":"http","output_property":"user"}`)
 	if err := form.Validate(nc, []byte(`anything at all`)); err != nil {
 		t.Errorf("Validate() error = %v, want nil for formless node", err)
 	}

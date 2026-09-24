@@ -1773,13 +1773,13 @@ const docTemplate = `{
                 "channel": {
                     "type": "string"
                 },
-                "context_path": {
-                    "type": "string"
-                },
                 "form": {
                     "$ref": "#/definitions/internal_workflow_handler.InputFormDTO"
                 },
                 "node_id": {
+                    "type": "string"
+                },
+                "output_property": {
                     "type": "string"
                 }
             }

@@ -61,7 +61,7 @@ node_definitions=$(cat <<'JSON'
     "content": {
       "type": "input",
       "channel": "http",
-      "context_path": "new_post",
+      "output_property": "new_post",
       "form": {
         "schema": {
           "type": "object",

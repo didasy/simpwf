@@ -352,7 +352,7 @@ func TestCreateDebugInputDeliversThenStepPauses(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102",
-			map[string]any{"channel": "http", "context_path": "webhook"}),
+			map[string]any{"channel": "http", "output_property": "webhook"}),
 		svcNodeJSON("11111111-1111-7111-8111-111111111102", "script", "middle", "return 'ok';", "11111111-1111-7111-8111-111111111103", map[string]any{"output_property": "after"}),
 		svcNodeJSON("11111111-1111-7111-8111-111111111103", "script", "last", "return 'done';", "", map[string]any{"output_property": "last"}),
 	)
@@ -480,7 +480,7 @@ func TestDeliverInputValidResumes(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102",
-			map[string]any{"channel": "http", "context_path": "webhook"}),
+			map[string]any{"channel": "http", "output_property": "webhook"}),
 		svcNodeJSON("11111111-1111-7111-8111-111111111102", "script", "after", "return context.webhook.success ? 'ok' : 'no';", "", map[string]any{"output_property": "after"}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{}`)})
@@ -512,10 +512,45 @@ func TestDeliverInputValidResumes(t *testing.T) {
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	wh, ok := ctxMap["webhook"].(map[string]any)
 	if !ok || wh["success"] != true {
-		t.Errorf("context = %v, want webhook payload at context_path", ctxMap)
+		t.Errorf("context = %v, want webhook payload at output_property", ctxMap)
 	}
 	if ctxMap["after"] != "ok" {
 		t.Errorf("after = %v", ctxMap["after"])
+	}
+}
+
+func TestDeliverInputBlankOutputPropertyDefaultsToNodeID(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "input", "ask", "", "", map[string]any{"channel": "http"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("instance = %+v, want waiting on input", cur)
+	}
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, IdempotencyKey: "blank-1", Payload: []byte(`{"ok":true}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if !delivery.Accepted {
+		t.Fatalf("delivery = %+v, want accepted", delivery)
+	}
+	got, _ := svc.GetContext(ctx, inst.ID)
+	var ctxMap map[string]any
+	_ = json.Unmarshal(got.Context, &ctxMap)
+	v, ok := ctxMap[n1].(map[string]any)
+	if !ok || v["ok"] != true {
+		t.Errorf("context = %v, want payload at node id %q", ctxMap, n1)
 	}
 }
 
@@ -527,7 +562,7 @@ func TestDeliverInputMaterializesReferencedInputNode(t *testing.T) {
 	ndID := "11111111-1111-7111-8111-111111111301"
 	nodeDef := model.NodeDefinition{
 		ID: ndID, Name: "ask", Version: 1, LineageID: svcNewID(),
-		Type: "input", Content: json.RawMessage(`{"type":"input","channel":"http","context_path":"webhook"}`),
+		Type: "input", Content: json.RawMessage(`{"type":"input","channel":"http","output_property":"webhook"}`),
 		CreatedBy: svcSysUserID, UpdatedBy: svcSysUserID,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -568,7 +603,7 @@ func TestDeliverInputMaterializesReferencedInputNode(t *testing.T) {
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	wh, ok := ctxMap["webhook"].(map[string]any)
 	if !ok || wh["success"] != true {
-		t.Errorf("context = %v, want payload written at context_path", ctxMap)
+		t.Errorf("context = %v, want payload written at output_property", ctxMap)
 	}
 }
 
@@ -579,7 +614,7 @@ func TestDeliverInputRejectsWithMessage(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"validation": map[string]any{
 				"script": "input = JSON.parse(input); if (!input.success) { return 'Webhook failed!'; };",
 			},
@@ -616,7 +651,7 @@ func TestDeliverInputFormSchemaRejects(t *testing.T) {
 	// must never run (script returns rejection for payloads it sees).
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"validation": map[string]any{
 				"script": "input = JSON.parse(input); return 'script saw it';",
 			},
@@ -659,7 +694,7 @@ func TestDeliverInputFormSchemaPassScriptReject(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"validation": map[string]any{
 				"script": "input = JSON.parse(input); if (!input.approved) { return 'not approved'; };",
 			},
@@ -695,7 +730,7 @@ func TestDeliverInputFormSchemaPassScriptPass(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"form": map[string]any{
 				"schema": map[string]any{
 					"type": "object", "required": []string{"email"},
@@ -728,7 +763,7 @@ func TestDeliverInputIdempotentReplay(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102",
-			map[string]any{"channel": "http", "context_path": "webhook"}),
+			map[string]any{"channel": "http", "output_property": "webhook"}),
 		svcNodeJSON("11111111-1111-7111-8111-111111111102", "script", "after", "return 1;", "", map[string]any{"output_property": "after"}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -770,7 +805,7 @@ func TestDeliverInputReplayKeyWithNewPayloadConflicts(t *testing.T) {
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102",
 			map[string]any{
-				"channel": "http", "context_path": "webhook",
+				"channel": "http", "output_property": "webhook",
 				"form": map[string]any{
 					"schema": map[string]any{
 						"type": "object", "required": []string{"title", "body"},
@@ -831,7 +866,7 @@ func TestDeliverInputSourceMustMatchChannel(t *testing.T) {
 	svc := svcInstanceService(db)
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "redis", "context_path": "webhook",
+			"channel": "redis", "output_property": "webhook",
 		}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -868,7 +903,7 @@ func TestDeliverInputFinishesWorkflow(t *testing.T) {
 	// Input node is the last node: delivery must finish the workflow.
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 		}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -1350,7 +1385,7 @@ func TestControlStopParksInputAttemptStopped(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 		}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -1579,7 +1614,7 @@ func TestDeliverInputPreHookRunsOnceBeforeParking(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "11111111-1111-7111-8111-111111111102", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"pre_script": map[string]any{"script": "context.pre_ran = (context.pre_ran || 0) + 1;"},
 		}),
 		svcNodeJSON("11111111-1111-7111-8111-111111111102", "script", "after", "return 'ok';", "", map[string]any{"output_property": "after"}),
@@ -1626,7 +1661,7 @@ func TestDeliverInputPostHookSeesPayload(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"post_script": map[string]any{"script": "context.post_sees = output.ok; context.post_ran = true;"},
 		}),
 	)
@@ -1663,7 +1698,7 @@ func TestDeliverInputRejectedRerunsNoHooks(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"pre_script":  map[string]any{"script": "context.pre_ran = (context.pre_ran || 0) + 1;"},
 			"post_script": map[string]any{"script": "context.post_ran = true;"},
 			"validation": map[string]any{
@@ -1726,7 +1761,7 @@ func TestDeliverInputPostFailureFailsWorkflow(t *testing.T) {
 
 	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
 		svcNodeJSON("11111111-1111-7111-8111-111111111101", "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 			"post_script": map[string]any{"script": "throw new Error('ipost boom');"},
 		}),
 	)
@@ -1782,7 +1817,7 @@ func TestDeliverInputGroupPostFailureFinishesInputAttempt(t *testing.T) {
 			"start_node_id": inner,
 			"post_script":   map[string]any{"script": "throw new Error('gpost boom');"},
 			"nodes": []map[string]any{
-				{"id": inner, "type": "input", "name": "ask", "channel": "http", "context_path": "webhook"},
+				{"id": inner, "type": "input", "name": "ask", "channel": "http", "output_property": "webhook"},
 			},
 		}),
 	)
@@ -1846,8 +1881,8 @@ func TestExternalCallFailureRoutesToInputAndResumes(t *testing.T) {
 			},
 		}),
 		svcNodeJSON(nInput, "input", "fix-input", "", nDone, map[string]any{
-			"channel":      "http",
-			"context_path": "fallback_data",
+			"channel":         "http",
+			"output_property": "fallback_data",
 		}),
 		svcNodeJSON(nDone, "script", "finish", "return context.fallback_data.val;", "", map[string]any{
 			"output_property": "final_result",
@@ -2181,7 +2216,7 @@ func TestRollbackParkedInputIsNoOp(t *testing.T) {
 	wfID := svcCreateWorkflow(t, db, n1,
 		svcNodeJSON(n1, "script", "a", "return 1;", n2, map[string]any{"output_property": "a"}),
 		svcNodeJSON(n2, "input", "ask", "", n3,
-			map[string]any{"channel": "http", "context_path": "gate"}),
+			map[string]any{"channel": "http", "output_property": "gate"}),
 		svcNodeJSON(n3, "script", "b", "return 1;", "", map[string]any{"output_property": "done"}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -2256,7 +2291,7 @@ func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
 	n3 := "11111111-1111-7111-8111-111111111103"
 	wfID := svcCreateWorkflow(t, db, n1,
 		svcNodeJSON(n1, "script", "a", "context.x = 1; return 1;", n2, map[string]any{"output_property": "out"}),
-		svcNodeJSON(n2, "input", "ask", "", n3, map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(n2, "input", "ask", "", n3, map[string]any{"channel": "http", "output_property": "gate"}),
 		svcNodeJSON(n3, "script", "b", "return 2;", "", map[string]any{"output_property": "done"}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -2393,7 +2428,7 @@ func TestRollbackToFinishedInputReparks(t *testing.T) {
 	n3 := "11111111-1111-7111-8111-111111111103"
 	wfID := svcCreateWorkflow(t, db, n1,
 		svcNodeJSON(n1, "input", "ask", "", n2,
-			map[string]any{"channel": "http", "context_path": "gate"}),
+			map[string]any{"channel": "http", "output_property": "gate"}),
 		svcNodeJSON(n2, "script", "b", "throw new Error('downstream boom');", n3, nil),
 		svcNodeJSON(n3, "script", "c", "return 2;", "", map[string]any{"output_property": "last"}),
 	)
@@ -2488,10 +2523,10 @@ func TestRollbackToFinishedInputSupersedesOtherLivePark(t *testing.T) {
 	n4 := "11111111-1111-7111-8111-111111111104"
 	wfID := svcCreateWorkflow(t, db, n1,
 		svcNodeJSON(n1, "input", "ask-first", "", n2,
-			map[string]any{"channel": "http", "context_path": "gate"}),
+			map[string]any{"channel": "http", "output_property": "gate"}),
 		svcNodeJSON(n2, "script", "ok", "return 1;", n3, map[string]any{"output_property": "mid"}),
 		svcNodeJSON(n3, "input", "ask-later", "", n4,
-			map[string]any{"channel": "http", "context_path": "gate2"}),
+			map[string]any{"channel": "http", "output_property": "gate2"}),
 		svcNodeJSON(n4, "script", "done", "return 1;", "", map[string]any{"output_property": "last"}),
 	)
 	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
@@ -2691,7 +2726,7 @@ func TestStatusDetailPendingInputWithForm(t *testing.T) {
 	n1 := "11111111-1111-7111-8111-111111111101"
 	wfID := svcCreateWorkflow(t, db, n1,
 		svcNodeJSON(n1, "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "user",
+			"channel": "http", "output_property": "user",
 			"form": map[string]any{
 				"schema": map[string]any{
 					"type": "object", "required": []string{"email"},
@@ -2715,7 +2750,7 @@ func TestStatusDetailPendingInputWithForm(t *testing.T) {
 		t.Fatal("PendingInput = nil, want waiting-input contract")
 	}
 	pi := d.PendingInput
-	if pi.NodeID != n1 || pi.Channel != "http" || pi.ContextPath != "user" {
+	if pi.NodeID != n1 || pi.Channel != "http" || pi.OutputProperty != "user" {
 		t.Errorf("pending input = %+v, want node/channel/path", pi)
 	}
 	if pi.Form == nil || !strings.Contains(string(pi.Form.Schema), `"email"`) {
@@ -2754,7 +2789,7 @@ func TestStatusDetailPendingInputNilWhenNotWaitingOnInput(t *testing.T) {
 	n2 := "11111111-1111-7111-8111-111111111102"
 	wfID2 := svcCreateWorkflow(t, db, n2,
 		svcNodeJSON(n2, "input", "ask", "", "", map[string]any{
-			"channel": "http", "context_path": "webhook",
+			"channel": "http", "output_property": "webhook",
 		}),
 	)
 	inst2, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID2})
@@ -2772,6 +2807,9 @@ func TestStatusDetailPendingInputNilWhenNotWaitingOnInput(t *testing.T) {
 	}
 	if d2.PendingInput.Form != nil {
 		t.Errorf("Form = %+v, want nil for formless input node", d2.PendingInput.Form)
+	}
+	if d2.PendingInput.OutputProperty != "webhook" {
+		t.Errorf("OutputProperty = %q, want %q", d2.PendingInput.OutputProperty, "webhook")
 	}
 }
 
@@ -2937,7 +2975,7 @@ func leanWorkflowInput(t *testing.T, db *gorm.DB) (wfID, in, after string) {
 	in = "11111111-1111-7111-8111-111111112111"
 	after = "11111111-1111-7111-8111-111111112112"
 	wfID = svcCreateWorkflowWithMode(t, db, in, model.ContextModeLean,
-		svcNodeJSON(in, "input", "ask", "", after, map[string]any{"channel": "http", "context_path": "gate"}),
+		svcNodeJSON(in, "input", "ask", "", after, map[string]any{"channel": "http", "output_property": "gate"}),
 		svcNodeJSON(after, "script", "done", "return 1;", "", map[string]any{"output_property": "done"}),
 	)
 	return wfID, in, after

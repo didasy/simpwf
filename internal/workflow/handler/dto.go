@@ -131,10 +131,10 @@ type InstanceStatusResponse struct {
 // carries no form contract; pending_input itself is omitted unless the
 // instance waits on an input node.
 type PendingInputResponse struct {
-	NodeID      string        `json:"node_id"`
-	Channel     string        `json:"channel"`
-	ContextPath string        `json:"context_path"`
-	Form        *InputFormDTO `json:"form"`
+	NodeID         string        `json:"node_id"`
+	Channel        string        `json:"channel"`
+	OutputProperty string        `json:"output_property"`
+	Form           *InputFormDTO `json:"form"`
 }
 
 // InputFormDTO carries the raw schema contract plus opaque ui render hints.
