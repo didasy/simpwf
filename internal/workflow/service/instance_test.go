@@ -2808,8 +2808,8 @@ func TestStatusDetailPendingInputNilWhenNotWaitingOnInput(t *testing.T) {
 	if d2.PendingInput.Form != nil {
 		t.Errorf("Form = %+v, want nil for formless input node", d2.PendingInput.Form)
 	}
-	if d2.PendingInput.OutputProperty != n2 {
-		t.Errorf("OutputProperty = %q, want node id default %q", d2.PendingInput.OutputProperty, n2)
+	if d2.PendingInput.OutputProperty != "webhook" {
+		t.Errorf("OutputProperty = %q, want %q", d2.PendingInput.OutputProperty, "webhook")
 	}
 }
 
