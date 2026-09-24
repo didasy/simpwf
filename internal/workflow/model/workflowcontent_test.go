@@ -298,7 +298,7 @@ func TestParseWorkflowContentOnFailureRouting(t *testing.T) {
 	raw := `{"start_node_id":"` + topA + `","nodes":[
 		{"id":"` + topA + `","type":"external_call","http_config":{"url":"https://example.com"},"next_node":"` + topB + `","on_failure":{"next_node":"` + topC + `","output_property":"err"}},
 		{"id":"` + topB + `","type":"script","script":"return 1;"},
-		{"id":"` + topC + `","type":"input","channel":"http","context_path":"fix"}
+		{"id":"` + topC + `","type":"input","channel":"http","output_property":"fix"}
 	]}`
 	wc := mustParseWorkflow(t, raw)
 	if wc.Nodes[0].OnFailure == nil || wc.Nodes[0].OnFailure.NextNode != topC {

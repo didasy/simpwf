@@ -381,7 +381,8 @@ paths:
       summary: Deliver input to a waiting input node
       description: |
         Raw JSON body; requires Idempotency-Key header. Accepted payload is
-        written to the waiting input node's context_path. When the input
+        written to the waiting input node's output_property (bare key,
+        defaults to node id). When the input
         node carries a form contract, the payload is validated against the
         form schema first, then the validation script; schema and script
         failures return 422 with the rejection message. Reusing an
@@ -865,11 +866,13 @@ components:
           description: Advisory rollback target hint; the rollback endpoint stays the source of truth
     PendingInput:
       type: object
-      required: [node_id, channel, context_path]
+      required: [node_id, channel]
       properties:
         node_id: { type: string, format: uuid }
         channel: { type: string }
-        context_path: { type: string }
+        output_property:
+          type: string
+          description: Bare top-level key the accepted payload is written to (defaults to node id when blank/omitted)
         form:
           $ref: "#/components/schemas/InputForm"
           nullable: true

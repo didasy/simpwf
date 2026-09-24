@@ -15,11 +15,12 @@
 #     ends the current group/workflow.
 #   - conditions nodes must NOT carry next_node or output_property.
 #   - scripts write their return value to output_property (default: the graph
-#     node id); external calls write a result object ({Status, Headers, Body} for
+#     node id); input nodes write the accepted payload to output_property
+#     (bare key, blank = node id); external calls write a result object ({Status, Headers, Body} for
 #     http_config, {ExitCode, Stdout, Stderr, TimedOut, Truncated} for
 #     execution_config); output nodes write a
-#     {Channel, Destination, MessageID} receipt; conditions and input nodes
-#     do not write output.
+#     {Channel, Destination, MessageID} receipt; conditions
+#     nodes do not write output.
 #   - input nodes park the instance with waiting reason "input"; clients
 #     deliver a payload with an Idempotency-Key. The channel picks the
 #     transport: "http" -> PUT /v1/workflow/instance/{id}/input,
@@ -101,14 +102,15 @@ nodes:
 
   # Input node: parks the instance waiting on a payload. The channel fixes
   # the transport; here the payload arrives through the instance's Redis
-  # channel workflow:input:<instance_id>. The optional form contract lets a
+  # channel workflow:input:<instance_id>. The accepted payload is written to
+  # output_property (bare key, blank = node id). The optional form contract lets a
   # generic frontend render the input dynamically per workflow version:
   # status pending_input.form serves these exact bytes back.
   - type: input
     id: "11111111-1111-7111-8111-111111111103"
     name: "Manager Approval"
     channel: "redis"
-    context_path: "approval"
+    output_property: approval
     form:
       schema:
         type: "object"
@@ -123,7 +125,7 @@ nodes:
         var body = JSON.parse(input);
         if (!body.approved) { return 'Approval rejected'; }
     # Optional lifecycle hook: runs once per accepted delivery, after the
-    # payload was written to context_path; sees the parsed payload as a
+    # payload was written to output_property; sees the parsed payload as a
     # frozen "output" global.
     post_script:
       script: |

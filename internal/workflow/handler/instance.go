@@ -370,9 +370,9 @@ func toPendingInputResponse(p *service.PendingInput) *PendingInputResponse {
 		return nil
 	}
 	resp := &PendingInputResponse{
-		NodeID:      p.NodeID,
-		Channel:     p.Channel,
-		ContextPath: p.ContextPath,
+		NodeID:         p.NodeID,
+		Channel:        p.Channel,
+		OutputProperty: p.OutputProperty,
 	}
 	if p.Form != nil {
 		resp.Form = &InputFormDTO{Schema: p.Form.Schema, UI: p.Form.UI}

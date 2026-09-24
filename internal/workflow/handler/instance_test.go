@@ -216,7 +216,7 @@ func TestInstanceStatusPendingInputWithForm(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}
 	detail := &service.StatusDetail{Instance: inst, PendingInput: &service.PendingInput{
-		NodeID: "node-1", Channel: "http", ContextPath: "user",
+		NodeID: "node-1", Channel: "http", OutputProperty: "user",
 		Form: &model.InputForm{
 			Schema: json.RawMessage(`{"type":"object","required":["email"]}`),
 			UI:     json.RawMessage(`{"order":["email"]}`),
@@ -235,7 +235,7 @@ func TestInstanceStatusPendingInputWithForm(t *testing.T) {
 	if !ok {
 		t.Fatalf("pending_input missing: %v", raw)
 	}
-	if pi["node_id"] != "node-1" || pi["channel"] != "http" || pi["context_path"] != "user" {
+	if pi["node_id"] != "node-1" || pi["channel"] != "http" || pi["output_property"] != "user" {
 		t.Errorf("pending_input identity = %v", pi)
 	}
 	form, ok := pi["form"].(map[string]any)
@@ -258,7 +258,7 @@ func TestInstanceStatusPendingInputFormNull(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}
 	detail := &service.StatusDetail{Instance: inst, PendingInput: &service.PendingInput{
-		NodeID: "node-1", Channel: "http", ContextPath: "user",
+		NodeID: "node-1", Channel: "http", OutputProperty: "user",
 	}}
 	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
 	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
