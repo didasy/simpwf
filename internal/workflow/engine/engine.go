@@ -582,8 +582,9 @@ func RunExitedGroupPosts(ctx context.Context, hooks *executor.HookRunner, lookup
 	return curCtx, nil
 }
 
-// routeFailure records a handled execution failure on an external_call or poller
-// node, stores structured failure details at on_failure.output_property in context,
+// routeFailure records a handled execution failure on an external_call,
+// poller, or custom node, stores structured failure details at
+// on_failure.output_property in context,
 // advances the frame to on_failure.next_node without running post_script, and
 // checkpoints the workflow in a runnable/waiting state without workflow error.
 func (e *Engine) routeFailure(ctx context.Context, cur model.WorkflowInstance, g *workflowGraph, frame *model.Frame, counters model.Counters, nc *model.NodeContent, attempt *model.NodeInstance, startCtx map[string]any, ctxMap map[string]any, cause error, res *executor.Result) error {

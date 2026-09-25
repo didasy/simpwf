@@ -35,13 +35,15 @@ const (
 	InputChannelRabbitMQ = "rabbitmq"
 )
 
-// ValidNodeType reports whether t is an accepted node type.
+// ValidNodeType reports whether t is an accepted node type, including
+// registered custom types.
 func ValidNodeType(t string) bool {
 	switch NodeType(t) {
 	case NodeTypeScript, NodeTypeConditions, NodeTypeInput, NodeTypeGroup, NodeTypeExternalCall, NodeTypeOutput, NodeTypePoller:
 		return true
 	default:
-		return false
+		_, ok := LookupCustomType(t)
+		return ok
 	}
 }
 
@@ -75,8 +77,9 @@ type NodeContent struct {
 	Execution        *ExecutionConfig  // external_call
 	OutputProperty   string
 	NextNode         string
-	// OnFailure routes execution failures on external_call and poller nodes to
-	// a fallback node in the same scope without failing the workflow.
+	// OnFailure routes execution failures on external_call, poller, and
+	// custom nodes to a fallback node in the same scope without failing
+	// the workflow.
 	OnFailure *FailureRoute
 	Metadata  map[string]any
 	Group     *GroupContent // group
@@ -97,6 +100,11 @@ type NodeContent struct {
 	PollerHTTP      *PollerHTTPConfig     // poller
 	PollerRedis     *PollerRedisConfig    // poller
 	PollerRabbitMQ  *PollerRabbitMQConfig // poller
+	// CustomConfig holds the raw config object of a custom node type; Custom
+	// holds the validated form returned by the node's validator. The core
+	// never inspects either; executors type-assert Custom.
+	CustomConfig json.RawMessage
+	Custom       any
 	// PredicateTimeout is the fixed timeout for poller until evaluation,
 	// taken from NodeLimits.ConditionTimeout. It is not capped like node
 	// timeouts.
@@ -133,7 +141,7 @@ type HookScript struct {
 }
 
 // FailureRoute defines the fallback target and context output property when an
-// external_call or poller node execution fails.
+// external_call, poller, or custom node execution fails.
 type FailureRoute struct {
 	NextNode       string
 	OutputProperty string
@@ -218,15 +226,18 @@ type rawNode struct {
 	PollerHTTP       *rawPollerHTTPConfig     `json:"http"`
 	PollerRedis      *rawPollerRedisConfig    `json:"redis"`
 	PollerRabbitMQ   *rawPollerRabbitMQConfig `json:"rabbitmq"`
-	OutputProperty   *string                  `json:"output_property"`
-	NextNode         *string                  `json:"next_node"`
-	OnFailure        json.RawMessage          `json:"on_failure"`
-	Metadata         map[string]any           `json:"metadata"`
-	PreScript        json.RawMessage          `json:"pre_script"`
-	PostScript       json.RawMessage          `json:"post_script"`
-	StartNodeID      *string                  `json:"start_node_id"`
-	Nodes            []json.RawMessage        `json:"nodes"`
-	RetryOnRecovery  *bool                    `json:"retry_on_recovery"`
+	// Config is the raw config object of a custom node type. It is the
+	// only executable field custom nodes may carry.
+	Config          json.RawMessage   `json:"config"`
+	OutputProperty  *string           `json:"output_property"`
+	NextNode        *string           `json:"next_node"`
+	OnFailure       json.RawMessage   `json:"on_failure"`
+	Metadata        map[string]any    `json:"metadata"`
+	PreScript       json.RawMessage   `json:"pre_script"`
+	PostScript      json.RawMessage   `json:"post_script"`
+	StartNodeID     *string           `json:"start_node_id"`
+	Nodes           []json.RawMessage `json:"nodes"`
+	RetryOnRecovery *bool             `json:"retry_on_recovery"`
 }
 
 type rawCondition struct {
@@ -348,6 +359,16 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		return nil, errors.New("branches is not supported; define keys on the workflow or group")
 	}
 
+	// onFailureAllowed reports whether a node type supports on_failure
+	// routing: external_call, poller, and any registered custom type.
+	onFailureAllowed := func(t NodeType) bool {
+		if t == NodeTypeExternalCall || t == NodeTypePoller {
+			return true
+		}
+		_, ok := LookupCustomType(string(t))
+		return ok
+	}
+
 	// A node referencing a registered node definition carries only graph
 	// fields; executable fields are materialized from the definition.
 	if r.NodeDefinitionID != nil {
@@ -357,14 +378,14 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		if r.Type != "" && !ValidNodeType(r.Type) {
 			return nil, fmt.Errorf("node type %q is not supported", r.Type)
 		}
-		if r.Type != "" && r.Type != string(NodeTypeExternalCall) && r.Type != string(NodeTypePoller) && nc.OnFailure != nil {
+		if r.Type != "" && nc.OnFailure != nil && !onFailureAllowed(NodeType(r.Type)) {
 			return nil, fmt.Errorf("node type %q does not support on_failure", r.Type)
 		}
 		if r.ContextPath != nil {
 			return nil, errors.New("input node does not support context_path; use output_property")
 		}
 		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
-			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil {
+			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil || len(r.Config) > 0 {
 			return nil, errors.New("node referencing a node_definition_id cannot carry inline executable fields")
 		}
 		nc.NodeDefinitionID = *r.NodeDefinitionID
@@ -386,11 +407,17 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		return nil, fmt.Errorf("node type %q is not supported (allowed: script, conditions, input, group, external_call, output, poller)", r.Type)
 	}
 	nc.Type = NodeType(r.Type)
-	if nc.Type != NodeTypeExternalCall && nc.Type != NodeTypePoller && nc.OnFailure != nil {
+	if nc.OnFailure != nil && !onFailureAllowed(nc.Type) {
 		return nil, fmt.Errorf("node type %q does not support on_failure", nc.Type)
 	}
 	if nc.Type != NodeTypeGroup && len(r.Keys) > 0 {
 		return nil, errors.New("keys are only valid for group nodes")
+	}
+
+	// Custom types skip the builtin switch below: only type+config are
+	// custom, all common fields above were already parsed by core.
+	if _, ok := LookupCustomType(string(nc.Type)); ok {
+		return parseCustomNode(nc, r, limits)
 	}
 
 	switch nc.Type {
@@ -701,9 +728,46 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		}
 		nc.Group = g
 	}
-	if nc.Type != NodeTypeInput && r.Form != nil {
+	if _, ok := LookupCustomType(string(nc.Type)); !ok && nc.Type != NodeTypeInput && r.Form != nil {
 		return nil, fmt.Errorf("node type %q does not support form", nc.Type)
 	}
+	if _, ok := LookupCustomType(string(nc.Type)); !ok && len(r.Config) > 0 {
+		return nil, fmt.Errorf("node type %q does not support config", nc.Type)
+	}
+	return nc, nil
+}
+
+// parseCustomNode resolves a custom node: it rejects every builtin
+// executable field, requires the config object, parses the timeout with
+// the standard cap, and delegates schema/validation to the node-owned
+// validator. Common fields (hooks, on_failure, output_property,
+// next_node, retry_on_recovery, metadata, input_data) were already parsed
+// by the caller.
+func parseCustomNode(nc *NodeContent, r *rawNode, limits NodeLimits) (*NodeContent, error) {
+	if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Validation != nil ||
+		r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil ||
+		r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil ||
+		r.Nodes != nil || r.StartNodeID != nil || r.ContextPath != nil {
+		return nil, fmt.Errorf("node type %q does not support that field; custom nodes carry only type and config", nc.Type)
+	}
+	if len(r.Config) == 0 || strings.TrimSpace(string(r.Config)) == "null" {
+		return nil, fmt.Errorf("node type %q: config is required", nc.Type)
+	}
+	validate, ok := LookupCustomType(string(nc.Type))
+	if !ok {
+		return nil, fmt.Errorf("node type %q is not supported", nc.Type)
+	}
+	parsed, err := validate(r.Config)
+	if err != nil {
+		return nil, fmt.Errorf("node type %q: invalid config: %w", nc.Type, err)
+	}
+	d, err := nodeTimeout(r.Timeout, limits)
+	if err != nil {
+		return nil, err
+	}
+	nc.Timeout = d
+	nc.CustomConfig = append(json.RawMessage(nil), r.Config...)
+	nc.Custom = parsed
 	return nc, nil
 }
 
@@ -853,7 +917,7 @@ func pollerDuration(raw json.RawMessage, name string, def time.Duration) (time.D
 	return d, nil
 }
 
-// parseFailureRoute resolves the on_failure routing object for external_call and poller nodes.
+// parseFailureRoute resolves the on_failure routing object for external_call, poller, and custom nodes.
 func parseFailureRoute(raw json.RawMessage) (*FailureRoute, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil

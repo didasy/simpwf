@@ -18,6 +18,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/contextdiff"
+	"github.com/simpwf/workflow-engine/pkg/envsnapshot"
 )
 
 // CreateInstance starts a workflow instance. Debug marks a step-through
@@ -265,6 +266,16 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 	if err := json.Unmarshal(contextRaw, &obj); err != nil || obj == nil {
 		return model.WorkflowInstance{}, fmt.Errorf("%w: context must be a JSON object", model.ErrInvalid)
 	}
+	// Snapshot SIMPWF_* process env under the reserved env root so every
+	// existing {{ }} render site resolves {{ env.SIMPWF_X }} with zero
+	// template-engine changes. Snapshot wins per key: callers cannot
+	// shadow env-provided credentials with request-body values.
+	obj["env"] = envsnapshot.Merge(obj["env"], envsnapshot.Snapshot(envsnapshot.Prefix))
+	if rebased, err := json.Marshal(obj); err == nil {
+		contextRaw = rebased
+	} else {
+		return model.WorkflowInstance{}, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+	}
 
 	frameRaw, err := model.NewFrame(wc.StartNodeID).JSON()
 	if err != nil {
@@ -480,6 +491,16 @@ func validateRestoredObject(restored json.RawMessage) (map[string]any, error) {
 	return obj, nil
 }
 
+// toStringMap normalizes a decoded JSON value to map[string]any. Non-map
+// inputs (nil, scalars, slices) yield an empty map so Merge overlays a
+// clean snapshot instead of inheriting garbage.
+func toStringMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
 // statusNodes builds the graph-node-id → occurrence map for the status
 // response. It returns nil when the definition cannot be loaded, parsed, or
 // materialized, so the status view degrades to omitting the map instead of
@@ -622,6 +643,26 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 	if err := json.Unmarshal(req.Context, &obj); err != nil || obj == nil {
 		return nil, fmt.Errorf("%w: context must be a JSON object", model.ErrInvalid)
 	}
+	// Carry the stored env snapshot forward: a replacement body without
+	// env must not drop it. Stored wins per key (reserved root); a body
+	// that omits env keeps the snapshot, and old instances without env
+	// get an empty map. The merge needs the current row, so load before
+	// replacing.
+	var storedEnv any
+	if cur, err := s.instances.GetByID(ctx, req.InstanceID); err == nil && cur != nil {
+		var curObj map[string]any
+		if jerr := json.Unmarshal(cur.Context, &curObj); jerr == nil && curObj != nil {
+			storedEnv = curObj["env"]
+		}
+	} else if err != nil && !errors.Is(err, repository.ErrInstanceNotFound) {
+		return nil, err
+	}
+	obj["env"] = envsnapshot.Merge(obj["env"], toStringMap(storedEnv))
+	rebased, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+	}
+	req.Context = rebased
 	inst, err := s.instances.ReplaceContext(ctx, repository.ContextUpdate{
 		InstanceID: req.InstanceID,
 		Context:    req.Context,

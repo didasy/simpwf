@@ -21,7 +21,8 @@ path ids on GET/controls are not format-checked; only send back ids the API gave
 
 ### Node type (`type`)
 
-`script`, `conditions`, `input`, `group`, `external_call`, `output`, `poller`. Case-sensitive. Unknown → `422`. Drift
+`script`, `conditions`, `input`, `group`, `external_call`, `output`, `poller`. Case-sensitive. Unknown → `422`. Registered
+custom types (e.g. `s3fetch`) are accepted the same way; unknown → `422` unchanged. Drift
 warning: `api/openapi.yaml` lists only five (omits `output`, `poller`); code accepts all seven.
 
 ### Workflow status (`status`)

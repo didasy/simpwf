@@ -675,6 +675,7 @@ components:
         name: { type: string }
         type:
           type: string
+          description: "Builtin node type (script, conditions, input, group, external_call) or a registered custom node type (lowercase identifier, e.g. s3fetch). Custom types require type+config in content; see docs/custom-nodes.md."
           enum: [script, conditions, input, group, external_call]
         previous_version_id: { type: string, format: uuid, nullable: true }
         content: { type: object }

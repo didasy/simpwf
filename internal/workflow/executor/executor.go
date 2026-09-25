@@ -5,6 +5,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/pkg/jsfunc"
@@ -101,13 +102,16 @@ type Dependencies struct {
 	RabbitPoller RabbitPollerClient
 }
 
-// NewExecutors builds the executor set for every node type.
+// NewExecutors builds the executor set for every node type, merging
+// registered custom executors after the builtins. A duplicate or
+// builtin-colliding factory, or a factory build error, panics: custom
+// registration bugs must fail fast at startup, never per-request.
 func NewExecutors(limits Limits, funcs *jsfunc.Registry, deps Dependencies) map[model.NodeType]Executor {
 	httpEx := NewHTTPExecutor(limits)
 	pollerEx := NewPollerExecutor(httpEx, funcs)
 	pollerEx.SetRedisClient(deps.RedisPoller)
 	pollerEx.SetRabbitClient(deps.RabbitPoller)
-	return map[model.NodeType]Executor{
+	out := map[model.NodeType]Executor{
 		model.NodeTypeScript:       &ScriptExecutor{funcs: funcs},
 		model.NodeTypeConditions:   &ConditionExecutor{funcs: funcs},
 		model.NodeTypeInput:        &InputExecutor{funcs: funcs},
@@ -115,4 +119,15 @@ func NewExecutors(limits Limits, funcs *jsfunc.Registry, deps Dependencies) map[
 		model.NodeTypeOutput:       &OutputExecutor{publisher: deps.Output},
 		model.NodeTypePoller:       pollerEx,
 	}
+	customs, err := BuildCustomExecutors(CustomDeps{Limits: limits, HTTP: httpEx, Funcs: funcs})
+	if err != nil {
+		panic(fmt.Sprintf("executor: %v", err))
+	}
+	for t, ex := range customs {
+		if _, exists := out[t]; exists {
+			panic(fmt.Sprintf("executor: custom node type %q collides with a builtin node type", t))
+		}
+		out[t] = ex
+	}
+	return out
 }
