@@ -289,6 +289,13 @@ definitions:
         type: string
       previous_version_id:
         type: string
+      schema:
+        description: |-
+          Schema is the full node-object JSON Schema for Type, or null when
+          the type is unknown to this build. It describes the inline
+          workflow-occurrence shape; content is the same object minus the
+          graph routing fields, which a frontend ignores here.
+        type: object
       type:
         type: string
       updated_at:
@@ -438,6 +445,13 @@ definitions:
         type: string
       previous_version_id:
         type: string
+      schemas:
+        description: |-
+          Schemas holds the node-object JSON Schema of every node type this
+          definition actually uses, keyed by type. It is computed on read from
+          the current code, so it describes the current engine, not the code
+          the definition was authored against.
+        type: object
       updated_at:
         type: string
       updated_by:

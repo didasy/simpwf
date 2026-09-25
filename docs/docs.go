@@ -1969,6 +1969,10 @@ const docTemplate = `{
                 "previous_version_id": {
                     "type": "string"
                 },
+                "schema": {
+                    "description": "Schema is the full node-object JSON Schema for Type, or null when\nthe type is unknown to this build. It describes the inline\nworkflow-occurrence shape; content is the same object minus the\ngraph routing fields, which a frontend ignores here.",
+                    "type": "object"
+                },
                 "type": {
                     "type": "string"
                 },
@@ -2195,6 +2199,10 @@ const docTemplate = `{
                 },
                 "previous_version_id": {
                     "type": "string"
+                },
+                "schemas": {
+                    "description": "Schemas holds the node-object JSON Schema of every node type this\ndefinition actually uses, keyed by type. It is computed on read from\nthe current code, so it describes the current engine, not the code\nthe definition was authored against.",
+                    "type": "object"
                 },
                 "updated_at": {
                     "type": "string"

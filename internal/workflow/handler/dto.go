@@ -25,10 +25,15 @@ type WorkflowDefinitionResponse struct {
 	PreviousVersionID *string         `json:"previous_version_id"`
 	LineageID         string          `json:"lineage_id"`
 	Content           json.RawMessage `json:"content" swaggertype:"object"`
-	CreatedBy         string          `json:"created_by"`
-	UpdatedBy         string          `json:"updated_by"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
+	// Schemas holds the node-object JSON Schema of every node type this
+	// definition actually uses, keyed by type. It is computed on read from
+	// the current code, so it describes the current engine, not the code
+	// the definition was authored against.
+	Schemas   map[string]json.RawMessage `json:"schemas" swaggertype:"object"`
+	CreatedBy string                     `json:"created_by"`
+	UpdatedBy string                     `json:"updated_by"`
+	CreatedAt time.Time                  `json:"created_at"`
+	UpdatedAt time.Time                  `json:"updated_at"`
 }
 
 // CreateNodeDefinitionRequest is the POST /v1/node/definition body.
@@ -48,10 +53,15 @@ type NodeDefinitionResponse struct {
 	LineageID         string          `json:"lineage_id"`
 	Type              string          `json:"type"`
 	Content           json.RawMessage `json:"content" swaggertype:"object"`
-	CreatedBy         string          `json:"created_by"`
-	UpdatedBy         string          `json:"updated_by"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
+	// Schema is the full node-object JSON Schema for Type, or null when
+	// the type is unknown to this build. It describes the inline
+	// workflow-occurrence shape; content is the same object minus the
+	// graph routing fields, which a frontend ignores here.
+	Schema    json.RawMessage `json:"schema" swaggertype:"object"`
+	CreatedBy string          `json:"created_by"`
+	UpdatedBy string          `json:"updated_by"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // ListResponse is the envelope for definition lists.

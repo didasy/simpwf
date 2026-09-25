@@ -49,7 +49,7 @@ func (h *WorkflowDefinitionHandler) Create(c *gin.Context) {
 		WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toWorkflowDefinitionResponse(def))
+	c.JSON(http.StatusCreated, h.toResponse(c, def))
 }
 
 // List handles GET /v1/workflow/definition.
@@ -82,7 +82,7 @@ func (h *WorkflowDefinitionHandler) List(c *gin.Context) {
 	}
 	resp := make([]WorkflowDefinitionResponse, 0, len(items))
 	for _, def := range items {
-		resp = append(resp, toWorkflowDefinitionResponse(def))
+		resp = append(resp, h.toResponse(c, def))
 	}
 	c.JSON(http.StatusOK, ListResponse[WorkflowDefinitionResponse]{
 		Items:      resp,
@@ -114,7 +114,7 @@ func (h *WorkflowDefinitionHandler) Get(c *gin.Context) {
 		WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toWorkflowDefinitionResponse(def))
+	c.JSON(http.StatusOK, h.toResponse(c, def))
 }
 
 // Delete handles DELETE /v1/workflow/definition/{id}.
@@ -139,7 +139,10 @@ func (h *WorkflowDefinitionHandler) Delete(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func toWorkflowDefinitionResponse(def model.WorkflowDefinition) WorkflowDefinitionResponse {
+// toResponse maps a definition to the HTTP body, attaching the schemas of
+// the node types it uses. A definition that cannot be parsed degrades to a
+// narrower schema map instead of failing the read.
+func (h *WorkflowDefinitionHandler) toResponse(c *gin.Context, def model.WorkflowDefinition) WorkflowDefinitionResponse {
 	return WorkflowDefinitionResponse{
 		ID:                def.ID,
 		Name:              def.Name,
@@ -147,6 +150,7 @@ func toWorkflowDefinitionResponse(def model.WorkflowDefinition) WorkflowDefiniti
 		PreviousVersionID: def.PreviousVersionID,
 		LineageID:         def.LineageID,
 		Content:           def.Content,
+		Schemas:           h.svc.Schemas(c.Request.Context(), def.Content),
 		CreatedBy:         def.CreatedBy,
 		UpdatedBy:         def.UpdatedBy,
 		CreatedAt:         def.CreatedAt,

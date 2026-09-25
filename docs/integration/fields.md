@@ -22,8 +22,16 @@ path ids on GET/controls are not format-checked; only send back ids the API gave
 ### Node type (`type`)
 
 `script`, `conditions`, `input`, `group`, `external_call`, `output`, `poller`. Case-sensitive. Unknown → `422`. Registered
-custom types (e.g. `s3fetch`) are accepted the same way; unknown → `422` unchanged. Drift
-warning: `api/openapi.yaml` lists only five (omits `output`, `poller`); code accepts all seven.
+custom types (e.g. `s3fetch`) are accepted the same way; unknown → `422` unchanged.
+
+### Node schemas (`schema` / `schemas`)
+
+Every node definition read carries a `schema` field: the full node-object JSON Schema (draft 2020-12) for that
+type. Every workflow definition read carries a `schemas` map keyed by type, covering exactly the node types used
+in that workflow. Both are computed on read; nothing is stored. `schema` is `null` when the type is unknown to
+this build; `schemas` degrades to the declared types (empty `type` resolved from the DB, unresolvable kept as
+declared) and never fails the read. The Go parsers stay authoritative; schemas are documentation only, for
+generic frontend forms.
 
 ### Workflow status (`status`)
 

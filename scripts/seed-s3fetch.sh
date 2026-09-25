@@ -84,13 +84,15 @@ while IFS= read -r key; do
     || fail "parse node definition id for $key"
   name=$(jq -er '.name' <<<"$payload") \
     || fail "parse node definition name for $key"
+  schema_type=$(jq -er '.schema.properties.type.const // empty' <<<"$response") \
+    || fail "node definition $key response missing schema"
 
   node_definition_ids=$(jq -c \
     --arg name "$name" \
     --arg id "$id" \
     '.[$name] = $id' <<<"$node_definition_ids")
 
-  echo "seed-s3fetch: created node definition $name ($id)" >&2
+  echo "seed-s3fetch: created node definition $name ($id, schema: $schema_type)" >&2
 done < <(jq -er 'keys[]' <<<"$node_definitions")
 
 jq -n \

@@ -30,7 +30,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "26379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -46,8 +46,8 @@ services:
       RABBITMQ_DEFAULT_USER: simpwf
       RABBITMQ_DEFAULT_PASS: simpwf
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "25672:5672"
+      - "25673:15672"
     healthcheck:
       test: ["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 2s
@@ -101,8 +101,8 @@ services:
     security_opt:
       - "no-new-privileges:true"
     ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # console
+      - "29000:9000" # S3 API
+      - "29001:9001" # console
     environment:
       - RUSTFS_VOLUMES=/data/rustfs{0...3}
       - RUSTFS_ADDRESS=0.0.0.0:9000

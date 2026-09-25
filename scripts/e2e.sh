@@ -30,7 +30,8 @@ wf_resp=$(curl -fsS -X POST "$BASE_URL/v1/workflow/definition" \
   -H 'Content-Type: application/json' \
   --data-binary "@$WORKFLOW_JSON") || fail "create workflow definition"
 WF_ID=$(printf '%s' "$wf_resp" | jq -er '.id') || fail "parse workflow definition id"
-pass "created workflow definition $WF_ID"
+printf '%s' "$wf_resp" | jq -er '.schemas | select(. != null and length > 0)' >/dev/null || fail "workflow definition missing schemas"
+pass "created workflow definition $WF_ID (schemas attached)"
 
 # --- create an instance (Manager path -> input node) ---------------------------
 inst_resp=$(curl -fsS -X POST "$BASE_URL/v1/workflow/instance" \

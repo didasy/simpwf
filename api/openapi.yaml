@@ -785,8 +785,8 @@ components:
         name: { type: string }
         type:
           type: string
-          description: "Builtin node type (script, conditions, input, group, external_call) or a registered custom node type (lowercase identifier, e.g. s3fetch). Custom types require type+config in content; see docs/custom-nodes.md."
-          enum: [script, conditions, input, group, external_call]
+          description: "Builtin node type (script, conditions, input, group, external_call, output, poller) or a registered custom node type (lowercase identifier, e.g. s3fetch). Custom types require type+config in content; see docs/custom-nodes.md."
+          enum: [script, conditions, input, group, external_call, output, poller]
         previous_version_id: { type: string, format: uuid, nullable: true }
         content: { type: object }
     NodeDefinition:
@@ -800,6 +800,13 @@ components:
         lineage_id: { type: string, format: uuid }
         type: { type: string }
         content: { type: object }
+        schema:
+          type: object
+          nullable: true
+          description: |
+            Full node-object JSON Schema (draft 2020-12) describing the accepted
+            shape for this type. Null when the type is unknown to this build.
+            Docs-only; Go parsers stay authoritative.
         created_by: { type: string, format: uuid }
         updated_by: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
@@ -827,7 +834,7 @@ components:
             and is snapshotted onto each created instance.
     WorkflowDefinition:
       type: object
-      required: [id, name, version, lineage_id, content, created_by, updated_by, created_at, updated_at]
+      required: [id, name, version, lineage_id, content, schemas, created_by, updated_by, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -835,6 +842,12 @@ components:
         previous_version_id: { type: string, format: uuid, nullable: true }
         lineage_id: { type: string, format: uuid }
         content: { type: object }
+        schemas:
+          type: object
+          additionalProperties: { type: object }
+          description: |
+            Node-object JSON Schemas (draft 2020-12) keyed by type for all node
+            types used in this workflow. Docs-only; Go parsers stay authoritative.
         created_by: { type: string, format: uuid }
         updated_by: { type: string, format: uuid }
         created_at: { type: string, format: date-time }

@@ -51,7 +51,7 @@ func (h *NodeDefinitionHandler) Create(c *gin.Context) {
 		WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toNodeDefinitionResponse(def))
+	c.JSON(http.StatusCreated, h.toResponse(c, def))
 }
 
 // List handles GET /v1/node/definition.
@@ -85,7 +85,7 @@ func (h *NodeDefinitionHandler) List(c *gin.Context) {
 	}
 	resp := make([]NodeDefinitionResponse, 0, len(items))
 	for _, def := range items {
-		resp = append(resp, toNodeDefinitionResponse(def))
+		resp = append(resp, h.toResponse(c, def))
 	}
 	c.JSON(http.StatusOK, ListResponse[NodeDefinitionResponse]{
 		Items:      resp,
@@ -117,7 +117,7 @@ func (h *NodeDefinitionHandler) Get(c *gin.Context) {
 		WriteError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toNodeDefinitionResponse(def))
+	c.JSON(http.StatusOK, h.toResponse(c, def))
 }
 
 // Delete handles DELETE /v1/node/definition/{id}.
@@ -142,7 +142,10 @@ func (h *NodeDefinitionHandler) Delete(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func toNodeDefinitionResponse(def model.NodeDefinition) NodeDefinitionResponse {
+// toResponse maps a definition to the HTTP body, attaching the node
+// schema for its type. An unknown type yields a null schema rather than
+// an error: schemas are documentation and never gate a read.
+func (h *NodeDefinitionHandler) toResponse(c *gin.Context, def model.NodeDefinition) NodeDefinitionResponse {
 	return NodeDefinitionResponse{
 		ID:                def.ID,
 		Name:              def.Name,
@@ -151,6 +154,7 @@ func toNodeDefinitionResponse(def model.NodeDefinition) NodeDefinitionResponse {
 		LineageID:         def.LineageID,
 		Type:              def.Type,
 		Content:           def.Content,
+		Schema:            h.svc.Schema(def.Type),
 		CreatedBy:         def.CreatedBy,
 		UpdatedBy:         def.UpdatedBy,
 		CreatedAt:         def.CreatedAt,

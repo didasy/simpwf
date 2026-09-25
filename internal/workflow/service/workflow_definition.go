@@ -28,6 +28,11 @@ type WorkflowDefinitionService interface {
 	// Materialize resolves node_definition_id references against the
 	// immutable node definitions and returns the executable node tree.
 	Materialize(ctx context.Context, wc *model.WorkflowContent) (*model.WorkflowContent, error)
+	// Schemas returns the node-object schemas for the types used by a
+	// stored definition, keyed by type. A definition that cannot be
+	// parsed or whose references cannot be resolved degrades to the types
+	// it declares, never to an error.
+	Schemas(ctx context.Context, content json.RawMessage) map[string]json.RawMessage
 }
 
 type workflowDefinitionService struct {
@@ -103,6 +108,93 @@ func (s *workflowDefinitionService) List(ctx context.Context, q repository.Defin
 
 func (s *workflowDefinitionService) Delete(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
+}
+
+// Schemas returns the schemas for the node types a definition actually
+// uses, walking top-level nodes and nested group children and resolving
+// node_definition_id references the same way Materialize does. A reference
+// whose type is left empty is resolved through the node definition, so a
+// frontend receives the schema of the type it will actually run.
+//
+// Types come from parsing the stored content. Definitions that no longer
+// parse (a code change tightened the rules) or reference a node definition
+// that cannot be read degrade to the types the raw content declares: the
+// read still succeeds, the schema map is just narrower. Only types with a
+// registered schema are included.
+func (s *workflowDefinitionService) Schemas(ctx context.Context, content json.RawMessage) map[string]json.RawMessage {
+	wc, err := model.ParseWorkflowContent(content, s.limits)
+	if err != nil {
+		return schemasForTypes(declaredNodeTypes(content))
+	}
+	used := map[string]bool{}
+	collectNodeTypes(ctx, s.nodeRepo, s.limits, wc.Nodes, used)
+	return schemasForTypes(used)
+}
+
+// collectNodeTypes records every node type in the tree, resolving empty
+// reference types through the node definition. A lookup failure keeps the
+// declared type (or none) instead of failing the read.
+func collectNodeTypes(ctx context.Context, nodeRepo repository.NodeDefinitionRepository, limits model.NodeLimits, nodes []*model.NodeContent, used map[string]bool) {
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		nodeType := string(n.Type)
+		if nodeType == "" && n.NodeDefinitionID != "" {
+			def, err := nodeRepo.GetByID(ctx, n.NodeDefinitionID)
+			if err == nil {
+				nodeType = def.Type
+			}
+		}
+		if nodeType != "" {
+			used[nodeType] = true
+		}
+		if n.Group != nil {
+			collectNodeTypes(ctx, nodeRepo, limits, n.Group.Nodes, used)
+		}
+	}
+}
+
+// schemasForTypes keeps only the types with a registered schema.
+func schemasForTypes(used map[string]bool) map[string]json.RawMessage {
+	out := make(map[string]json.RawMessage, len(used))
+	for nodeType := range used {
+		if schema, ok := model.NodeSchema(nodeType); ok {
+			out[nodeType] = schema
+		}
+	}
+	return out
+}
+
+// declaredNodeTypes reads the type field of every node in raw content,
+// including nodes nested in group children, without validating anything.
+// It backs the degraded read path.
+func declaredNodeTypes(content []byte) map[string]bool {
+	used := map[string]bool{}
+	var walk func(raws []json.RawMessage)
+	walk = func(raws []json.RawMessage) {
+		for _, raw := range raws {
+			var node struct {
+				Type  string            `json:"type"`
+				Nodes []json.RawMessage `json:"nodes"`
+			}
+			if err := json.Unmarshal(raw, &node); err != nil {
+				continue
+			}
+			if node.Type != "" {
+				used[node.Type] = true
+			}
+			walk(node.Nodes)
+		}
+	}
+	var doc struct {
+		Nodes []json.RawMessage `json:"nodes"`
+	}
+	if err := json.Unmarshal(content, &doc); err != nil {
+		return used
+	}
+	walk(doc.Nodes)
+	return used
 }
 
 // Materialize walks the node tree, replacing node_definition_id references
