@@ -52,6 +52,11 @@ status notifications. Both stay fully disabled when their DSN is absent.
 
 - Immutable node and workflow definitions with linear versioning and graph
   validation.
+- Secret management through `/v1/secrets`: create, list, get, and delete
+  key-value pairs. Read responses contain only a constant `********` mask.
+  Instances freeze the current secret values under `secret` at create time,
+  so workflows can render `{{ secret.KEY }}` while later secret changes do
+  not affect running instances.
 - Node types: `script` (Goja ES5.1 sandbox, no `eval`), `conditions`
   (exactly-one-match routing), `input` (HTTP webhook, Redis pub/sub, or
   RabbitMQ queue with optional `form` contract — JSON Schema plus ui hints
@@ -234,6 +239,9 @@ The authoritative contract is [api/openapi.yaml](api/openapi.yaml)
 | POST       | `/v1/workflow/definition`                          | Create immutable workflow definition (201)                               |
 | GET        | `/v1/workflow/definition`                          | List (paged, `latest_only`, ...)                                           |
 | GET/DELETE | `/v1/workflow/definition/{id}`                     | Get / delete (fails if referenced)                                       |
+| POST       | `/v1/secrets`                                      | Create secret (201; plaintext omitted)                                   |
+| GET        | `/v1/secrets`                                      | List masked secrets (paged, ordered by key)                              |
+| GET/DELETE | `/v1/secrets/{key}`                                | Get masked secret / delete; duplicate create returns 409                 |
 | POST       | `/v1/workflow/instance`                            | Start instance (202)                                                     |
 | GET        | `/v1/workflow/instance`                            | List compact summaries (paged, `id`/`workflow_definition_id`/`status` filters) |
 | GET        | `/v1/workflow/instance/{id}/status`                | Status, counters, cursor, per-node `nodes` map, audit actors               |
@@ -247,6 +255,25 @@ The authoritative contract is [api/openapi.yaml](api/openapi.yaml)
 
 Instance statuses: `waiting`, `running`, `paused`, `finished`, `failed`,
 `stopped`. Errors follow RFC 7807 `problem+json`.
+
+### Secrets and templates
+
+Create a secret before starting an instance:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/secrets \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"API_KEY","value":"replace-me"}'
+# 201: {"key":"API_KEY","value_masked":"********",...}
+```
+
+At instance creation, all stored secrets are snapshotted under the reserved
+`secret` context root. Workflow and node templates can resolve
+`{{ secret.API_KEY }}` through the normal context-path renderer. The
+snapshot is frozen: later secret deletion or rotation does not change an
+existing instance. Context, status, and node-debug read APIs redact stored
+secret values and any rendered copies in debug input, output, or error
+text.
 
 ## Status notifications
 

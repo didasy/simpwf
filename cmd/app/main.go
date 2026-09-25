@@ -97,6 +97,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 
 	nodeDefs := repository.NewNodeDefinitionRepository(db)
 	wfDefs := repository.NewWorkflowDefinitionRepository(db)
+	secrets := repository.NewSecretRepository(db)
 	leanOpts := model.LeanOptions{
 		LeanContextDefault: cfg.Engine.LeanContextDefault,
 		AnchorEvery:        cfg.Engine.LeanAnchorEvery,
@@ -146,6 +147,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 
 	nodeSvc := service.NewNodeDefinitionService(nodeDefs, nodeLimits, actor)
 	wfSvc := service.NewWorkflowDefinitionService(wfDefs, nodeDefs, nodeLimits, actor)
+	secretSvc := service.NewSecretService(secrets)
 
 	// Optional broker clients. They exist only when their DSN is configured;
 	// a configured but unreachable broker fails startup. The close defers are
@@ -203,6 +205,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	instSvc := service.NewInstanceService(
 		instances,
 		wfDefs,
+		secrets,
 		wfSvc,
 		&executor.InputExecutor{},
 		hookRunner,
@@ -312,6 +315,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		Health:              handler.NewHealth(sqlDB),
 		NodeDefinitions:     nodeSvc,
 		WorkflowDefinitions: wfSvc,
+		Secrets:             secretSvc,
 		Instances:           instSvc,
 		Statistics:          statsSvc,
 		SwaggerEnabled:      cfg.Infra.HTTP.SwaggerEnabled,

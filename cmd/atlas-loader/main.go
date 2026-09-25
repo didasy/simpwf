@@ -20,6 +20,7 @@ import (
 func main() {
 	ddl, err := gormschema.New("postgres").Load(
 		&repository.UserModel{},
+		&repository.SecretModel{},
 		&repository.NodeDefinitionModel{},
 		&repository.WorkflowDefinitionModel{},
 		&repository.WorkflowDefinitionNodeRefModel{},

@@ -32,6 +32,18 @@ definitions:
       type:
         type: string
     type: object
+  internal_workflow_handler.CreateSecretRequest:
+    properties:
+      key:
+        type: string
+      value:
+        maxLength: 8192
+        minLength: 1
+        type: string
+    required:
+    - key
+    - value
+    type: object
   internal_workflow_handler.CreateWorkflowDefinitionRequest:
     properties:
       content:
@@ -166,6 +178,21 @@ definitions:
       items:
         items:
           $ref: '#/definitions/internal_workflow_handler.NodeDefinitionResponse'
+        type: array
+      page:
+        type: integer
+      per_page:
+        type: integer
+      total:
+        type: integer
+      total_pages:
+        type: integer
+    type: object
+  internal_workflow_handler.ListResponse-internal_workflow_handler_SecretResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.SecretResponse'
         type: array
       page:
         type: integer
@@ -344,6 +371,26 @@ definitions:
         type: integer
       total_runs:
         type: integer
+    type: object
+  internal_workflow_handler.SecretResponse:
+    properties:
+      created_at:
+        format: date-time
+        type: string
+      key:
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+      value_masked:
+        enum:
+        - '********'
+        type: string
+    required:
+    - created_at
+    - key
+    - updated_at
+    - value_masked
     type: object
   internal_workflow_handler.StatisticsSummaryResponse:
     properties:
@@ -601,6 +648,134 @@ paths:
       summary: Get node definition
       tags:
       - node-definitions
+  /v1/secrets:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Items per page
+        in: query
+        name: per_page
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ListResponse-internal_workflow_handler_SecretResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: List secrets
+      tags:
+      - secrets
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Secret
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_workflow_handler.CreateSecretRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.SecretResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Create secret
+      tags:
+      - secrets
+  /v1/secrets/{key}:
+    delete:
+      parameters:
+      - description: Secret key
+        in: path
+        name: key
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Delete secret
+      tags:
+      - secrets
+    get:
+      parameters:
+      - description: Secret key
+        in: path
+        name: key
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.SecretResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      summary: Get secret
+      tags:
+      - secrets
   /v1/statistics:
     get:
       parameters:

@@ -37,6 +37,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	// Atlas migrations (cmd/atlas-loader); AutoMigrate never runs there.
 	if err := db.AutoMigrate(
 		&repository.UserModel{},
+		&repository.SecretModel{},
 		&repository.NodeDefinitionModel{},
 		&repository.WorkflowDefinitionModel{},
 		&repository.WorkflowDefinitionNodeRefModel{},
@@ -54,7 +55,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	// Truncate all tables in one statement so foreign-key ordering never
 	// blocks the reset.
 	if err := db.Exec(`TRUNCATE TABLE
-		status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
+		secrets, status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users
 		RESTART IDENTITY`).Error; err != nil {

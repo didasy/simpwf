@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
@@ -198,6 +199,40 @@ func transitionEvents(from, to statusWithReason) []string {
 	return nil
 }
 
+const statusUpdateSecretMask = "********"
+
+// redactStatusUpdateError removes secret plaintext before an error crosses
+// the status-update delivery boundary. The internal instance error remains
+// unchanged for diagnostics.
+func redactStatusUpdateError(contextRaw []byte, errMsg string) string {
+	if errMsg == "" {
+		return ""
+	}
+	if len(contextRaw) == 0 {
+		return statusUpdateSecretMask
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(contextRaw, &obj); err != nil || obj == nil {
+		return statusUpdateSecretMask
+	}
+	secretRoot, exists := obj["secret"]
+	if !exists {
+		return errMsg
+	}
+	values, ok := secretRoot.(map[string]any)
+	if !ok {
+		return statusUpdateSecretMask
+	}
+	for _, value := range values {
+		plaintext, ok := value.(string)
+		if !ok || plaintext == "" {
+			return statusUpdateSecretMask
+		}
+		errMsg = strings.ReplaceAll(errMsg, plaintext, statusUpdateSecretMask)
+	}
+	return errMsg
+}
+
 // enqueueStatusUpdate writes one outbox row per configured transport per
 // event, in order, when the instance's immutable workflow definition
 // configures status_update. All transports of one event share a single
@@ -208,7 +243,7 @@ func transitionEvents(from, to statusWithReason) []string {
 // definition id (legacy callers) or a definition without status_update
 // skips silently; a definition with an invalid status_update block fails
 // the transaction.
-func (r *instanceRepo) enqueueStatusUpdate(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, at time.Time) error {
+func (r *instanceRepo) enqueueStatusUpdate(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, contextRaw []byte, at time.Time) error {
 	if len(events) == 0 || definitionID == "" {
 		return nil
 	}
@@ -241,7 +276,7 @@ func (r *instanceRepo) enqueueStatusUpdate(ctx context.Context, tx *gorm.DB, ins
 			FromWaitingReason:    string(from.waitingReason),
 			ToWaitingReason:      string(to.waitingReason),
 			Revision:             revision,
-			Error:                errMsg,
+			Error:                redactStatusUpdateError(contextRaw, errMsg),
 		})
 		if err != nil {
 			return err

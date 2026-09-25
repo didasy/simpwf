@@ -16,6 +16,7 @@ type Deps struct {
 	Health              *Health
 	NodeDefinitions     service.NodeDefinitionService
 	WorkflowDefinitions service.WorkflowDefinitionService
+	Secrets             service.SecretService
 	Instances           service.InstanceService
 	Statistics          service.StatisticsService
 	SwaggerEnabled      bool
@@ -56,6 +57,15 @@ func NewRouter(deps Deps) *gin.Engine {
 		group.GET("", workflowDefs.List)
 		group.GET("/:id", workflowDefs.Get)
 		group.DELETE("/:id", workflowDefs.Delete)
+	}
+
+	if deps.Secrets != nil {
+		secrets := NewSecretHandler(deps.Secrets)
+		group := v1.Group("/secrets")
+		group.POST("", secrets.Create)
+		group.GET("", secrets.List)
+		group.GET("/:key", secrets.Get)
+		group.DELETE("/:key", secrets.Delete)
 	}
 
 	if deps.Instances != nil {

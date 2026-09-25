@@ -63,6 +63,23 @@ type ListResponse[T any] struct {
 	TotalPages int64 `json:"total_pages"`
 }
 
+// -- secrets ------------------------------------------------------------------
+
+// CreateSecretRequest is the POST /v1/secrets body. The response never returns
+// the plaintext value.
+type CreateSecretRequest struct {
+	Key   string `json:"key" validate:"required" pattern:"^[A-Za-z0-9_]{1,128}$"`
+	Value string `json:"value" validate:"required" minLength:"1" maxLength:"8192"`
+}
+
+// SecretResponse is the constant-mask representation used by all secret reads.
+type SecretResponse struct {
+	Key         string    `json:"key" validate:"required" pattern:"^[A-Za-z0-9_]{1,128}$"`
+	ValueMasked string    `json:"value_masked" validate:"required" enums:"********"`
+	CreatedAt   time.Time `json:"created_at" validate:"required" format:"date-time"`
+	UpdatedAt   time.Time `json:"updated_at" validate:"required" format:"date-time"`
+}
+
 // -- instances ----------------------------------------------------------------
 
 // CreateInstanceRequest is the POST /v1/workflow/instance body.

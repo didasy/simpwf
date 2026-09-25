@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,6 +362,45 @@ func TestCheckpointEnqueuesTerminalStates(t *testing.T) {
 				t.Errorf("to_waiting_reason = %q, want %q", p.ToWaitingReason, tc.wantReason)
 			}
 		})
+	}
+}
+
+func TestCheckpointStatusUpdateMasksRenderedSecret(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	seedStatusUpdateDef(t, db, suDefID, suContent)
+	ctx := context.Background()
+
+	w := newSUInstance(suInstanceID, model.WorkflowRunning, "")
+	w.LeasedBy = "worker-1"
+	insertInstance(t, db, w)
+
+	repo := repository.NewInstanceRepository(db)
+	err := repo.Checkpoint(ctx, repository.Checkpoint{
+		InstanceID: suInstanceID, WorkerID: "worker-1", Revision: w.Revision,
+		WorkflowDefinitionID: suDefID, FromStatus: model.WorkflowRunning,
+		Status: model.WorkflowFailed, Frame: model.NewFrame("node-1"),
+		Counters: model.Counters{},
+		Context:  json.RawMessage(`{"secret":{"API_KEY":"plain-value"}}`),
+		Error:    "request failed with plain-value",
+	})
+	if err != nil {
+		t.Fatalf("Checkpoint() error = %v", err)
+	}
+
+	rows := outboxRows(t, db, suInstanceID)
+	if len(rows) != 1 {
+		t.Fatalf("outbox rows = %d, want 1", len(rows))
+	}
+	if strings.Contains(string(rows[0].Payload), "plain-value") || !strings.Contains(string(rows[0].Payload), "********") {
+		t.Fatalf("outbox payload leaked secret: %s", rows[0].Payload)
+	}
+	stored, err := repo.GetByID(ctx, suInstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Error != "request failed with plain-value" {
+		t.Fatalf("stored internal error = %q", stored.Error)
 	}
 }
 

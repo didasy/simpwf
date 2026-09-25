@@ -202,6 +202,7 @@ type InstanceService interface {
 type instanceService struct {
 	instances    repository.InstanceRepository
 	wfDefs       repository.WorkflowDefinitionRepository
+	secrets      SecretSnapshotter
 	materializer WorkflowMaterializer
 	validator    *executor.InputExecutor
 	hooks        *executor.HookRunner
@@ -216,6 +217,7 @@ type instanceService struct {
 func NewInstanceService(
 	instances repository.InstanceRepository,
 	wfDefs repository.WorkflowDefinitionRepository,
+	secrets SecretSnapshotter,
 	materializer WorkflowMaterializer,
 	validator *executor.InputExecutor,
 	hooks *executor.HookRunner,
@@ -227,6 +229,7 @@ func NewInstanceService(
 	return &instanceService{
 		instances:    instances,
 		wfDefs:       wfDefs,
+		secrets:      secrets,
 		materializer: materializer,
 		validator:    validator,
 		hooks:        hooks,
@@ -271,6 +274,14 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 	// template-engine changes. Snapshot wins per key: callers cannot
 	// shadow env-provided credentials with request-body values.
 	obj["env"] = envsnapshot.Merge(obj["env"], envsnapshot.Snapshot(envsnapshot.Prefix))
+	var secretSnapshot map[string]string
+	if s.secrets != nil {
+		secretSnapshot, err = s.secrets.GetAll(ctx)
+		if err != nil {
+			return model.WorkflowInstance{}, err
+		}
+	}
+	mergeSecretSnapshot(obj, secretSnapshot)
 	if rebased, err := json.Marshal(obj); err == nil {
 		contextRaw = rebased
 	} else {
@@ -332,11 +343,42 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 }
 
 func (s *instanceService) GetStatus(ctx context.Context, id string) (*model.WorkflowInstance, error) {
-	return s.instances.GetByID(ctx, id)
+	inst, err := s.instances.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return redactInstanceView(inst), nil
 }
 
 func (s *instanceService) List(ctx context.Context, q repository.InstanceListQuery) ([]model.WorkflowInstance, int64, error) {
-	return s.instances.List(ctx, q)
+	items, total, err := s.instances.List(ctx, q)
+	if err != nil {
+		return nil, 0, err
+	}
+	var errorIDs []string
+	for _, item := range items {
+		if item.Error != "" {
+			errorIDs = append(errorIDs, item.ID)
+		}
+	}
+	if len(errorIDs) == 0 {
+		return items, total, nil
+	}
+	reader, ok := s.instances.(repository.InstanceContextReader)
+	if !ok {
+		for i := range items {
+			if items[i].Error != "" {
+				items[i].Error = SecretMask
+			}
+		}
+		return items, total, nil
+	}
+	contexts, err := reader.GetContextsByIDs(ctx, errorIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	redactInstanceListItems(items, contexts)
+	return items, total, nil
 }
 
 func (s *instanceService) GetStatusDetail(ctx context.Context, id string) (*StatusDetail, error) {
@@ -344,7 +386,7 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string) (*Stat
 	if err != nil {
 		return nil, err
 	}
-	d := &StatusDetail{Instance: *inst}
+	d := &StatusDetail{Instance: *redactInstanceView(inst)}
 	d.Nodes = s.statusNodes(ctx, inst)
 	frame, err := model.ParseFrame(inst.Frame)
 	if err != nil {
@@ -404,7 +446,11 @@ func (s *instanceService) pendingInput(ctx context.Context, inst *model.Workflow
 }
 
 func (s *instanceService) GetContext(ctx context.Context, id string) (*model.WorkflowInstance, error) {
-	return s.instances.GetByID(ctx, id)
+	inst, err := s.instances.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return redactInstanceView(inst), nil
 }
 
 // leanMode reports whether the instance runs with replayable diff history.
@@ -643,21 +689,26 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 	if err := json.Unmarshal(req.Context, &obj); err != nil || obj == nil {
 		return nil, fmt.Errorf("%w: context must be a JSON object", model.ErrInvalid)
 	}
-	// Carry the stored env snapshot forward: a replacement body without
-	// env must not drop it. Stored wins per key (reserved root); a body
-	// that omits env keeps the snapshot, and old instances without env
-	// get an empty map. The merge needs the current row, so load before
-	// replacing.
+	// Carry stored env and secret snapshots forward. Replacement bodies must
+	// not drop them or inject values under reserved roots; stored values win.
 	var storedEnv any
+	storedSecrets := map[string]string{}
 	if cur, err := s.instances.GetByID(ctx, req.InstanceID); err == nil && cur != nil {
-		var curObj map[string]any
-		if jerr := json.Unmarshal(cur.Context, &curObj); jerr == nil && curObj != nil {
-			storedEnv = curObj["env"]
+		curObj, ok := decodeContextObject(cur.Context)
+		if !ok {
+			return nil, fmt.Errorf("%w: stored context is invalid", model.ErrConflict)
 		}
+		var trusted bool
+		storedSecrets, trusted = secretValuesFromObject(curObj)
+		if !trusted {
+			return nil, fmt.Errorf("%w: stored secret snapshot is invalid", model.ErrConflict)
+		}
+		storedEnv = curObj["env"]
 	} else if err != nil && !errors.Is(err, repository.ErrInstanceNotFound) {
 		return nil, err
 	}
 	obj["env"] = envsnapshot.Merge(obj["env"], toStringMap(storedEnv))
+	mergeSecretSnapshot(obj, storedSecrets)
 	rebased, err := json.Marshal(obj)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
@@ -686,9 +737,13 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 		if err := s.instances.AppendHistory(ctx, *anchor); err != nil {
 			return nil, err
 		}
-		return s.instances.GetByID(ctx, req.InstanceID)
+		updated, err := s.instances.GetByID(ctx, req.InstanceID)
+		if err != nil {
+			return nil, err
+		}
+		return redactInstanceView(updated), nil
 	}
-	return inst, nil
+	return redactInstanceView(inst), nil
 }
 
 func (s *instanceService) NodeDebug(ctx context.Context, instanceID, nodeID string, attempt int) (*NodeDebugDetail, error) {
@@ -784,6 +839,8 @@ func (s *instanceService) NodeDebug(ctx context.Context, instanceID, nodeID stri
 	}
 	d.CreatedAt = nodeInst.CreatedAt
 	d.UpdatedAt = nodeInst.UpdatedAt
+	secrets, trusted := secretValuesFromContext(inst.Context)
+	redactNodeDebugSecrets(d, secrets, trusted)
 	return d, nil
 }
 
