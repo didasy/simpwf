@@ -170,7 +170,9 @@ func (s *workflowDefinitionService) materializeNode(ctx context.Context, n *mode
 		}
 		if n.OnFailure != nil {
 			if merged.Type != model.NodeTypeExternalCall && merged.Type != model.NodeTypePoller {
-				return nil, fmt.Errorf("%w: node %s is %s which does not support on_failure", model.ErrInvalid, n.ID, merged.Type)
+				if _, ok := model.LookupCustomType(string(merged.Type)); !ok {
+					return nil, fmt.Errorf("%w: node %s is %s which does not support on_failure", model.ErrInvalid, n.ID, merged.Type)
+				}
 			}
 			merged.OnFailure = n.OnFailure
 		}

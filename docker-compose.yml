@@ -1,12 +1,14 @@
-# Local stack: PostgreSQL + Atlas migrations + Redis + RabbitMQ + app.
+# Local stack: PostgreSQL + Atlas migrations + Redis + RabbitMQ + RustFS (S3) + app.
 # Redis and RabbitMQ are optional: the app starts them only when their DSNs
 # are configured. The migrate service waits for a healthy database; the app
 # waits for the migration plus healthy brokers before starting the API,
-# dispatcher, and broker consumers.
+# dispatcher, and broker consumers. RustFS backs the s3fetch example custom
+# node (see pkg/customnode/s3fetch/README.md).
 #
 #   docker compose up --build
 #   curl http://localhost:8080/health/ready
 #   RabbitMQ management UI: http://localhost:15672 (simpwf/simpwf)
+#   RustFS console: http://localhost:9001 (rustfsadmin/rustfsadmin)
 
 services:
   db:
@@ -70,6 +72,64 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # RustFS volume permissions fixer: the RustFS image runs as 10001:10001,
+  # so the named volumes need that ownership before the server starts.
+  rustfs-permission-helper:
+    image: alpine
+    volumes:
+      - rustfs_data_0:/data0
+      - rustfs_data_1:/data1
+      - rustfs_data_2:/data2
+      - rustfs_data_3:/data3
+      - rustfs_logs:/logs
+    command: >
+      sh -c "
+      chown -R 10001:10001 /data0 /data1 /data2 /data3 /logs &&
+      echo 'Volume permissions fixed' &&
+      exit 0
+      "
+    restart: "no"
+
+  # S3-compatible object storage backing the s3fetch example custom node.
+  # Single node, 4 local drives (erasure layout needs >= 4 paths), plain
+  # HTTP for local dev. s3fetch renders connection fields from
+  # {{ env.SIMPWF_S3_* }}, set on the app service below.
+  rustfs:
+    image: rustfs/rustfs:latest
+    depends_on:
+      - rustfs-permission-helper
+    security_opt:
+      - "no-new-privileges:true"
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # console
+    environment:
+      - RUSTFS_VOLUMES=/data/rustfs{0...3}
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_CONSOLE_ENABLE=true
+      # Local-development credentials; change for anything beyond local use.
+      - RUSTFS_ACCESS_KEY=rustfsadmin # CHANGEME
+      - RUSTFS_SECRET_KEY=rustfsadmin # CHANGEME
+      - RUSTFS_OBS_LOGGER_LEVEL=info
+      - RUSTFS_OBS_LOG_DIRECTORY=/app/logs
+      # Local dev only: all four paths sit on same Docker disk, so RustFS
+      # erasure disk check fails without this. Never enable beyond local testing.
+      - RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true
+    volumes:
+      - rustfs_data_0:/data/rustfs0
+      - rustfs_data_1:/data/rustfs1
+      - rustfs_data_2:/data/rustfs2
+      - rustfs_data_3:/data/rustfs3
+      - rustfs_logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-ec", "curl -fsS http://127.0.0.1:9000/health && curl -fsS http://127.0.0.1:9001/rustfs/console/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
   app:
     build:
       context: .
@@ -94,9 +154,20 @@ services:
       # Dev convenience: allow any outbound HTTP target (the engine logs a
       # warning). Remove or tighten for anything beyond local testing.
       SIMPWF_ENGINE_HTTP_ALLOWLIST: "*"
+      # OpenRouter key for openrouter and jev custom nodes. Replace locally;
+      # instance creation snapshots SIMPWF_* under {{ env.* }}.
+      SIMPWF_OPENROUTER_KEY: "${SIMPWF_OPENROUTER_KEY:-}"
       SIMPWF_SYSTEM_USER_ID: "00000000-0000-7000-8000-000000000001"
       SIMPWF_SYSTEM_NAME: system
       SIMPWF_SYSTEM_EMAIL: system@localhost
+      # S3 connection for the s3fetch example custom node. Create snapshots
+      # SIMPWF_* into each instance context under {{ env.* }}, so s3fetch
+      # configs use {{ env.SIMPWF_S3_ENDPOINT }} etc. (see
+      # pkg/customnode/s3fetch/README.md). rustfs runs plain HTTP locally,
+      # so use_ssl=false configs match; console at localhost:9001.
+      SIMPWF_S3_ENDPOINT: rustfs:9000
+      SIMPWF_S3_ACCESS_KEY: rustfsadmin
+      SIMPWF_S3_SECRET_KEY: rustfsadmin
     ports:
       - "8080:8080"
     depends_on:
@@ -105,6 +176,8 @@ services:
       redis:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      rustfs:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/ready"]
@@ -117,3 +190,8 @@ volumes:
   pgdata:
   redisdata:
   rabbitmqdata:
+  rustfs_data_0:
+  rustfs_data_1:
+  rustfs_data_2:
+  rustfs_data_3:
+  rustfs_logs:

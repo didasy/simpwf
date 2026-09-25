@@ -36,6 +36,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/statusupdate"
 	"github.com/simpwf/workflow-engine/internal/workflow/transport"
 	"github.com/simpwf/workflow-engine/pkg/configuration"
+	_ "github.com/simpwf/workflow-engine/pkg/customnode/all"
 	"github.com/simpwf/workflow-engine/pkg/database"
 	"github.com/sirupsen/logrus"
 )

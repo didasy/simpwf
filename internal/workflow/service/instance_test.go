@@ -273,8 +273,12 @@ func TestCreateInstance(t *testing.T) {
 	if frame.CurrentNodeID != "11111111-1111-7111-8111-111111111101" {
 		t.Errorf("frame = %+v, want start node", frame)
 	}
-	if string(inst.Context) != `{"x":1}` {
-		t.Errorf("context = %s", inst.Context)
+	var created map[string]any
+	if err := json.Unmarshal(inst.Context, &created); err != nil {
+		t.Fatalf("parse stored context: %v", err)
+	}
+	if created["x"] != float64(1) {
+		t.Errorf("context = %s, want x preserved", inst.Context)
 	}
 	if inst.CreatedBy != svcSysUserID || inst.UpdatedBy != svcSysUserID {
 		t.Errorf("audit actors = %q/%q, want %q", inst.CreatedBy, inst.UpdatedBy, svcSysUserID)
@@ -285,6 +289,76 @@ func TestCreateInstance(t *testing.T) {
 	}
 	if got.CreatedBy != svcSysUserID || got.UpdatedBy != svcSysUserID {
 		t.Errorf("persisted audit actors = %q/%q, want %q", got.CreatedBy, got.UpdatedBy, svcSysUserID)
+	}
+}
+
+func TestCreateMergesEnvSnapshot(t *testing.T) {
+	t.Setenv("SIMPWF_S3_ENDPOINT", "play.min.io:9000")
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	svc := svcInstanceService(db)
+
+	inst, err := svc.Create(ctx, service.CreateInstance{
+		WorkflowDefinitionID: wfID,
+		Context:              json.RawMessage(`{"run_id":"r1"}`),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(inst.Context, &m); err != nil {
+		t.Fatalf("parse stored context: %v", err)
+	}
+	if m["run_id"] != "r1" {
+		t.Errorf("context = %s, want run_id preserved", inst.Context)
+	}
+	env, ok := m["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("context = %s, want env root", inst.Context)
+	}
+	if env["SIMPWF_S3_ENDPOINT"] != "play.min.io:9000" {
+		t.Errorf("env = %v, want SIMPWF_S3_ENDPOINT snapshot", env)
+	}
+}
+
+func TestUpdateContextPreservesEnvSnapshot(t *testing.T) {
+	t.Setenv("SIMPWF_S3_ENDPOINT", "play.min.io:9000")
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return context.x;", "", map[string]any{"output_property": "out"}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{"x":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+
+	got, err := svc.UpdateContext(ctx, service.UpdateContext{
+		InstanceID: inst.ID,
+		Context:    json.RawMessage(`{"y":{"nested":2}}`),
+	})
+	if err != nil {
+		t.Fatalf("UpdateContext() error = %v", err)
+	}
+	var m map[string]any
+	_ = json.Unmarshal(got.Context, &m)
+	env, ok := m["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("context = %s, want env root carried forward", got.Context)
+	}
+	if env["SIMPWF_S3_ENDPOINT"] != "play.min.io:9000" {
+		t.Errorf("env = %v, want stored snapshot preserved", env)
+	}
+	if nested, ok := m["y"].(map[string]any); !ok || nested["nested"] != float64(2) {
+		t.Errorf("context = %s, want nested replacement", got.Context)
 	}
 }
 
@@ -426,7 +500,14 @@ func TestCreateInstanceDefaultsContextAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if string(inst.Context) != "{}" {
+	var defCtx map[string]any
+	if err := json.Unmarshal(inst.Context, &defCtx); err != nil {
+		t.Fatalf("parse stored context: %v", err)
+	}
+	if _, ok := defCtx["env"]; !ok {
+		t.Errorf("context = %s, want env snapshot root", inst.Context)
+	}
+	if string(inst.Context) != "{}" && defCtx["env"] == nil {
 		t.Errorf("context = %s, want {}", inst.Context)
 	}
 
@@ -2080,7 +2161,18 @@ func jsonEqualCtx(t *testing.T, a, b json.RawMessage) bool {
 	if err := json.Unmarshal(b, &vb); err != nil {
 		t.Fatalf("unmarshal %s: %v", b, err)
 	}
+	stripEnv(va)
+	stripEnv(vb)
 	return reflect.DeepEqual(va, vb)
+}
+
+// stripEnv drops the env snapshot root before comparing contexts. Create
+// injects env from process env, so exact-shape assertions must ignore it.
+// Tests that care about env assert it explicitly.
+func stripEnv(v any) {
+	if m, ok := v.(map[string]any); ok {
+		delete(m, "env")
+	}
 }
 
 func TestRollbackNestedGroupStack(t *testing.T) {
@@ -3176,8 +3268,18 @@ func TestLeanUpdateContextWritesAnchorBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateContext() error = %v", err)
 	}
-	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{"patched":true}`)) {
+	var patched map[string]any
+	if err := json.Unmarshal(got.Context, &patched); err != nil {
+		t.Fatalf("parse patched context: %v", err)
+	}
+	if patched["patched"] != true {
 		t.Fatalf("context = %s, want patched replacement", got.Context)
+	}
+	var freshEnv map[string]any
+	if err := json.Unmarshal(fresh.Context, &freshEnv); err == nil {
+		if want, got := freshEnv["env"], patched["env"]; !reflect.DeepEqual(want, got) {
+			t.Fatalf("env changed across UpdateContext: was %v, now %v", want, got)
+		}
 	}
 	afterRows, err := repo.LoadHistory(ctx, fresh.ID)
 	if err != nil {
@@ -3187,7 +3289,8 @@ func TestLeanUpdateContextWritesAnchorBaseline(t *testing.T) {
 		t.Fatalf("history rows = %d, want %d after anchor append", len(afterRows), len(beforeRows)+1)
 	}
 	last := afterRows[len(afterRows)-1]
-	if !last.IsAnchor || !jsonEqualCtx(t, last.Snapshot, json.RawMessage(`{"patched":true}`)) {
+	var lastSnap map[string]any
+	if !last.IsAnchor || json.Unmarshal(last.Snapshot, &lastSnap) != nil || lastSnap["patched"] != true {
 		t.Fatalf("last history = %+v, want anchor baseline of patched context", last)
 	}
 	for i := range afterRows {
