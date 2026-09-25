@@ -100,7 +100,9 @@ configs address them as `{{ env.SIMPWF_X }}`:
 Worked examples: [`pkg/customnode/s3fetch/README.md`](../pkg/customnode/s3fetch/README.md)
 (the `s3fetch` leaf — `pipe` a URL into S3, or `presign` an existing key);
 [`pkg/customnode/jev/README.md`](../pkg/customnode/jev/README.md)
-(the `jev` leaf — Jev 1.13 Decisions API, raw probs, downstream gating).
+(the `jev` leaf — Jev 1.13 Decisions API, raw probs, downstream gating);
+[`pkg/customnode/openrouter/README.md`](../pkg/customnode/openrouter/README.md)
+(the `openrouter` leaf — Chat Completions and Responses API text models).
 
 ## Local test loop
 
@@ -112,3 +114,14 @@ Worked examples: [`pkg/customnode/s3fetch/README.md`](../pkg/customnode/s3fetch/
    `internal/workflow/engine/engine_custom_test.go`), drive workflow,
    assert cursor/output/hooks/`on_failure`/`retry_on_recovery`.
 5. `rtk go vet`, `rtk golangci-lint` if configured.
+
+## OpenRouter text node
+
+Bundled `openrouter` custom node calls OpenRouter Chat Completions or
+Responses API through shared `executor.HTTPExecutor`. It supports a
+`prompt`/`system` shorthand or explicit `messages[]`; API key is rendered
+from `{{ env.SIMPWF_OPENROUTER_KEY }}` and never returned or logged.
+`openrouter.ai` must be present in `engine.http_allowlist` (or
+`SIMPWF_ENGINE_HTTP_ALLOWLIST` when running without a config file). Full
+schema, output shape, example YAML, and seed workflow are documented in
+[`pkg/customnode/openrouter/README.md`](../pkg/customnode/openrouter/README.md).

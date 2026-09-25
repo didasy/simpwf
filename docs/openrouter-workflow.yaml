@@ -1,0 +1,38 @@
+# OpenRouter chat -> responses workflow example.
+# Start an instance with context such as:
+# {"question":"What is a workflow engine?"}
+start_node_id: "019fea42-0001-7000-8000-000000000001"
+
+nodes:
+  - type: openrouter
+    id: "019fea42-0001-7000-8000-000000000001"
+    name: "chat-answer"
+    config:
+      api: chat
+      model: openai/gpt-4o-mini
+      api_key: "{{ env.SIMPWF_OPENROUTER_KEY }}"
+      system: "Answer briefly and accurately."
+      prompt: "{{ question }}"
+      temperature: 0.2
+      max_tokens: 256
+      top_p: 0.9
+    timeout: 60s
+    output_property: chat_answer
+    next_node: "019fea42-0001-7000-8000-000000000002"
+
+  - type: openrouter
+    id: "019fea42-0001-7000-8000-000000000002"
+    name: "responses-answer"
+    config:
+      api: responses
+      model: openai/gpt-4o-mini
+      api_key: "{{ env.SIMPWF_OPENROUTER_KEY }}"
+      messages:
+        - role: developer
+          content: "Use the chat answer and produce a concise follow-up."
+        - role: user
+          content: "Question: {{ question }}\nPrior answer: {{ chat_answer.text }}"
+      temperature: 0.3
+      max_tokens: 256
+    timeout: 60s
+    output_property: responses_answer

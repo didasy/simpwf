@@ -154,6 +154,9 @@ services:
       # Dev convenience: allow any outbound HTTP target (the engine logs a
       # warning). Remove or tighten for anything beyond local testing.
       SIMPWF_ENGINE_HTTP_ALLOWLIST: "*"
+      # OpenRouter key for openrouter and jev custom nodes. Replace locally;
+      # instance creation snapshots SIMPWF_* under {{ env.* }}.
+      SIMPWF_OPENROUTER_KEY: "${SIMPWF_OPENROUTER_KEY:-}"
       SIMPWF_SYSTEM_USER_ID: "00000000-0000-7000-8000-000000000001"
       SIMPWF_SYSTEM_NAME: system
       SIMPWF_SYSTEM_EMAIL: system@localhost

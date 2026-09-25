@@ -59,6 +59,7 @@ engine:
     - "127.0.0.1:8080"
     - "api.example.com"
     - "jsonplaceholder.typicode.com"
+    - "openrouter.ai"
   exec_allowlist:
     - "echo"
     - "ls"

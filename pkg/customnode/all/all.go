@@ -6,5 +6,6 @@ package all
 
 import (
 	_ "github.com/simpwf/workflow-engine/pkg/customnode/jev"
+	_ "github.com/simpwf/workflow-engine/pkg/customnode/openrouter"
 	_ "github.com/simpwf/workflow-engine/pkg/customnode/s3fetch"
 )
