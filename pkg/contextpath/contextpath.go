@@ -27,8 +27,8 @@ type Segment struct {
 type Path []Segment
 
 var (
-	keyRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	tokenRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(\[([0-9]+)\])?$`)
+	keyRe   = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	tokenRe = regexp.MustCompile(`^([A-Za-z0-9_]+)(\[([0-9]+)\])?$`)
 	tplRe   = regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
 )
 

@@ -249,6 +249,12 @@ type InstanceRepository interface {
 	ListEvents(ctx context.Context, workflowInstanceID string) ([]model.WorkflowInstanceEvent, error)
 }
 
+// InstanceContextReader loads raw contexts for internal redaction/snapshot
+// work. HTTP-facing service methods must redact the returned values.
+type InstanceContextReader interface {
+	GetContextsByIDs(ctx context.Context, ids []string) (map[string]json.RawMessage, error)
+}
+
 type instanceRepo struct {
 	db        *gorm.DB
 	replayMax int
@@ -284,6 +290,24 @@ func (r *instanceRepo) GetByID(ctx context.Context, id string) (*model.WorkflowI
 	}
 	w := WorkflowInstanceFromModel(m)
 	return &w, nil
+}
+
+func (r *instanceRepo) GetContextsByIDs(ctx context.Context, ids []string) (map[string]json.RawMessage, error) {
+	if len(ids) == 0 {
+		return map[string]json.RawMessage{}, nil
+	}
+	var rows []WorkflowInstanceModel
+	if err := r.db.WithContext(ctx).Model(&WorkflowInstanceModel{}).
+		Select("id", "context").
+		Where("id IN ?", ids).
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("workflow instance contexts: %w", err)
+	}
+	contexts := make(map[string]json.RawMessage, len(rows))
+	for _, row := range rows {
+		contexts[row.ID] = json.RawMessage(row.Context)
+	}
+	return contexts, nil
 }
 
 func (r *instanceRepo) List(ctx context.Context, q InstanceListQuery) ([]model.WorkflowInstance, int64, error) {
@@ -579,7 +603,7 @@ func (r *instanceRepo) Checkpoint(ctx context.Context, c Checkpoint) error {
 		}
 		from := statusWithReason{status: c.FromStatus, waitingReason: c.FromWaitingReason}
 		to := statusWithReason{status: c.Status, waitingReason: c.WaitingReason}
-		return r.enqueueStatusUpdate(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, now)
+		return r.enqueueStatusUpdate(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, c.Context, now)
 	})
 }
 
@@ -644,7 +668,7 @@ func (r *instanceRepo) Pause(ctx context.Context, id string) (bool, error) {
 			}
 			from := statusWithReason{status: model.WorkflowWaiting, waitingReason: model.WaitingReason(m.WaitingReason)}
 			to := statusWithReason{status: model.WorkflowPaused, waitingReason: model.WaitingReason(m.WaitingReason)}
-			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), "", now)
+			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), "", m.Context, now)
 		case string(model.WorkflowRunning):
 			// Deferred: running -> pause_requested (no status change).
 			deferred = true
@@ -685,7 +709,7 @@ func (r *instanceRepo) Resume(ctx context.Context, id string) error {
 			}
 			from := statusWithReason{status: model.WorkflowPaused, waitingReason: model.WaitingReason(m.WaitingReason)}
 			to := statusWithReason{status: model.WorkflowWaiting, waitingReason: model.WaitingReason(m.WaitingReason)}
-			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), "", now)
+			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), "", m.Context, now)
 		case string(model.WorkflowRunning):
 			// Clear a pending pause: no status change, no event.
 			return tx.Model(&WorkflowInstanceModel{}).Where("id = ?", id).Updates(map[string]any{
@@ -730,7 +754,7 @@ func (r *instanceRepo) Stop(ctx context.Context, id, reason string) (bool, error
 			}
 			from := statusWithReason{status: model.WorkflowStatus(m.Status), waitingReason: model.WaitingReason(m.WaitingReason)}
 			to := statusWithReason{status: model.WorkflowStopped}
-			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), reason, now)
+			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), reason, m.Context, now)
 		case string(model.WorkflowStopped):
 			// Already stopped: idempotent; report the current pending state.
 			pending = m.TerminationPending
@@ -885,7 +909,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		to := statusWithReason{status: c.Status, waitingReason: model.WaitingReasonRunnable}
 		events := []string{model.StatusUpdateEventInputReceived}
 		events = append(events, transitionEvents(from, to)...)
-		if err := r.enqueueStatusUpdate(ctx, tx, c.InstanceID, instModel.WorkflowDefinitionID, instModel.Revision+1, from, to, events, "", now); err != nil {
+		if err := r.enqueueStatusUpdate(ctx, tx, c.InstanceID, instModel.WorkflowDefinitionID, instModel.Revision+1, from, to, events, "", c.NewContext, now); err != nil {
 			return err
 		}
 		for _, ev := range []model.WorkflowInstanceEvent{
@@ -984,7 +1008,7 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 		to := statusWithReason{status: model.WorkflowFailed, waitingReason: model.WaitingReasonRunnable}
 		events := []string{model.StatusUpdateEventInputReceived}
 		events = append(events, transitionEvents(from, to)...)
-		if err := r.enqueueStatusUpdate(ctx, tx, c.InstanceID, instModel.WorkflowDefinitionID, instModel.Revision+1, from, to, events, c.Error, now); err != nil {
+		if err := r.enqueueStatusUpdate(ctx, tx, c.InstanceID, instModel.WorkflowDefinitionID, instModel.Revision+1, from, to, events, c.Error, c.NewContext, now); err != nil {
 			return err
 		}
 		failData, err := json.Marshal(map[string]any{"error": c.Error})

@@ -46,6 +46,26 @@ var instanceOrderFields = map[string]bool{
 	"created_at": true, "updated_at": true,
 }
 
+func parsePagination(c *gin.Context) (int, int, error) {
+	page := 1
+	perPage := defaultPerPage
+	if v := c.Query("page"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return 0, 0, fmt.Errorf("query: page must be an integer >= 1, got %q", v)
+		}
+		page = n
+	}
+	if v := c.Query("per_page"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxPerPage {
+			return 0, 0, fmt.Errorf("query: per_page must be an integer in [1,%d], got %q", maxPerPage, v)
+		}
+		perPage = n
+	}
+	return page, perPage, nil
+}
+
 // ListQuery is a parsed definition list query.
 type ListQuery struct {
 	Page       int
@@ -61,22 +81,12 @@ type ListQuery struct {
 
 // ParseListQuery parses and validates a definition list query.
 func ParseListQuery(c *gin.Context, kind ListKind) (*ListQuery, error) {
-	q := &ListQuery{Page: 1, PerPage: defaultPerPage, Order: "-created_at"}
-
-	if v := c.Query("page"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return nil, fmt.Errorf("query: page must be an integer >= 1, got %q", v)
-		}
-		q.Page = n
+	q := &ListQuery{Order: "-created_at"}
+	page, perPage, err := parsePagination(c)
+	if err != nil {
+		return nil, err
 	}
-	if v := c.Query("per_page"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > maxPerPage {
-			return nil, fmt.Errorf("query: per_page must be an integer in [1,%d], got %q", maxPerPage, v)
-		}
-		q.PerPage = n
-	}
+	q.Page, q.PerPage = page, perPage
 	if v := c.Query("order"); v != "" {
 		if !validOrder(v, kind) {
 			return nil, fmt.Errorf("query: order %q is not allowlisted", v)
@@ -154,22 +164,12 @@ type InstanceListQuery struct {
 
 // ParseInstanceListQuery parses and validates a workflow instance list query.
 func ParseInstanceListQuery(c *gin.Context) (*InstanceListQuery, error) {
-	q := &InstanceListQuery{Page: 1, PerPage: defaultPerPage, Order: "-created_at"}
-
-	if v := c.Query("page"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return nil, fmt.Errorf("query: page must be an integer >= 1, got %q", v)
-		}
-		q.Page = n
+	q := &InstanceListQuery{Order: "-created_at"}
+	page, perPage, err := parsePagination(c)
+	if err != nil {
+		return nil, err
 	}
-	if v := c.Query("per_page"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > maxPerPage {
-			return nil, fmt.Errorf("query: per_page must be an integer in [1,%d], got %q", maxPerPage, v)
-		}
-		q.PerPage = n
-	}
+	q.Page, q.PerPage = page, perPage
 	if v := c.Query("order"); v != "" {
 		if !validOrder(v, ListKindInstance) {
 			return nil, fmt.Errorf("query: order %q is not allowlisted", v)

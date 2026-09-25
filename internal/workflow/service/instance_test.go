@@ -50,7 +50,7 @@ func setupSvcDB(t *testing.T) *gorm.DB {
 		}
 	})
 	if err := db.AutoMigrate(
-		&repository.UserModel{}, &repository.NodeDefinitionModel{},
+		&repository.UserModel{}, &repository.SecretModel{}, &repository.NodeDefinitionModel{},
 		&repository.WorkflowDefinitionModel{}, &repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{}, &repository.WorkflowInstanceModel{},
 		&repository.NodeContextHistoryModel{},
@@ -60,7 +60,7 @@ func setupSvcDB(t *testing.T) *gorm.DB {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 	if err := db.Exec(`TRUNCATE TABLE
-		status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
+		secrets, status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users RESTART IDENTITY`).Error; err != nil {
 		t.Fatalf("truncate tables: %v", err)
@@ -152,6 +152,7 @@ func svcInstanceServiceWithOptions(db *gorm.DB, options model.LeanOptions) servi
 	return service.NewInstanceService(
 		instances,
 		repository.NewWorkflowDefinitionRepository(db),
+		repository.NewSecretRepository(db),
 		svcWorkflowService(db),
 		validator,
 		executor.NewHookRunner(nil),
@@ -323,6 +324,98 @@ func TestCreateMergesEnvSnapshot(t *testing.T) {
 		t.Errorf("env = %v, want SIMPWF_S3_ENDPOINT snapshot", env)
 	}
 }
+
+func TestCreateMergesSecretSnapshot(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	secrets := repository.NewSecretRepository(db)
+	if _, err := secrets.Create(ctx, "API_KEY", "stored-value"); err != nil {
+		t.Fatal(err)
+	}
+	svc := svcInstanceService(db)
+	inst, err := svc.Create(ctx, service.CreateInstance{
+		WorkflowDefinitionID: wfID,
+		Context:              json.RawMessage(`{"secret":{"API_KEY":"request-value"},"run_id":"r1"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created map[string]any
+	if err := json.Unmarshal(inst.Context, &created); err != nil {
+		t.Fatal(err)
+	}
+	got := created["secret"].(map[string]any)["API_KEY"]
+	if got != "stored-value" {
+		t.Fatalf("secret snapshot = %v, want stored-value", got)
+	}
+
+	if err := secrets.Delete(ctx, "API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	read, err := svc.GetContext(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(read.Context), "stored-value") || !strings.Contains(string(read.Context), secretMaskForTest) {
+		t.Fatalf("GetContext() did not redact frozen snapshot: %s", read.Context)
+	}
+	status, err := svc.GetStatus(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(status.Context), "stored-value") || !strings.Contains(string(status.Context), secretMaskForTest) {
+		t.Fatalf("GetStatus() did not redact frozen snapshot: %s", status.Context)
+	}
+	detail, err := svc.GetStatusDetail(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(detail.Instance.Context), "stored-value") || !strings.Contains(string(detail.Instance.Context), secretMaskForTest) {
+		t.Fatalf("GetStatusDetail() did not redact frozen snapshot: %s", detail.Instance.Context)
+	}
+}
+
+func TestUpdateContextPreservesSecretSnapshot(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	secrets := repository.NewSecretRepository(db)
+	if _, err := secrets.Create(ctx, "API_KEY", "stored-value"); err != nil {
+		t.Fatal(err)
+	}
+	svc := svcInstanceService(db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.UpdateContext(ctx, service.UpdateContext{
+		InstanceID: inst.ID,
+		Context:    json.RawMessage(`{"y":2,"secret":{"API_KEY":"request-value"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got.Context), "stored-value") || !strings.Contains(string(got.Context), secretMaskForTest) {
+		t.Fatalf("UpdateContext() response leaked snapshot: %s", got.Context)
+	}
+	stored, err := repository.NewInstanceRepository(db).GetByID(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stored.Context), "stored-value") {
+		t.Fatalf("stored context dropped frozen snapshot: %s", stored.Context)
+	}
+}
+
+const secretMaskForTest = service.SecretMask
 
 func TestUpdateContextPreservesEnvSnapshot(t *testing.T) {
 	t.Setenv("SIMPWF_S3_ENDPOINT", "play.min.io:9000")
@@ -1158,6 +1251,48 @@ func TestNodeDebugLoopAttemptsAndRunning(t *testing.T) {
 	}
 }
 
+func TestNodeDebugMasksRenderedSecretValues(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	secrets := repository.NewSecretRepository(db)
+	if _, err := secrets.Create(ctx, "API_KEY", "plain-value"); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances := repository.NewInstanceRepository(db)
+	now := time.Now().UTC()
+	node := model.NodeInstance{
+		ID: svcNewID(), WorkflowInstanceID: inst.ID, NodeID: "11111111-1111-7111-8111-111111111101",
+		Name: "a", Type: "script", Attempt: 1, Status: model.NodeFinished,
+		Input:         json.RawMessage(`{"authorization":"Bearer plain-value"}`),
+		Output:        json.RawMessage(`{"result":"plain-value"}`),
+		ContextBefore: json.RawMessage(`{"secret":{"API_KEY":"plain-value"}}`),
+		ContextAfter:  json.RawMessage(`{"secret":{"API_KEY":"plain-value"},"result":"plain-value"}`),
+		StartedAt:     &now, FinishedAt: &now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := instances.InsertNodeInstance(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := svc.NodeDebug(ctx, inst.ID, node.NodeID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "plain-value") || !strings.Contains(string(encoded), secretMaskForTest) {
+		t.Fatalf("NodeDebug() leaked rendered secret: %s", encoded)
+	}
+}
+
 func TestNodeDebugErrors(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
@@ -1205,6 +1340,7 @@ func svcControlService(db *gorm.DB, c service.Canceller) service.InstanceService
 	return service.NewInstanceService(
 		instances,
 		repository.NewWorkflowDefinitionRepository(db),
+		repository.NewSecretRepository(db),
 		svcWorkflowService(db),
 		&executor.InputExecutor{},
 		executor.NewHookRunner(nil),

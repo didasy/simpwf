@@ -33,7 +33,8 @@ Malformed JSON → `400`. Blank name/type/content → `422`. Bad type or content
 
 FE note: `content` for a `group` definition must not contain `keys`; keys are supplied at the workflow occurrence.
 Referencing occurrence may add `keys`, `next_node`, `output_property`, `on_failure` (external_call/poller only), hooks,
-metadata.
+metadata. Executable string fields may template the frozen instance roots (`{{ env.SIMPWF_* }}`, `{{ secret.KEY }}`);
+definitions store the template text as-is, values resolve at instance runtime (see `fields.md` reserved roots).
 
 ### `GET /v1/node/definition` → `200`
 
@@ -89,6 +90,34 @@ Malformed UUID → `400`. Unknown → `404`.
 ### `DELETE /v1/workflow/definition/{id}` → `204`
 
 Malformed UUID → `400`. Referenced by any request or instance → `409`. Unknown → `404`. Empty body.
+
+## Secrets
+
+Credential table frozen into each instance's `secret` root at creation. Plaintext never returns over HTTP; every read
+is masked.
+
+### `POST /v1/secrets` → `201`
+
+| Body field | Required | Rule                                             |
+| ---------- | -------- | ------------------------------------------------ |
+| `key`        | yes      | `^[A-Za-z0-9_]{1,128}$`. Blank/pattern miss → `422`. |
+| `value`      | yes      | 1–8192 characters. Blank/out of range → `422`.     |
+
+Malformed JSON → `400`. Duplicate key → `409`. Response `{key, value_masked: "********", created_at, updated_at}`.
+
+### `GET /v1/secrets` → `200`
+
+`page` / `per_page` same rules as definitions; bad → `400`. No `order` param; fixed `key` ascending. Envelope
+`{items, page, per_page, total, total_pages}`; every item masked.
+
+### `GET /v1/secrets/{key}` → `200`
+
+Key outside `^[A-Za-z0-9_]{1,128}$` → `400`. Unknown → `404`. Returns one masked secret.
+
+### `DELETE /v1/secrets/{key}` → `204`
+
+Key outside `^[A-Za-z0-9_]{1,128}$` → `400`. Unknown → `404`. Empty body. Running instances keep their frozen copy;
+only new instances see the deletion.
 
 ## Instances
 

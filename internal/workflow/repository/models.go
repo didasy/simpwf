@@ -22,6 +22,18 @@ type UserModel struct {
 // TableName is the users table.
 func (UserModel) TableName() string { return "users" }
 
+// SecretModel persists a secret value. Secret values must only be exposed to
+// the template execution path; API read paths return masked responses.
+type SecretModel struct {
+	Key       string    `gorm:"column:key;type:text;primaryKey"`
+	Value     string    `gorm:"column:value;type:text;not null"`
+	CreatedAt time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt time.Time `gorm:"column:updated_at;not null"`
+}
+
+// TableName is the secrets table.
+func (SecretModel) TableName() string { return "secrets" }
+
 // NodeDefinitionModel persists model.NodeDefinition.
 type NodeDefinitionModel struct {
 	ID                string         `gorm:"column:id;type:uuid;primaryKey"`

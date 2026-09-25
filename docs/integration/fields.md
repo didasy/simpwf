@@ -136,6 +136,18 @@ Templates `{{ context.path }}` allowed in: external-call url/method/header value
 url/method/key/channel/queue. Header names and body property names never render. Reserved read-only roots:
 `workflow_instance_id`, `node_instance_id` (usable in templates, never persisted).
 
+Reserved context roots (`env`, `secret`): snapshotted into every instance context at creation, readable everywhere
+context is readable. `env` holds process env vars starting `SIMPWF_` (`{{ env.SIMPWF_S3_ENDPOINT }}`,
+`context.env.SIMPWF_S3_ENDPOINT` in scripts); only that prefix ever enters context. `secret` holds the frozen
+`/v1/secrets` table keyed by secret key (`{{ secret.API_KEY }}`, `context.secret.API_KEY`). Definitions carry only the
+templates, never values. At creation the snapshot overlays any caller-supplied `env` root (snapshot wins per key) and
+the caller `secret` root is always discarded and replaced; context replace re-applies the stored snapshot the same
+way. Deleting a secret later never changes running instances; new instances snapshot the current table. Reads are
+masked: `secret` values render `********` in context/status/debug responses, secret plaintext inside `error` text is
+redacted, and `/v1/secrets` never returns plaintext (constant `value_masked`). Never use `env`/`secret` as
+`output_property` or `on_failure.output_property`: a node output there overwrites the snapshot in live context (no
+guard; authoring is trusted, same as scripts that can already read full context).
+
 ## Response-only shapes
 
 - `counters`: `{"total": N, "nodes": {"<graph-node-id>": N}}`.

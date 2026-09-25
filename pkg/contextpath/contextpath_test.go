@@ -161,6 +161,20 @@ func TestRenderTemplateMissingPath(t *testing.T) {
 	}
 }
 
+func TestRenderTemplateSecretRoot(t *testing.T) {
+	ctx := map[string]any{"secret": map[string]any{
+		"API_KEY":  "plain-value",
+		"1API_KEY": "digit-leading-value",
+	}}
+	got, err := contextpath.RenderTemplate("hello {{ secret.API_KEY }} / {{ secret.1API_KEY }}", ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "hello plain-value / digit-leading-value" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestRenderJSON(t *testing.T) {
 	ctx := map[string]any{
 		"user": map[string]any{"name": "Jono", "age": 30},

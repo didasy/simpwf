@@ -50,19 +50,19 @@ Error content type is `application/problem+json`:
 
 Status mapping:
 
-| Status | Meaning here                                                                                                   |
-| ------ | -------------------------------------------------------------------------------------------------------------- |
-| 200    | OK (includes pause-immediate, resume, stop, rollback, node debug, statistics)                                  |
-| 201    | Definition created                                                                                             |
-| 202    | Accepted: instance created, input accepted, pause deferred (node still running)                                |
-| 204    | Deleted, empty body                                                                                            |
-| 400    | Malformed JSON, malformed query param, invalid path uuid on definition routes (`GET`/`DELETE .../definition/{id}`) |
-| 401    | Missing/invalid `X-Api-Token` (auth enabled)                                                                     |
-| 404    | Unknown id (definition, instance, occurrence, attempt beyond latest)                                           |
-| 409    | State conflict: delete while referenced, control on terminal instance, context/input/rollback guard failed     |
-| 422    | Semantic validation failure (bad enum, bad content, bad payload, missing required field)                       |
-| 500    | Server error (includes malformed instance path ids the database rejects instead of returning zero rows)        |
-| 503    | `GET /health/ready` only: database unreachable                                                                   |
+| Status | Meaning here                                                                                                                     |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | OK (includes pause-immediate, resume, stop, rollback, node debug, statistics)                                                    |
+| 201    | Definition created                                                                                                               |
+| 202    | Accepted: instance created, input accepted, pause deferred (node still running)                                                  |
+| 204    | Deleted, empty body                                                                                                              |
+| 400    | Malformed JSON, malformed query param, invalid path uuid on definition routes (`GET`/`DELETE .../definition/{id}`)                   |
+| 401    | Missing/invalid `X-Api-Token` (auth enabled)                                                                                       |
+| 404    | Unknown id (definition, instance, occurrence, attempt beyond latest)                                                             |
+| 409    | State conflict: delete while referenced, control on terminal instance, context/input/rollback guard failed, duplicate secret key |
+| 422    | Semantic validation failure (bad enum, bad content, bad payload, missing required field)                                         |
+| 500    | Server error (includes malformed instance path ids the database rejects instead of returning zero rows)                          |
+| 503    | `GET /health/ready` only: database unreachable                                                                                     |
 
 Rule of thumb for FE: `400` = fix the request shape, `422` = fix the values, `409` = refresh state first (instance moved
 on), `404` on a just-created id = treat as gone and refresh the list.
@@ -101,6 +101,9 @@ Every `GET` list returns the same envelope:
 2. Create a workflow definition (`POST /v1/workflow/definition`) with `start_node_id`, `nodes`, optional `keys`,
    optional `context_mode`, optional `status_update`. Full sample: `workflow.yaml` at repo root.
 3. Start an instance (`POST /v1/workflow/instance`) with `workflow_definition_id` and optional `context` object.
+   Creation freezes `SIMPWF_*` process env under the `env` root and the secrets table under the `secret` root, so
+   definition templates (`{{ env.SIMPWF_X }}`, `{{ secret.KEY }}`) and scripts (`context.env`, `context.secret`)
+   resolve from the frozen copy (details in `fields.md`).
    Normal runs start `waiting`. Pass `"debug": true` for a step-through run: it starts `paused` (runnable,
    `waiting_reason: null`) and re-pauses after every node until termination, so each `POST .../resume` advances
    exactly one step. Input parks still surface as `waiting` / `"input"` on debug runs, so the input flow below is

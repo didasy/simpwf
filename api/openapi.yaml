@@ -14,6 +14,7 @@ servers:
 tags:
   - name: Workflow Definitions
   - name: Node Definitions
+  - name: Secrets
   - name: Workflow Instances
   - name: Controls
   - name: Node Debug
@@ -47,6 +48,77 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+  /v1/secrets:
+    post:
+      tags: [Secrets]
+      operationId: createSecret
+      security:
+        - ApiKeyAuth: []
+      summary: Create a secret
+      description: Secret values are never returned. Responses contain a constant mask.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecretRequest" }
+      responses:
+        "201":
+          description: Created; plaintext is omitted from the response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Secret" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    get:
+      tags: [Secrets]
+      operationId: listSecrets
+      security:
+        - ApiKeyAuth: []
+      summary: List secrets with constant-masked values
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: List of masked secrets
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SecretList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/secrets/{key}:
+    get:
+      tags: [Secrets]
+      operationId: getSecret
+      security:
+        - ApiKeyAuth: []
+      summary: Get a secret with a constant-masked value
+      parameters:
+        - $ref: "#/components/parameters/SecretKey"
+      responses:
+        "200":
+          description: Masked secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Secret" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Secrets]
+      operationId: deleteSecret
+      security:
+        - ApiKeyAuth: []
+      summary: Delete a secret; running instance snapshots remain unchanged
+      parameters:
+        - $ref: "#/components/parameters/SecretKey"
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/node/definition:
     post:
       tags: [Node Definitions]
@@ -617,6 +689,13 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    SecretKey:
+      name: key
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_]{1,128}$"
     InstanceID:
       name: id
       in: path
@@ -668,6 +747,37 @@ components:
       required: [status]
       properties:
         status: { type: string }
+    SecretRequest:
+      type: object
+      required: [key, value]
+      properties:
+        key:
+          type: string
+          pattern: "^[A-Za-z0-9_]{1,128}$"
+        value:
+          type: string
+          minLength: 1
+          maxLength: 8192
+    Secret:
+      type: object
+      required: [key, value_masked, created_at, updated_at]
+      properties:
+        key: { type: string }
+        value_masked:
+          type: string
+          const: "********"
+          description: Constant mask. Plaintext secret values are never returned.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SecretList:
+      type: object
+      required: [items, page, per_page, total, total_pages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Secret" } }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
     NodeDefinitionRequest:
       type: object
       required: [name, type, content]

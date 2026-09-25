@@ -1,4 +1,4 @@
-h1:dPq9ylQgEfsF5Xj7EDTWzPMh+yg8ib7+aCVg5o2OLSg=
+h1:JGRkls9fqvuqBCloVIMXSSvowmsv2bthJmCF4dCUO0w=
 20260805024728.sql h1:ZxeSqFuGsHjUG5MjmjTMpZVyBjyQ4D+hOawuglmpnWY=
 20260805035830_add_node_id.sql h1:9+YSyAmpyKdjnTYAwJz5w+/OIPrdTg5exaN4qHytWIw=
 20260810091127_add_workflow_instance_audit_actors.sql h1:LYvdHYd3oI9Jd1isln3DuZamc50xaj0iKXxkR1uDQRg=
@@ -6,3 +6,4 @@ h1:dPq9ylQgEfsF5Xj7EDTWzPMh+yg8ib7+aCVg5o2OLSg=
 20260811101459_add_broker_transport_to_status_outbox.sql h1:pkS6Imk/p5/QIUNzr5g9e7pMPIPRbUccG4HqE6DG+EE=
 20260907111000_add_lean_context.sql h1:az+v/YhFGabSA+01aMRwvw4MFwC6fXthTWWJ15ajcnw=
 20260923035910_add_debug_step_through.sql h1:qLO7YwSGR385/My7Sh42MGYu5Tk06JQ5hlev9uL99vE=
+20260925142000_add_secrets.sql h1:xIx9Trae8NhX03sU4Ixw2SSMTSJ9y8f9mTxy3SMyLaQ=
