@@ -15,10 +15,18 @@ Leaf package (`pkg/customnode/<name>/<name>.go`):
 ```go
 package <name>
 
+var configSchema = json.RawMessage(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": { ... },
+  "required": [ ... ]
+}`)
+
 func init() {
     customnode.MustRegister(customnode.Definition{
         Type:     "<name>",
         Validate: ValidateConfig, // func(json.RawMessage) (any, error)
+        Schema:   configSchema,   // mandatory draft 2020-12 schema of config alone
         New: func(d customnode.Deps) (executor.Executor, error) {
             return &Executor{...}, nil
         },
@@ -34,6 +42,26 @@ func (e *Executor) Execute(ctx context.Context, req executor.Request) (*executor
 `customnode.Deps = { Limits executor.Limits; Logger *logrus.Logger;
 HTTP *executor.HTTPExecutor; Funcs *jsfunc.Registry }` — same power as
 builtin executors.
+
+## Schema (mandatory, config-only)
+
+Every custom node type must supply `Schema json.RawMessage` describing
+its `config` object alone as a draft 2020-12 JSON Schema (`$schema:
+https://json-schema.org/draft/2020-12/schema`).
+
+Do NOT describe the outer node fields (`type`, `id`, `name`, `timeout`,
+`output_property`, `next_node`, `on_failure`, `retry_on_recovery`,
+`pre_script`, `post_script`, `metadata`, `input_data`). The engine wraps
+your config sub-schema into the full node envelope automatically at
+registration time, enforcing `type: "<name>"` as a const and exposing
+the shared common fields while forbidding builtin executable fields.
+
+The schema is compile-checked at registration; missing, non-object, or
+non-compiling schemas fail fast at startup (`MustRegister` panic). The
+compiled schema is cached and served on node definition and workflow
+definition reads so generic frontends can render forms without per-type
+hardcoding. The Go validator (`Validate`) remains authoritative; the
+schema is documentation only.
 
 Bundle step: append `_ "…/pkg/customnode/<name>"` to
 `pkg/customnode/all/all.go` (already blank-imported once in
@@ -58,6 +86,8 @@ custom type. Other builtins reject it at parse.
 
 ## Validation errors
 
+- Missing or invalid `Schema` → startup panic naming type (`MustRegister`).
+  Empty, non-object, or non-compiling draft 2020-12 schema is rejected.
 - Unknown/unimported type → `node type %q is not supported`. Unimported
   custom = same error; fix = blank import.
 - Missing `config` → `node type %q: config is required`.

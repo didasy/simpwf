@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -44,17 +45,99 @@ const (
 	MaxScoreLevels   = 10
 )
 
+// configSchema describes the jev config object. It is documentation for
+// frontend form rendering: ValidateConfig stays authoritative. Each
+// question's criteria shape is selected by its type, mirroring the
+// per-type validation in parseQuestion.
+var configSchema = json.RawMessage(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "jev config",
+  "description": "Calls the Jev 1.13 Decisions API and returns raw probabilities verbatim.",
+  "type": "object",
+  "properties": {
+    "model": { "type": "string", "default": "typesafe/jev-1.13" },
+    "endpoint": { "type": "string", "default": "https://openrouter.ai/api/alpha/decisions", "description": "Absolute http(s) url." },
+    "api_key": { "type": "string", "minLength": 1, "description": "Templated, e.g. {{ env.SIMPWF_OPENROUTER_KEY }}." },
+    "state": { "description": "String, object, or array sent with the questions; templated." },
+    "questions": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Typed questions keyed by question id.",
+      "additionalProperties": { "$ref": "#/$defs/question" }
+    }
+  },
+  "required": ["api_key", "state", "questions"],
+  "$defs": {
+    "question": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["noul", "choice", "score"] },
+        "instructions": { "description": "Non-blank string, object, or array." },
+        "criteria": {}
+      },
+      "required": ["type", "instructions"],
+      "allOf": [
+        {
+          "if": { "type": "object", "required": ["type"], "properties": { "type": { "const": "choice" } } },
+          "then": {
+            "properties": {
+              "criteria": {
+                "type": "object",
+                "minProperties": 2,
+                "maxProperties": 255,
+                "description": "Option key to non-empty string, null, or object.",
+                "additionalProperties": { "type": ["string", "object", "null"] }
+              }
+            },
+            "required": ["criteria"]
+          }
+        },
+        {
+          "if": { "type": "object", "required": ["type"], "properties": { "type": { "const": "score" } } },
+          "then": {
+            "properties": {
+              "criteria": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 10,
+                "description": "Ordered levels, each a non-empty string or an object.",
+                "items": { "type": ["string", "object"] }
+              }
+            },
+            "required": ["criteria"]
+          }
+        },
+        {
+          "if": { "type": "object", "required": ["type"], "properties": { "type": { "const": "noul" } } },
+          "then": {
+            "properties": {
+              "criteria": {
+                "type": "object",
+                "description": "Optional; only true and false keys are meaningful.",
+                "additionalProperties": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}`)
+
 func init() {
-	customnode.MustRegister(customnode.Definition{
-		Type:     "jev",
-		Validate: ValidateConfig,
-		New: func(d customnode.Deps) (executor.Executor, error) {
-			if d.HTTP == nil {
-				return nil, fmt.Errorf("jev: shared HTTP client is not configured")
-			}
-			return &Executor{http: d.HTTP, maxBytes: d.Limits.MaxOutputBytes}, nil
-		},
-	})
+	if os.Getenv("SKIP_JEV_INIT") == "" {
+		customnode.MustRegister(customnode.Definition{
+			Type:     "jev",
+			Validate: ValidateConfig,
+			Schema:   configSchema,
+			New: func(d customnode.Deps) (executor.Executor, error) {
+				if d.HTTP == nil {
+					return nil, fmt.Errorf("jev: shared HTTP client is not configured")
+				}
+				return &Executor{http: d.HTTP, maxBytes: d.Limits.MaxOutputBytes}, nil
+			},
+		})
+	}
 }
 
 // Question is one validated typed question sent to the Decisions API.

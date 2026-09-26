@@ -29,6 +29,10 @@ type NodeDefinitionService interface {
 	Get(ctx context.Context, id string) (model.NodeDefinition, error)
 	List(ctx context.Context, q repository.DefinitionListQuery) ([]model.NodeDefinition, int64, error)
 	Delete(ctx context.Context, id string) error
+	// Schema returns the full node-object JSON Schema for a node type, or
+	// nil for an unknown type. Reads never fail on a missing schema: the
+	// response degrades to a null schema instead.
+	Schema(nodeType string) json.RawMessage
 }
 
 type nodeDefinitionService struct {
@@ -114,6 +118,18 @@ func (s *nodeDefinitionService) List(ctx context.Context, q repository.Definitio
 
 func (s *nodeDefinitionService) Delete(ctx context.Context, id string) error {
 	return s.repo.Delete(ctx, id)
+}
+
+// Schema returns the cached node-object schema for a node type, or nil for
+// an unknown type. The schema describes the current code, not the code the
+// definition was authored against: it is attached at response time and
+// never stored, so old rows get current schemas.
+func (s *nodeDefinitionService) Schema(nodeType string) json.RawMessage {
+	schema, ok := model.NodeSchema(nodeType)
+	if !ok {
+		return nil
+	}
+	return schema
 }
 
 // mustNewID generates a UUIDv7 id; generation cannot fail at runtime.

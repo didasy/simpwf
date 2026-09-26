@@ -32,10 +32,55 @@ const (
 	MaxTopP                  = 1
 )
 
+// configSchema describes the openrouter config object. It is documentation
+// for frontend form rendering: ValidateConfig stays authoritative. Prompt
+// and messages are mutually exclusive, mirroring the validator. Numeric
+// fields accept a template instead of a literal, so they stay untyped
+// (documented range only) rather than typed as numbers.
+var configSchema = json.RawMessage(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "openrouter config",
+  "description": "Calls an OpenRouter text model through the shared HTTP executor.",
+  "type": "object",
+  "properties": {
+    "api": { "type": "string", "enum": ["chat", "responses"], "default": "chat" },
+    "model": { "type": "string", "default": "openai/gpt-4o-mini" },
+    "endpoint": { "type": "string", "description": "Absolute http(s) url or a {{ path }} template; defaults per api." },
+    "api_key": { "type": "string", "minLength": 1, "description": "Templated, e.g. {{ env.SIMPWF_OPENROUTER_KEY }}." },
+    "prompt": { "type": "string", "minLength": 1, "description": "Single-turn shorthand. Mutually exclusive with messages; system requires prompt." },
+    "system": { "type": "string", "minLength": 1, "description": "System instruction. Only allowed together with prompt." },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Explicit message list. Mutually exclusive with prompt.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": { "type": "string", "enum": ["system", "user", "assistant", "developer"], "description": "developer is responses-only." },
+          "content": { "description": "String, or an array of structured content parts." }
+        },
+        "required": ["role", "content"],
+        "additionalProperties": false
+      }
+    },
+    "temperature": { "description": "Number between 0 and 2, or a {{ path }} template." },
+    "max_tokens": { "description": "Positive integer, or a {{ path }} template." },
+    "top_p": { "description": "Number greater than 0 and at most 1, or a {{ path }} template." },
+    "stop": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "timeout": { "description": "Positive Go duration string or a {{ path }} template." }
+  },
+  "required": ["api_key"],
+  "oneOf": [
+    { "required": ["prompt"] },
+    { "required": ["messages"] }
+  ]
+}`)
+
 func init() {
 	customnode.MustRegister(customnode.Definition{
 		Type:     "openrouter",
 		Validate: ValidateConfig,
+		Schema:   configSchema,
 		New: func(d customnode.Deps) (executor.Executor, error) {
 			if d.HTTP == nil {
 				return nil, fmt.Errorf("openrouter: shared HTTP client is not configured")

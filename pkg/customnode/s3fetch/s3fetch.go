@@ -37,10 +37,50 @@ const (
 	MaxExpirySeconds     = 604800
 )
 
+// configSchema describes the s3fetch config object. It is documentation
+// for frontend form rendering: ValidateConfig stays authoritative. Values
+// may carry {{ path }} templates, which are unresolved at parse time, so
+// templated strings are typed as plain strings and the string shapes stay
+// loose. operation drives the if/then rule mirroring the validator.
+var configSchema = json.RawMessage(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "s3fetch config",
+  "description": "Pipes a URL into S3-compatible storage (pipe) or presigns an existing key (presign).",
+  "type": "object",
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": ["pipe", "presign"],
+      "description": "pipe uploads source_url under key; presign only presigns an existing key."
+    },
+    "endpoint": { "type": "string", "minLength": 1, "description": "Bare host:port (an http(s):// prefix is tolerated). Templated, e.g. {{ env.SIMPWF_S3_ENDPOINT }}." },
+    "region": { "type": "string", "default": "us-east-1" },
+    "bucket": { "type": "string", "minLength": 1, "description": "Templated, e.g. {{ env.SIMPWF_S3_BUCKET }}." },
+    "key": { "type": "string", "minLength": 1, "description": "Templated object key." },
+    "source_url": { "type": "string", "minLength": 1, "description": "Templated URL downloaded and uploaded. Required for pipe, forbidden for presign." },
+    "expiry_seconds": { "type": "integer", "minimum": 1, "maximum": 604800, "default": 3600, "description": "Presigned URL lifetime; the S3 ceiling is 7 days." },
+    "use_ssl": { "type": "boolean", "default": true },
+    "access_key": { "type": "string", "minLength": 1, "description": "Templated, e.g. {{ env.SIMPWF_S3_ACCESS_KEY }}." },
+    "secret_key": { "type": "string", "minLength": 1, "description": "Templated, e.g. {{ env.SIMPWF_S3_SECRET_KEY }}." }
+  },
+  "required": ["operation", "endpoint", "bucket", "key", "access_key", "secret_key"],
+  "allOf": [
+    {
+      "if": { "type": "object", "required": ["operation"], "properties": { "operation": { "const": "pipe" } } },
+      "then": { "required": ["source_url"] }
+    },
+    {
+      "if": { "type": "object", "required": ["operation"], "properties": { "operation": { "const": "presign" } } },
+      "then": { "not": { "required": ["source_url"] } }
+    }
+  ]
+}`)
+
 func init() {
 	customnode.MustRegister(customnode.Definition{
 		Type:     "s3fetch",
 		Validate: ValidateConfig,
+		Schema:   configSchema,
 		New: func(d customnode.Deps) (executor.Executor, error) {
 			return &Executor{http: d.HTTP, newClient: newMinioClient, maxBytes: d.Limits.MaxOutputBytes}, nil
 		},

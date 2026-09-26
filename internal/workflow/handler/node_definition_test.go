@@ -54,6 +54,16 @@ func (f *fakeNodeSvc) List(_ context.Context, _ repository.DefinitionListQuery) 
 
 func (f *fakeNodeSvc) Delete(_ context.Context, _ string) error { return f.deleteErr }
 
+// Schema mirrors the service: known types get their schema, unknown types
+// degrade to nil so the handler emits a null schema.
+func (f *fakeNodeSvc) Schema(nodeType string) json.RawMessage {
+	schema, ok := model.NodeSchema(nodeType)
+	if !ok {
+		return nil
+	}
+	return schema
+}
+
 func performJSON(r *gin.Engine, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	var reader *bytes.Reader
@@ -198,5 +208,90 @@ func TestNodeDefinitionDeleteConflict(t *testing.T) {
 	w := performJSON(r, http.MethodDelete, "/v1/node/definition/"+nodeDefID, "", nil)
 	if w.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409", w.Code)
+	}
+}
+
+// TestNodeDefinitionCarriesSchema covers all three read paths: POST
+// response, GET one, and LIST items each attach the type's node schema.
+func TestNodeDefinitionCarriesSchema(t *testing.T) {
+	svc := &fakeNodeSvc{
+		getDef: model.NodeDefinition{ID: nodeDefID, Name: "transform", Version: 1, Type: "script"},
+		items: []model.NodeDefinition{
+			{ID: nodeDefID, Name: "transform", Type: "script"},
+			{ID: nodeLineage, Name: "emit", Type: "output"},
+		},
+		total: 2,
+	}
+	r := nodeRouter(svc)
+
+	post := performJSON(r, http.MethodPost, "/v1/node/definition",
+		`{"name":"transform","type":"script","content":{"type":"script","script":"return 1;"}}`, nil)
+	if post.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201", post.Code)
+	}
+	assertScriptSchema(t, decodeNodeResponse(t, post.Body.Bytes()).Schema)
+
+	one := performJSON(r, http.MethodGet, "/v1/node/definition/"+nodeDefID, "", nil)
+	if one.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200", one.Code)
+	}
+	assertScriptSchema(t, decodeNodeResponse(t, one.Body.Bytes()).Schema)
+
+	list := performJSON(r, http.MethodGet, "/v1/node/definition", "", nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", list.Code)
+	}
+	var listResp ListResponse[NodeDefinitionResponse]
+	if err := json.Unmarshal(list.Body.Bytes(), &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.Items) != 2 {
+		t.Fatalf("list has %d items, want 2", len(listResp.Items))
+	}
+	assertScriptSchema(t, listResp.Items[0].Schema)
+	if len(listResp.Items[1].Schema) == 0 {
+		t.Error("list item 1 missing schema for type output")
+	}
+}
+
+// TestNodeDefinitionUnknownTypeSchemaIsNull covers the degraded read: an
+// unknown type yields a null schema and still a 200.
+func TestNodeDefinitionUnknownTypeSchemaIsNull(t *testing.T) {
+	r := nodeRouter(&fakeNodeSvc{
+		getDef: model.NodeDefinition{ID: nodeDefID, Name: "mystery", Type: "not_a_registered_type"},
+	})
+	w := performJSON(r, http.MethodGet, "/v1/node/definition/"+nodeDefID, "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"schema":null`)) {
+		t.Errorf("body does not carry a null schema: %s", w.Body.String())
+	}
+}
+
+func decodeNodeResponse(t *testing.T, body []byte) NodeDefinitionResponse {
+	t.Helper()
+	var resp NodeDefinitionResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// assertScriptSchema checks the served schema is the script node schema and
+// not an empty object.
+func assertScriptSchema(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatal("schema is empty, want the script node schema")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+	props, _ := doc["properties"].(map[string]any)
+	typeProp, _ := props["type"].(map[string]any)
+	if typeProp["const"] != "script" {
+		t.Errorf("schema properties.type.const = %v, want script", typeProp["const"])
 	}
 }

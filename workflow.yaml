@@ -4,7 +4,9 @@
 # definition content (JSON). Every node id is a UUIDv7 and must be unique.
 # Accepted node types: script, conditions, input, group, output,
 # external_call (http_config or execution_config), and poller (one of
-# http, redis, or rabbitmq).
+# http, redis, or rabbitmq). Docs-only draft 2020-12 JSON Schemas,
+# per type, are served on the read paths: `schema` on node definition
+# reads, `schemas` (used types only) on workflow definition reads.
 #
 # Node links:
 #   - script, input, output, group, external_call and poller may carry

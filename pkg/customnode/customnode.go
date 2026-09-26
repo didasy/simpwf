@@ -9,6 +9,7 @@
 //		customnode.MustRegister(customnode.Definition{
 //			Type:     "s3fetch",
 //			Validate: ValidateConfig,
+//			Schema:   configSchema, // draft 2020-12 schema of the config object
 //			New: func(d customnode.Deps) (executor.Executor, error) {
 //				return &Executor{...}, nil
 //			},
@@ -34,9 +35,17 @@ import (
 type Definition struct {
 	// Type is the lowercase-identifier node type name (max 64 chars).
 	Type string
-	// Validate owns the node's config schema: it validates the raw config
-	// object and returns its parsed form, stored on NodeContent.Custom.
+	// Validate owns the node's config validation: it validates the raw
+	// config object and returns its parsed form, stored on
+	// NodeContent.Custom.
 	Validate func(json.RawMessage) (any, error)
+	// Schema is the mandatory draft 2020-12 JSON Schema of the config
+	// object alone. The core wraps it into the full node envelope
+	// (type const, config, shared common fields) and serves it on
+	// definition reads so a frontend can render a generic form. It is
+	// documentation only: Validate stays authoritative. An empty,
+	// non-object, or non-compiling schema is rejected at registration.
+	Schema json.RawMessage
 	// New builds the node's executor from the injected deps.
 	New func(Deps) (executor.Executor, error)
 }
@@ -70,14 +79,18 @@ func (d Definition) validate() error {
 	return nil
 }
 
-// Register adds a custom node type atomically to the model validator
-// registry and the executor factory registry. If the executor half fails,
-// the model entry rolls back so no half-registered type survives.
+// Register adds a custom node type atomically to the model validator and
+// schema registries and the executor factory registry. If the executor half
+// fails, the model entries roll back so no half-registered type survives.
 func Register(d Definition) error {
 	if err := d.validate(); err != nil {
 		return err
 	}
 	if err := model.RegisterCustomType(d.Type, d.Validate); err != nil {
+		return err
+	}
+	if err := model.RegisterCustomSchema(d.Type, d.Schema); err != nil {
+		model.UnregisterCustomType(d.Type)
 		return err
 	}
 	factory := func(deps executor.CustomDeps) (executor.Executor, error) {
@@ -90,6 +103,7 @@ func Register(d Definition) error {
 	}
 	if err := executor.RegisterCustomFactory(d.Type, factory); err != nil {
 		model.UnregisterCustomType(d.Type)
+		model.UnregisterCustomSchema(d.Type)
 		return err
 	}
 	return nil
@@ -117,6 +131,7 @@ func ByType(nodeType string) (Definition, bool) {
 	return Definition{
 		Type:     nodeType,
 		Validate: validate,
+		Schema:   mustConfigSchema(nodeType),
 		New: func(d Deps) (executor.Executor, error) {
 			return factory(executor.CustomDeps{
 				Limits: d.Limits,
@@ -126,6 +141,13 @@ func ByType(nodeType string) (Definition, bool) {
 			})
 		},
 	}, true
+}
+
+// mustConfigSchema returns the author-supplied config sub-schema of a
+// registered type. Every type reaching ByType is registered, so a missing
+// schema is a programming bug.
+func mustConfigSchema(nodeType string) json.RawMessage {
+	return model.LookupCustomConfigSchema(nodeType)
 }
 
 // Types lists registered custom node type names in sorted order.

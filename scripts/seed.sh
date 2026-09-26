@@ -163,13 +163,15 @@ while IFS= read -r key; do
     || fail "parse node definition id for $key"
   name=$(jq -er '.name' <<<"$payload") \
     || fail "parse node definition name for $key"
+  schema_type=$(jq -er '.schema.properties.type.const // empty' <<<"$response") \
+    || fail "node definition $key response missing schema"
 
   node_definition_ids=$(jq -c \
     --arg name "$name" \
     --arg id "$id" \
     '.[$name] = $id' <<<"$node_definition_ids")
 
-  echo "seed: created node definition $name ($id)" >&2
+  echo "seed: created node definition $name ($id, schema: $schema_type)" >&2
 done < <(jq -er 'keys[]' <<<"$node_definitions")
 
 workflow_payload=$(jq -ce --argjson ids "$node_definition_ids" '
@@ -188,8 +190,10 @@ workflow_response=$(curl -fsS -X POST \
 
 workflow_definition_id=$(jq -er '.id' <<<"$workflow_response") \
   || fail "parse workflow definition id"
+workflow_schemas=$(jq -er '.schemas | keys | sort | join(",")' <<<"$workflow_response") \
+  || fail "workflow definition response missing schemas"
 
-echo "seed: created workflow definition $workflow_definition_id" >&2
+echo "seed: created workflow definition $workflow_definition_id (schemas: $workflow_schemas)" >&2
 jq -n \
   --arg workflow_definition_id "$workflow_definition_id" \
   --argjson node_definition_ids "$node_definition_ids" \
