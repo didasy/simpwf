@@ -3,7 +3,6 @@ package model
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -347,15 +346,4 @@ func compileJSONSchema(raw json.RawMessage) error {
 		return fmt.Errorf("not a valid JSON Schema: %w", err)
 	}
 	return nil
-}
-
-// sortedSchemaTypes lists node types in sorted order, for stable tests and
-// documentation output.
-func sortedSchemaTypes(schemas map[string]json.RawMessage) []string {
-	out := make([]string, 0, len(schemas))
-	for t := range schemas {
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
 }
