@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/simpwf/workflow-engine/pkg/ids"
 	"github.com/spf13/viper"
 )
 
@@ -107,10 +108,48 @@ type System struct {
 	Email  string `mapstructure:"email"`
 }
 
-// Auth holds the optional API token authentication settings.
+// Auth holds the authentication settings: the optional API token service
+// principal and the optional OIDC resource-server settings.
 type Auth struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	APIToken string `mapstructure:"api_token"`
+	// OIDC enables bearer-token authentication against any OIDC provider.
+	// The engine keeps no sessions and no callback: the frontend runs
+	// code+PKCE against the provider and calls the API with the JWT.
+	OIDC OIDC `mapstructure:"oidc"`
+	// RolePermissions is the static role catalog: role name to the
+	// resource-action permissions it grants. At startup it upserts the
+	// role and permission rows and prunes the permission rows of these
+	// roles that are no longer granted; no role row is ever deleted.
+	RolePermissions map[string][]string `mapstructure:"role_permissions"`
+}
+
+// OIDC holds the OIDC resource-server settings.
+type OIDC struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Issuer is the provider base URL used for discovery and for the
+	// iss check.
+	Issuer string `mapstructure:"issuer"`
+	// ClientID is the expected aud value.
+	ClientID string `mapstructure:"client_id"`
+	// Audience overrides the expected aud value when the provider issues
+	// an API audience distinct from the client id.
+	Audience string `mapstructure:"audience"`
+	// RolesClaim is the claim carrying the caller's roles. Default "roles".
+	// A dotted path reads a nested claim, e.g. "realm_access.roles".
+	RolesClaim string `mapstructure:"roles_claim"`
+	// UsernameClaim overrides the claim used as the display name.
+	// Default "name", falling back to "preferred_username" then email.
+	// A dotted path reads a nested claim, e.g. "profile.display".
+	UsernameClaim string `mapstructure:"username_claim"`
+	// ClockSkew tolerates a small issuer/applicant clock difference on a
+	// token's exp: a token that expired less than ClockSkew ago is retried
+	// against a widened window. It is not applied to nbf, so a token issued
+	// ahead of this clock is still rejected. Default 1m.
+	ClockSkew time.Duration `mapstructure:"clock_skew"`
+	// CacheTTL is how long a fetched discovery document and JWKS stay
+	// fresh before they are refetched. Default 5m.
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
 }
 
 // Option customizes Load behavior.
@@ -145,6 +184,18 @@ func Load(opts ...Option) (*Config, error) {
 	// auth.api_token is exposed as SIMPWF_API_TOKEN (not
 	// SIMPWF_AUTH_API_TOKEN) to match the requested env contract.
 	_ = v.BindEnv("auth.api_token", "SIMPWF_API_TOKEN")
+	// auth.enabled is bound explicitly because SIMPWF_AUTH_ENABLED is the
+	// switch compose and the e2e harness use to turn authentication on
+	// without rewriting config.yaml.
+	_ = v.BindEnv("auth.enabled", "SIMPWF_AUTH_ENABLED")
+	// auth.oidc.* is exposed as SIMPWF_AUTH_OIDC_* (the default mapping),
+	// which is bound explicitly so the keys resolve without a config file.
+	for _, key := range []string{
+		"enabled", "issuer", "client_id", "audience",
+		"roles_claim", "username_claim", "clock_skew", "cache_ttl",
+	} {
+		_ = v.BindEnv("auth.oidc."+key, "SIMPWF_AUTH_OIDC_"+strings.ToUpper(key))
+	}
 	// Lean settings are operator toggles and must override config.yaml.
 	_ = v.BindEnv("engine.lean_context_default", "SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT")
 	_ = v.BindEnv("engine.lean_anchor_every", "SIMPWF_ENGINE_LEAN_ANCHOR_EVERY")
@@ -180,6 +231,17 @@ func setDefaults(v *viper.Viper) {
 	// default keeps validation meaningful.
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.api_token", "")
+	v.SetDefault("auth.role_permissions", map[string][]string{})
+	// OIDC stays inert until enabled; the defaults keep every key
+	// env-addressable so validation stays meaningful.
+	v.SetDefault("auth.oidc.enabled", false)
+	v.SetDefault("auth.oidc.issuer", "")
+	v.SetDefault("auth.oidc.client_id", "")
+	v.SetDefault("auth.oidc.audience", "")
+	v.SetDefault("auth.oidc.roles_claim", "roles")
+	v.SetDefault("auth.oidc.username_claim", "name")
+	v.SetDefault("auth.oidc.clock_skew", "1m")
+	v.SetDefault("auth.oidc.cache_ttl", "5m")
 	v.SetDefault("infra.postgresql.dsn", "")
 	v.SetDefault("infra.http.host", "localhost:8080")
 	v.SetDefault("infra.http.swagger_enabled", true)
@@ -252,6 +314,33 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.Enabled && strings.TrimSpace(c.Auth.APIToken) == "" {
 		return errors.New("configuration: auth.api_token is required when auth.enabled is true")
+	}
+	if c.Auth.OIDC.Enabled {
+		if strings.TrimSpace(c.Auth.OIDC.Issuer) == "" {
+			return errors.New("configuration: auth.oidc.issuer is required when auth.oidc.enabled is true")
+		}
+		if strings.TrimSpace(c.Auth.OIDC.ClientID) == "" {
+			return errors.New("configuration: auth.oidc.client_id is required when auth.oidc.enabled is true")
+		}
+		if c.Auth.OIDC.ClockSkew < 0 {
+			return errors.New("configuration: auth.oidc.clock_skew must be >= 0")
+		}
+		if c.Auth.OIDC.CacheTTL <= 0 {
+			return errors.New("configuration: auth.oidc.cache_ttl must be > 0")
+		}
+	}
+	for role := range c.Auth.RolePermissions {
+		if strings.TrimSpace(role) == "" {
+			return errors.New("configuration: auth.role_permissions keys must be non-empty")
+		}
+	}
+	// The system user is the audit actor the API-token and broker bypasses
+	// are recorded as, so every created_by/updated_by written on their behalf
+	// points at this uuid. A value that is blank or is not a canonical uuid
+	// fails the foreign key at the first write instead, by which point the
+	// deployment has already served traffic attributed to nobody.
+	if !ids.Valid(c.System.UserID) {
+		return fmt.Errorf("configuration: system.user_id %q must be a canonical uuid", c.System.UserID)
 	}
 	return nil
 }

@@ -360,6 +360,20 @@ func (e *HTTPExecutor) validateTarget(u *url.URL) error {
 	return nil
 }
 
+// ValidateTarget applies this executor's outbound policy to an absolute
+// target URL without issuing a request. Custom nodes that build their own
+// HTTP client (S3/MinIO, and any future integration) must call it on their
+// rendered destination first, so every outbound path the engine can take
+// clears the same scheme, allowlist, and DNS checks as external_call and the
+// pollers.
+func (e *HTTPExecutor) ValidateTarget(target string) error {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return err
+	}
+	return e.validateTarget(parsed)
+}
+
 func (e *HTTPExecutor) allowed(host, port string) bool {
 	for _, entry := range e.allowlist {
 		if entry == "*" {

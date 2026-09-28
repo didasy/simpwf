@@ -20,7 +20,100 @@ tags:
   - name: Node Debug
   - name: Health
   - name: Statistics
+  - name: Auth
+  - name: Roles
 paths:
+  /v1/auth/config:
+    get:
+      tags: [Auth]
+      operationId: getAuthConfig
+      summary: Get the OIDC login contract
+      description: |
+        Public by design: a frontend has to read this to learn where to log
+        in, which is exactly when it holds no token yet. Reports whether OIDC
+        is configured, the provider endpoints to run the flow against, the
+        claim the roles are read from, and every role name the configured
+        catalog knows, so a role can be labelled before the caller has one.
+      responses:
+        "200":
+          description: Login contract
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthConfig" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getAuthMe
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Get the authenticated caller
+      description: |
+        The identity behind the presented credential, plus the effective
+        permissions the UI can act on. A caller must be known to ask who it
+        is, so this route is authenticated but carries no resource-action
+        gate: an authenticated caller is never refused here with 403.
+        service is true for the API-token principal, which bypasses every
+        authorization gate and reports the wildcard permission.
+      responses:
+        "200":
+          description: The authenticated caller
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthMe" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/roles:
+    get:
+      tags: [Roles]
+      operationId: listRoles
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: List roles and their permissions
+      description: |
+        Served from the live role catalog, which is what the request gates
+        consult, so the response never advertises a permission the engine
+        would not grant. Read-only: there is no role-write API, because the
+        catalog is configuration.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: Role catalog
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/roles/{name}:
+    get:
+      tags: [Roles]
+      operationId: getRole
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Get one role and its permissions
+      description: |
+        A name that is blank once trimmed is 422 rather than 404: it names
+        no role for any caller, so no lookup could ever succeed against it.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: Role detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Role" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "500": { $ref: "#/components/responses/InternalError" }
   /health/live:
     get:
       tags: [Health]
@@ -54,6 +147,7 @@ paths:
       operationId: createSecret
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Create a secret
       description: Secret values are never returned. Responses contain a constant mask.
       requestBody:
@@ -62,6 +156,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/SecretRequest" }
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created; plaintext is omitted from the response
           content:
@@ -76,11 +171,13 @@ paths:
       operationId: listSecrets
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: List secrets with constant-masked values
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PerPage"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: List of masked secrets
           content:
@@ -94,10 +191,12 @@ paths:
       operationId: getSecret
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get a secret with a constant-masked value
       parameters:
         - $ref: "#/components/parameters/SecretKey"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Masked secret
           content:
@@ -111,10 +210,12 @@ paths:
       operationId: deleteSecret
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Delete a secret; running instance snapshots remain unchanged
       parameters:
         - $ref: "#/components/parameters/SecretKey"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Deleted }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -125,6 +226,7 @@ paths:
       operationId: createNodeDefinition
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Create an immutable node definition (or its next version)
       requestBody:
         required: true
@@ -132,6 +234,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/NodeDefinitionRequest" }
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created
           content:
@@ -146,6 +249,7 @@ paths:
       operationId: listNodeDefinitions
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: List node definitions
       parameters:
         - $ref: "#/components/parameters/Page"
@@ -158,6 +262,7 @@ paths:
         - $ref: "#/components/parameters/LatestOnly"
         - $ref: "#/components/parameters/NodeType"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: List of node definitions
           content:
@@ -172,10 +277,12 @@ paths:
       operationId: getNodeDefinition
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get a node definition by id
       parameters:
         - $ref: "#/components/parameters/DefinitionID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Node definition
           content:
@@ -188,10 +295,12 @@ paths:
       operationId: deleteNodeDefinition
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Delete a node definition (fails if referenced)
       parameters:
         - $ref: "#/components/parameters/DefinitionID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Deleted }
         "409": { $ref: "#/components/responses/Conflict" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -202,6 +311,7 @@ paths:
       operationId: createWorkflowDefinition
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Create an immutable workflow definition (or its next version)
       requestBody:
         required: true
@@ -209,6 +319,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/WorkflowDefinitionRequest" }
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "201":
           description: Created
           content:
@@ -223,6 +334,7 @@ paths:
       operationId: listWorkflowDefinitions
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: List workflow definitions
       parameters:
         - $ref: "#/components/parameters/Page"
@@ -234,6 +346,7 @@ paths:
         - $ref: "#/components/parameters/Version"
         - $ref: "#/components/parameters/LatestOnly"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: List of workflow definitions
           content:
@@ -248,10 +361,12 @@ paths:
       operationId: getWorkflowDefinition
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get a workflow definition by id
       parameters:
         - $ref: "#/components/parameters/DefinitionID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Workflow definition
           content:
@@ -264,10 +379,12 @@ paths:
       operationId: deleteWorkflowDefinition
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Delete a workflow definition (fails if referenced by instances)
       parameters:
         - $ref: "#/components/parameters/DefinitionID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "204": { description: Deleted }
         "409": { $ref: "#/components/responses/Conflict" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -278,6 +395,7 @@ paths:
       operationId: createWorkflowInstance
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Start a workflow instance
       requestBody:
         required: true
@@ -285,6 +403,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateInstanceRequest" }
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "202":
           description: Accepted
           content:
@@ -298,6 +417,7 @@ paths:
       operationId: listWorkflowInstances
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: List workflow instances
       description: |
         Paginated compact instance summaries. Filters combine: repeated id,
@@ -312,6 +432,7 @@ paths:
         - $ref: "#/components/parameters/WorkflowDefinitionID"
         - $ref: "#/components/parameters/InstanceStatus"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: List of workflow instance summaries
           content:
@@ -326,6 +447,7 @@ paths:
       operationId: getStatisticsSummary
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get workflow run statistics
       description: |
         Aggregate run counts over an inclusive creation window
@@ -339,6 +461,7 @@ paths:
         - $ref: "#/components/parameters/CreatedTo"
         - $ref: "#/components/parameters/StatisticsOrder"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Statistics summary
           content:
@@ -353,10 +476,12 @@ paths:
       operationId: getWorkflowStatus
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get workflow instance status
       parameters:
         - $ref: "#/components/parameters/InstanceID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Instance status
           content:
@@ -370,10 +495,12 @@ paths:
       operationId: getWorkflowContext
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get workflow instance context
       parameters:
         - $ref: "#/components/parameters/InstanceID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Instance context
           content:
@@ -386,6 +513,7 @@ paths:
       operationId: replaceWorkflowContext
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Replace workflow instance context (paused instances only)
       description: |
         Replaces the full context of a paused instance. The body must be a
@@ -408,6 +536,7 @@ paths:
             schema:
               type: object
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Replaced instance context
           content:
@@ -424,6 +553,7 @@ paths:
       operationId: getNodeDebug
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Get node occurrence debug detail (context snapshots, attempts)
       description: |
         node_id is the occurrence UUIDv7. attempt omitted returns the latest
@@ -437,6 +567,7 @@ paths:
           required: false
           schema: { type: integer, minimum: 1 }
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Node debug detail
           content:
@@ -450,6 +581,7 @@ paths:
       operationId: deliverInput
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Deliver input to a waiting input node
       description: |
         Raw JSON body; requires Idempotency-Key header. Accepted payload is
@@ -473,6 +605,7 @@ paths:
           application/json:
             schema: {}
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "202":
           description: Accepted
           content:
@@ -489,10 +622,12 @@ paths:
       operationId: pauseWorkflow
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Pause a workflow instance (immediate or after current node)
       parameters:
         - $ref: "#/components/parameters/InstanceID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Paused immediately
           content:
@@ -512,10 +647,12 @@ paths:
       operationId: resumeWorkflow
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Resume a paused workflow instance
       parameters:
         - $ref: "#/components/parameters/InstanceID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Resumed
           content:
@@ -530,10 +667,12 @@ paths:
       operationId: stopWorkflow
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Stop a workflow instance (fences workers, cancels active node)
       parameters:
         - $ref: "#/components/parameters/InstanceID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Stopped (or termination in progress)
           content:
@@ -548,6 +687,7 @@ paths:
       operationId: rollbackWorkflow
       security:
         - ApiKeyAuth: []
+        - BearerAuth: []
       summary: Roll back a paused or failed instance to a prior node occurrence
       description: |
         Moves the cursor of a paused or failed instance back to an
@@ -573,6 +713,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/InstanceID"
       responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
         "200":
           description: Rolled back (always paused)
           content:
@@ -589,7 +730,16 @@ components:
       type: apiKey
       in: header
       name: X-Api-Token
-      description: API token authentication. Required when auth is enabled; sent as X-Api-Token header.
+      description: API token authentication. Required when auth is enabled; sent as X-Api-Token header. Authenticates as the service principal, which bypasses every authorization gate.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        OIDC bearer token. The engine is a resource server: the frontend
+        completes a code+PKCE flow against the provider and calls the API with
+        the resulting JWT. The authorization URL, client id, and scopes are
+        served by GET /v1/auth/config.
   parameters:
     Page:
       name: page
@@ -723,7 +873,20 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
     Unauthorized:
-      description: Missing or invalid API token
+      description: Missing or invalid credential (no API token, no valid bearer token, or a token naming no subject/issuer)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: >-
+        Authenticated but not allowed: the caller's roles do not carry the
+        endpoint permission, or the input node's allowed_roles does not include
+        one of them. A valid API token is the service principal and is never refused.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    InternalError:
+      description: Internal error
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -747,6 +910,94 @@ components:
       required: [status]
       properties:
         status: { type: string }
+    AuthConfig:
+      type: object
+      description: The OIDC login contract, readable without a credential.
+      required: [enabled, api_token_enabled, roles]
+      properties:
+        enabled:
+          type: boolean
+          description: True when an OIDC provider is configured and bearer tokens are accepted
+        issuer:
+          type: string
+          description: OIDC issuer used for discovery and the iss check
+        client_id:
+          type: string
+          description: Client id the provider has this resource server registered under
+        audience:
+          type: string
+          description: |
+            The value a token's `aud` claim must carry for this API to accept
+            it. It is the verifier's audience: the configured
+            `auth.oidc.audience` when set, and otherwise `client_id`. Equal
+            to `client_id` means no distinct resource audience is in use.
+        authorization_url:
+          type: string
+          description: Provider authorization endpoint the frontend starts the code+PKCE flow at
+        token_url:
+          type: string
+          description: Provider token endpoint the frontend exchanges the code at
+        roles_claim:
+          type: string
+          description: |
+            Claim the caller's roles are read from. A dotted path reads a
+            nested claim, e.g. "realm_access.roles".
+        scopes:
+          type: array
+          items: { type: string }
+          description: Scopes to request, openid first
+        api_token_enabled:
+          type: boolean
+          description: True when the API token is configured, so a frontend can show a token login
+        roles:
+          type: array
+          items: { type: string }
+          description: Every role name the configured catalog knows, so a role can be labelled before the caller holds one
+    AuthMe:
+      type: object
+      description: The identity behind the presented credential.
+      required: [id, name, email, roles, service, permissions]
+      properties:
+        id: { type: string, format: uuid, description: users.id, the audit actor for this caller }
+        subject:
+          type: string
+          nullable: true
+          description: Provider subject; null for the API-token service principal
+        name: { type: string }
+        email: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+          description: Roles the live token asserted; empty means authenticated with no role
+        service:
+          type: boolean
+          description: True for the API-token principal, which bypasses every authorization gate
+        permissions:
+          type: array
+          items: { type: string }
+          description: Union of the caller's role permissions, or ["*"] for the service principal
+    Role:
+      type: object
+      required: [name, permissions, created_at, updated_at]
+      properties:
+        name: { type: string }
+        description:
+          type: string
+          nullable: true
+          description: Derived from configuration; roles are not hand-authored
+        permissions:
+          type: array
+          items: { type: string }
+          description: Actions this role grants, as the live catalog defines them
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RoleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
     SecretRequest:
       type: object
       required: [key, value]
@@ -990,13 +1241,26 @@ components:
           description: Advisory rollback target hint; the rollback endpoint stays the source of truth
     PendingInput:
       type: object
-      required: [node_id, channel]
+      required: [node_id, channel, output_property, allowed_roles, record_actor, form]
       properties:
         node_id: { type: string, format: uuid }
         channel: { type: string }
         output_property:
           type: string
-          description: Bare top-level key the accepted payload is written to (defaults to node id when blank/omitted)
+          description: Bare top-level key the accepted payload is written to; empty when the node sets none, in which case the node id is used
+        allowed_roles:
+          type: array
+          items: { type: string }
+          description: |
+            The node's role gate, the second authorization check applied to a
+            delivery. Empty means the node is open to any caller that already
+            holds input:deliver.
+        record_actor:
+          type: boolean
+          description: |
+            True when an accepted delivery is written as the attribution
+            envelope {user_id, input_data} rather than the bare payload, so
+            a frontend knows which shape the context will hold.
         form:
           $ref: "#/components/schemas/InputForm"
           nullable: true

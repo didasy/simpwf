@@ -187,11 +187,33 @@ func TestCreateNodeDefinitionRejectsInvalidContent(t *testing.T) {
 				"nodes":[{"id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","type":"script","script":"return 1;"}]
 			}`),
 		}, // keys belong to workflow/group occurrences, not reusable definitions
+		{Name: "nested", Type: "script",
+			Content: json.RawMessage(`{"node_definition_id":"` + defIDV1 + `"}`),
+		}, // a definition must be self-contained: materialization does not recurse
 	}
 	for i, req := range bad {
 		if _, err := svc.Create(context.Background(), req); !errors.Is(err, model.ErrInvalid) {
 			t.Errorf("case %d: error = %v, want ErrInvalid", i, err)
 		}
+	}
+}
+
+// A node definition is the leaf of the reference chain. materialization
+// substitutes a one-level copy of the definition's own content and does not
+// recurse, so a definition naming another definition would silently resolve
+// to a node with no executable fields instead of failing.
+func TestCreateNodeDefinitionRejectsNestedReference(t *testing.T) {
+	svc := newService(newFakeNodeRepo())
+	_, err := svc.Create(context.Background(), service.CreateNodeDefinition{
+		Name:    "transform",
+		Type:    "script",
+		Content: json.RawMessage(`{"node_definition_id":"` + defIDV1 + `"}`),
+	})
+	if !errors.Is(err, model.ErrInvalid) {
+		t.Fatalf("error = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "node_definition_id") {
+		t.Errorf("error = %v, want it to name the offending field", err)
 	}
 }
 

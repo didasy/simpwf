@@ -104,15 +104,35 @@ nodes:
 
   # Input node: parks the instance waiting on a payload. The channel fixes
   # the transport; here the payload arrives through the instance's Redis
-  # channel workflow:input:<instance_id>. The accepted payload is written to
-  # output_property (bare key, blank = node id). The optional form contract lets a
+  # channel workflow:input:<instance_id>. The optional form contract lets a
   # generic frontend render the input dynamically per workflow version:
   # status pending_input.form serves these exact bytes back.
+  #
+  # allowed_roles is the node's second authorization gate, independent of
+  # the input:deliver endpoint permission. A caller holding input:deliver but
+  # not one of these roles is refused with 403; omit the field to leave the
+  # node open to any caller that passed the endpoint gate.
+  #
+  # Both fields belong to the node definition. An occurrence referencing a
+  # reusable node definition cannot override them, so every occurrence of one
+  # definition shares the same gate; a different gate needs its own
+  # definition.
+  #
+  # record_actor writes {user_id, input_data} under output_property instead
+  # of the bare payload, so the context records who delivered it. Templates
+  # therefore read approval.input_data.*, and approval.user_id is the
+  # users.id uuid of the deliverer (the system user for a service call).
+  # The form schema, the validation script, and the post hook's "output"
+  # global still see the raw payload. Leave it off to keep the legacy shape,
+  # and migrate the templates by prefixing the key with input_data.
   - type: input
     id: "11111111-1111-7111-8111-111111111103"
     name: "Manager Approval"
     channel: "redis"
     output_property: approval
+    allowed_roles:
+      - manager
+    record_actor: true
     form:
       schema:
         type: "object"
@@ -135,10 +155,22 @@ nodes:
         context.approval_received_at = new Date().toISOString();
     next_node: "11111111-1111-7111-8111-111111111105"
 
+  # The staff branch never waits for a human, but both branches converge on
+  # the Notify node, whose templates read the record_actor envelope. A script
+  # node writes its bare return value, so it has to produce the same shape by
+  # hand; a real auto-approval would instead come from an input node with
+  # record_actor, where the engine supplies user_id. The null below is the
+  # point: this path has no human deliverer, so the envelope says so. A
+  # delivery through the API writes a users.id uuid string here instead, and
+  # templates should treat the field as absent-or-id rather than assuming it.
   - type: script
     id: "11111111-1111-7111-8111-111111111104"
     name: "Staff Path"
-    script: "return { approved: true, by: 'staff' };"
+    script: |
+      return {
+        user_id: null,
+        input_data: { approved: true, by: 'staff' }
+      };
     output_property: approval
     next_node: "11111111-1111-7111-8111-111111111105"
 
@@ -163,14 +195,16 @@ nodes:
     name: "Notify"
     timeout: 30s
     http_config:
-      url: "https://api.example.com/webhook/{{ approval.by }}"
+      url: "https://api.example.com/webhook/{{ approval.input_data.by }}"
       method: "POST"
       headers:
         Content-Type: application/json
         Authorization: "Bearer {{ user.token }}"
       body:
         profile: "{{ profile.name }}"
-        approved: "{{ approval.approved }}"
+        approved: "{{ approval.input_data.approved }}"
+        # The deliverer's users.id uuid, set by record_actor above.
+        approved_by: "{{ approval.user_id }}"
     retry_on_recovery: true
     output_property: notification
     next_node: "11111111-1111-7111-8111-111111111106"

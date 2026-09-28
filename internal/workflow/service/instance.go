@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/engine"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/form"
@@ -28,6 +29,10 @@ type CreateInstance struct {
 	WorkflowDefinitionID string
 	Context              json.RawMessage
 	Debug                bool
+	// Actor is the users.id uuid recorded as created_by/updated_by. An
+	// empty Actor falls back to the service default (the system user), so
+	// a caller that predates per-request actors keeps working unchanged.
+	Actor string
 }
 
 // UpdateContext replaces the full context of a paused instance. Reason is an
@@ -36,6 +41,13 @@ type UpdateContext struct {
 	InstanceID string
 	Context    json.RawMessage
 	Reason     string
+	// Principal is the caller. A nil Principal is the service principal
+	// (API token, broker, or internal caller), which bypasses the object
+	// check exactly as it bypasses the endpoint gate.
+	Principal *auth.Principal
+	// Actor is the users.id uuid recorded on the update. Empty falls back
+	// to the resolved principal's user id and then to the service default.
+	Actor string
 }
 
 // DeliverInput delivers a payload to a waiting input node. Source is the
@@ -46,6 +58,15 @@ type DeliverInput struct {
 	IdempotencyKey string
 	Payload        []byte
 	Source         string
+	// Principal is the caller. The API-token and broker paths pass the
+	// service principal, which skips both authorization gates but is still
+	// recorded as the deliverer. A nil Principal is treated as the service
+	// principal, so any path that carries no credential keeps working.
+	Principal *auth.Principal
+	// Actor is the users.id uuid recorded on the delivery and the audit
+	// event. Empty falls back to the resolved principal's user id and then
+	// to the service default.
+	Actor string
 }
 
 // StatusDetail is the status view with the current node occurrence resolved.
@@ -70,6 +91,14 @@ type PendingInput struct {
 	Channel        string
 	OutputProperty string
 	Form           *model.InputForm
+	// AllowedRoles is the node's role gate, so a frontend can hide or
+	// explain a delivery the caller's roles would be refused for. It is
+	// empty when the node is open.
+	AllowedRoles []string
+	// RecordActor reports whether an accepted delivery is written as the
+	// attribution envelope {user_id, input_data}, so the frontend builds
+	// the follow-up form against the right shape.
+	RecordActor bool
 }
 
 // NodeOccurrence is the per-node status view: the already-executed
@@ -119,6 +148,24 @@ type ControlResult struct {
 	TerminationPending bool
 }
 
+// ControlRequest is the input for a pause, resume, or stop control. The
+// three share one shape so a single caller identity carries through every
+// control path.
+type ControlRequest struct {
+	InstanceID string
+	// Reason is the caller-supplied stop reason, recorded on the event.
+	Reason string
+	// Principal is the caller. A nil Principal is the service principal
+	// (API token, broker, or internal caller), which bypasses the object
+	// check exactly as it bypasses the endpoint gate.
+	Principal *auth.Principal
+	// Actor is the users.id uuid recorded on the control event. Empty falls
+	// back to the resolved principal's user id and then to the service
+	// default, so a service call or an unauthenticated deployment keeps
+	// working.
+	Actor string
+}
+
 // RollbackRequest moves a paused or failed instance's cursor back to an
 // already-executed node occurrence. Reason is an optional audit annotation
 // recorded on the rollback event only.
@@ -126,6 +173,13 @@ type RollbackRequest struct {
 	InstanceID         string
 	TargetOccurrenceID string
 	Reason             string
+	// Principal is the caller. A nil Principal is the service principal
+	// (API token, broker, or internal caller), which bypasses the object
+	// check exactly as it bypasses the endpoint gate.
+	Principal *auth.Principal
+	// Actor is the users.id uuid recorded on the rollback. Empty falls back
+	// to the resolved principal's user id and then to the service default.
+	Actor string
 }
 
 // RollbackResult reports the post-rollback cursor: the instance is always
@@ -153,17 +207,23 @@ type WorkflowMaterializer interface {
 	Materialize(ctx context.Context, wc *model.WorkflowContent) (*model.WorkflowContent, error)
 }
 
-// InstanceService is the use-case boundary for workflow instances.
+// InstanceService is the use-case boundary for workflow instances. Read
+// and control calls take the caller's resolved users.id as actor alongside
+// the request principal where one exists: the route permission gate answers
+// "may this caller act at all", while the service answers "may this caller
+// touch this instance" from the principal, so a service principal (API
+// token, broker, or internal caller) bypasses the object check exactly as
+// it bypasses the endpoint gate.
 type InstanceService interface {
 	Create(ctx context.Context, req CreateInstance) (model.WorkflowInstance, error)
-	GetStatus(ctx context.Context, id string) (*model.WorkflowInstance, error)
+	GetStatus(ctx context.Context, id string, p auth.Principal) (*model.WorkflowInstance, error)
 	// GetStatusDetail resolves the current node occurrence for the status
 	// response.
-	GetStatusDetail(ctx context.Context, id string) (*StatusDetail, error)
+	GetStatusDetail(ctx context.Context, id string, p auth.Principal) (*StatusDetail, error)
 	// List returns the instances matching the query with pagination and
 	// ordering, mirroring the repository query.
-	List(ctx context.Context, q repository.InstanceListQuery) ([]model.WorkflowInstance, int64, error)
-	GetContext(ctx context.Context, id string) (*model.WorkflowInstance, error)
+	List(ctx context.Context, q repository.InstanceListQuery, p auth.Principal) ([]model.WorkflowInstance, int64, error)
+	GetContext(ctx context.Context, id string, p auth.Principal) (*model.WorkflowInstance, error)
 	// UpdateContext replaces the full context of a paused instance. The
 	// body must be a JSON object; a non-paused instance conflicts.
 	UpdateContext(ctx context.Context, req UpdateContext) (*model.WorkflowInstance, error)
@@ -177,17 +237,17 @@ type InstanceService interface {
 	// instance. nodeID is either the workflow graph node id or the
 	// occurrence id; attempt <= 0 selects the latest attempt, a positive
 	// attempt selects an exact loop execution.
-	NodeDebug(ctx context.Context, instanceID, nodeID string, attempt int) (*NodeDebugDetail, error)
+	NodeDebug(ctx context.Context, instanceID, nodeID string, attempt int, p auth.Principal) (*NodeDebugDetail, error)
 	// Pause pauses a waiting instance immediately and requests a deferred
 	// pause for a running instance. Idempotent while paused.
-	Pause(ctx context.Context, id string) (*ControlResult, error)
+	Pause(ctx context.Context, req ControlRequest) (*ControlResult, error)
 	// Resume returns a paused instance to waiting and clears a pending
 	// pause on a running instance. Idempotent on active instances.
-	Resume(ctx context.Context, id string) (*ControlResult, error)
+	Resume(ctx context.Context, req ControlRequest) (*ControlResult, error)
 	// Stop moves an instance to the terminal stopped state, fences worker
 	// commits, and signals local cancellation. Idempotent on stopped
 	// instances.
-	Stop(ctx context.Context, id, reason string) (*ControlResult, error)
+	Stop(ctx context.Context, req ControlRequest) (*ControlResult, error)
 	// Rollback moves a paused or failed instance's cursor back to an
 	// already-executed node occurrence so the next resume re-executes
 	// forward from there. The instance is always paused afterwards and its
@@ -210,10 +270,14 @@ type instanceService struct {
 	limits       model.NodeLimits
 	cancels      Canceller
 	leanOptions  model.LeanOptions
+	// catalog is the read-only role catalog used to turn a caller's roles
+	// into the permissions the input endpoint gate checks.
+	catalog auth.Catalog
 }
 
 // NewInstanceService builds the instance service. cancels may be nil; when
-// set it receives the local cancellation signal for stopped instances.
+// set it receives the local cancellation signal for stopped instances. The
+// catalog is consulted only by the input authorization gate.
 func NewInstanceService(
 	instances repository.InstanceRepository,
 	wfDefs repository.WorkflowDefinitionRepository,
@@ -226,6 +290,48 @@ func NewInstanceService(
 	cancels Canceller,
 	leanOptions model.LeanOptions,
 ) InstanceService {
+	return newInstanceService(
+		instances, wfDefs, secrets, materializer, validator, hooks,
+		actor, limits, cancels, leanOptions, auth.Catalog{},
+	)
+}
+
+// NewInstanceServiceWithCatalog is NewInstanceService plus the role catalog
+// the input authorization gate reads. An empty catalog denies every
+// resource-action, which is the correct default for a deployment that never
+// configured roles.
+func NewInstanceServiceWithCatalog(
+	instances repository.InstanceRepository,
+	wfDefs repository.WorkflowDefinitionRepository,
+	secrets SecretSnapshotter,
+	materializer WorkflowMaterializer,
+	validator *executor.InputExecutor,
+	hooks *executor.HookRunner,
+	actor string,
+	limits model.NodeLimits,
+	cancels Canceller,
+	leanOptions model.LeanOptions,
+	catalog auth.Catalog,
+) InstanceService {
+	return newInstanceService(
+		instances, wfDefs, secrets, materializer, validator, hooks,
+		actor, limits, cancels, leanOptions, catalog,
+	)
+}
+
+func newInstanceService(
+	instances repository.InstanceRepository,
+	wfDefs repository.WorkflowDefinitionRepository,
+	secrets SecretSnapshotter,
+	materializer WorkflowMaterializer,
+	validator *executor.InputExecutor,
+	hooks *executor.HookRunner,
+	actor string,
+	limits model.NodeLimits,
+	cancels Canceller,
+	leanOptions model.LeanOptions,
+	catalog auth.Catalog,
+) InstanceService {
 	return &instanceService{
 		instances:    instances,
 		wfDefs:       wfDefs,
@@ -237,6 +343,7 @@ func NewInstanceService(
 		limits:       limits,
 		cancels:      cancels,
 		leanOptions:  leanOptions,
+		catalog:      catalog,
 	}
 }
 
@@ -293,6 +400,9 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 		return model.WorkflowInstance{}, err
 	}
 	now := nowUTC()
+	// A request carrying its own actor records that user; every other
+	// caller (a service call, a test, the broker) records the system user.
+	actor := s.actorOrDefault(req.Actor)
 	contextMode := model.ContextModeFull
 	if wc.ContextMode != nil {
 		contextMode = *wc.ContextMode
@@ -309,8 +419,8 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 		Frame:                frameRaw,
 		Context:              contextRaw,
 		Counters:             mustMarshal(model.Counters{}),
-		CreatedBy:            s.actor,
-		UpdatedBy:            s.actor,
+		CreatedBy:            actor,
+		UpdatedBy:            actor,
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}
@@ -337,21 +447,65 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 		ID: mustNewID(), WorkflowInstanceID: w.ID, Type: "instance_created",
 		Data:      createdEventData(def.ID, req.Debug),
-		CreatedBy: s.actor, CreatedAt: now,
+		CreatedBy: actor, CreatedAt: now,
 	})
 	return w, nil
 }
 
-func (s *instanceService) GetStatus(ctx context.Context, id string) (*model.WorkflowInstance, error) {
+// requestPrincipal resolves the caller of a request carrying an optional
+// principal. A nil Principal is the service principal: the API-token path,
+// the broker consumers, and any internal caller carry no other credential,
+// and they are exactly the paths the bypass describes.
+func (s *instanceService) requestPrincipal(p *auth.Principal) auth.Principal {
+	if p != nil {
+		return *p
+	}
+	return auth.SystemPrincipal(s.actor)
+}
+
+// actorOrDefault resolves the audit actor of a request: an explicit actor
+// wins, otherwise the call is attributed to the system user.
+func (s *instanceService) actorOrDefault(actor string) string {
+	return resolveActor(actor, s.actor)
+}
+
+// requestActor picks the users.id uuid recorded on a request. An explicit
+// Actor wins, then the resolved principal's user id, then the service
+// default, so an audited write is never recorded without an actor.
+func (s *instanceService) requestActor(p *auth.Principal, actor string) string {
+	if actor != "" {
+		return actor
+	}
+	if p != nil && p.UserID != "" {
+		return p.UserID
+	}
+	return s.actor
+}
+
+// resolveActor is the shared form of actorOrDefault, for the services that
+// carry a default actor but are not instanceService. An empty actor always
+// falls back to the configured system user, so a request that predates
+// per-request actors keeps working unchanged.
+func resolveActor(actor, fallback string) string {
+	if actor != "" {
+		return actor
+	}
+	return fallback
+}
+
+func (s *instanceService) GetStatus(ctx context.Context, id string, p auth.Principal) (*model.WorkflowInstance, error) {
 	inst, err := s.instances.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, p); err != nil {
 		return nil, err
 	}
 	return redactInstanceView(inst), nil
 }
 
-func (s *instanceService) List(ctx context.Context, q repository.InstanceListQuery) ([]model.WorkflowInstance, int64, error) {
-	items, total, err := s.instances.List(ctx, q)
+func (s *instanceService) List(ctx context.Context, q repository.InstanceListQuery, p auth.Principal) ([]model.WorkflowInstance, int64, error) {
+	items, total, err := s.instances.List(ctx, ownedInstances(q, p))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -381,9 +535,12 @@ func (s *instanceService) List(ctx context.Context, q repository.InstanceListQue
 	return items, total, nil
 }
 
-func (s *instanceService) GetStatusDetail(ctx context.Context, id string) (*StatusDetail, error) {
+func (s *instanceService) GetStatusDetail(ctx context.Context, id string, p auth.Principal) (*StatusDetail, error) {
 	inst, err := s.instances.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, p); err != nil {
 		return nil, err
 	}
 	d := &StatusDetail{Instance: *redactInstanceView(inst)}
@@ -442,12 +599,17 @@ func (s *instanceService) pendingInput(ctx context.Context, inst *model.Workflow
 		Channel:        node.Channel,
 		OutputProperty: key,
 		Form:           node.Form,
+		AllowedRoles:   node.AllowedRoles,
+		RecordActor:    node.RecordActor,
 	}
 }
 
-func (s *instanceService) GetContext(ctx context.Context, id string) (*model.WorkflowInstance, error) {
+func (s *instanceService) GetContext(ctx context.Context, id string, p auth.Principal) (*model.WorkflowInstance, error) {
 	inst, err := s.instances.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, p); err != nil {
 		return nil, err
 	}
 	return redactInstanceView(inst), nil
@@ -693,7 +855,8 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 	// not drop them or inject values under reserved roots; stored values win.
 	var storedEnv any
 	storedSecrets := map[string]string{}
-	if cur, err := s.instances.GetByID(ctx, req.InstanceID); err == nil && cur != nil {
+	cur, curErr := s.instances.GetByID(ctx, req.InstanceID)
+	if curErr == nil && cur != nil {
 		curObj, ok := decodeContextObject(cur.Context)
 		if !ok {
 			return nil, fmt.Errorf("%w: stored context is invalid", model.ErrConflict)
@@ -704,8 +867,8 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 			return nil, fmt.Errorf("%w: stored secret snapshot is invalid", model.ErrConflict)
 		}
 		storedEnv = curObj["env"]
-	} else if err != nil && !errors.Is(err, repository.ErrInstanceNotFound) {
-		return nil, err
+	} else if curErr != nil && !errors.Is(curErr, repository.ErrInstanceNotFound) {
+		return nil, curErr
 	}
 	obj["env"] = envsnapshot.Merge(obj["env"], toStringMap(storedEnv))
 	mergeSecretSnapshot(obj, storedSecrets)
@@ -714,10 +877,14 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
 	req.Context = rebased
+	principal := s.requestPrincipal(req.Principal)
+	if err := authorizeInstance(cur, principal); err != nil {
+		return nil, err
+	}
 	inst, err := s.instances.ReplaceContext(ctx, repository.ContextUpdate{
 		InstanceID: req.InstanceID,
 		Context:    req.Context,
-		Actor:      s.actor,
+		Actor:      s.requestActor(req.Principal, req.Actor),
 		Reason:     req.Reason,
 	})
 	if err != nil {
@@ -746,12 +913,15 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 	return redactInstanceView(inst), nil
 }
 
-func (s *instanceService) NodeDebug(ctx context.Context, instanceID, nodeID string, attempt int) (*NodeDebugDetail, error) {
+func (s *instanceService) NodeDebug(ctx context.Context, instanceID, nodeID string, attempt int, p auth.Principal) (*NodeDebugDetail, error) {
 	inst, err := s.instances.GetByID(ctx, instanceID)
 	if err != nil {
 		if errors.Is(err, repository.ErrInstanceNotFound) {
 			return nil, fmt.Errorf("%w: instance %s", model.ErrNotFound, instanceID)
 		}
+		return nil, err
+	}
+	if err := authorizeInstance(inst, p); err != nil {
 		return nil, err
 	}
 	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
@@ -907,9 +1077,15 @@ func (s *instanceService) leanNodeDebugContexts(ctx context.Context, inst *model
 	return nil, nil, fmt.Errorf("%w: occurrence %q has no history", model.ErrConflict, occ.ID)
 }
 
-func (s *instanceService) Pause(ctx context.Context, id string) (*ControlResult, error) {
+func (s *instanceService) Pause(ctx context.Context, req ControlRequest) (*ControlResult, error) {
+	id := req.InstanceID
+	principal := s.requestPrincipal(req.Principal)
+	actor := s.requestActor(req.Principal, req.Actor)
 	inst, err := s.instance(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, principal); err != nil {
 		return nil, err
 	}
 	switch inst.Status {
@@ -928,20 +1104,26 @@ func (s *instanceService) Pause(ctx context.Context, id string) (*ControlResult,
 	if deferred {
 		_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 			ID: mustNewID(), WorkflowInstanceID: id, Type: "pause_requested",
-			Data: json.RawMessage(`{}`), CreatedBy: s.actor, CreatedAt: nowUTC(),
+			Data: json.RawMessage(`{}`), CreatedBy: actor, CreatedAt: nowUTC(),
 		})
 		return &ControlResult{Status: model.WorkflowRunning, PauseRequested: true}, nil
 	}
 	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 		ID: mustNewID(), WorkflowInstanceID: id, Type: "paused",
-		Data: json.RawMessage(`{}`), CreatedBy: s.actor, CreatedAt: nowUTC(),
+		Data: json.RawMessage(`{}`), CreatedBy: actor, CreatedAt: nowUTC(),
 	})
 	return &ControlResult{Status: model.WorkflowPaused}, nil
 }
 
-func (s *instanceService) Resume(ctx context.Context, id string) (*ControlResult, error) {
+func (s *instanceService) Resume(ctx context.Context, req ControlRequest) (*ControlResult, error) {
+	id := req.InstanceID
+	principal := s.requestPrincipal(req.Principal)
+	actor := s.requestActor(req.Principal, req.Actor)
 	inst, err := s.instance(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, principal); err != nil {
 		return nil, err
 	}
 	switch inst.Status {
@@ -962,14 +1144,20 @@ func (s *instanceService) Resume(ctx context.Context, id string) (*ControlResult
 	}
 	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 		ID: mustNewID(), WorkflowInstanceID: id, Type: eventType,
-		Data: json.RawMessage(`{}`), CreatedBy: s.actor, CreatedAt: nowUTC(),
+		Data: json.RawMessage(`{}`), CreatedBy: actor, CreatedAt: nowUTC(),
 	})
 	return &ControlResult{Status: model.WorkflowWaiting}, nil
 }
 
-func (s *instanceService) Stop(ctx context.Context, id, reason string) (*ControlResult, error) {
+func (s *instanceService) Stop(ctx context.Context, req ControlRequest) (*ControlResult, error) {
+	id := req.InstanceID
+	principal := s.requestPrincipal(req.Principal)
+	actor := s.requestActor(req.Principal, req.Actor)
 	inst, err := s.instance(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, principal); err != nil {
 		return nil, err
 	}
 	switch inst.Status {
@@ -978,7 +1166,7 @@ func (s *instanceService) Stop(ctx context.Context, id, reason string) (*Control
 	case model.WorkflowFinished, model.WorkflowFailed:
 		return nil, fmt.Errorf("%w: instance %s is terminal", model.ErrConflict, id)
 	}
-	pending, err := s.instances.Stop(ctx, id, reason)
+	pending, err := s.instances.Stop(ctx, id, req.Reason)
 	if err != nil {
 		if errors.Is(err, repository.ErrStatusConflict) {
 			return nil, fmt.Errorf("%w: instance %s is terminal", model.ErrConflict, id)
@@ -987,7 +1175,8 @@ func (s *instanceService) Stop(ctx context.Context, id, reason string) (*Control
 	}
 	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
 		ID: mustNewID(), WorkflowInstanceID: id, Type: "stop",
-		Data: json.RawMessage(`{"reason":"` + reason + `"}`), CreatedBy: s.actor, CreatedAt: nowUTC(),
+		Data:      mustMarshal(map[string]string{"reason": req.Reason}),
+		CreatedBy: actor, CreatedAt: nowUTC(),
 	})
 	// A parked input attempt has no worker to interrupt; stop it here.
 	if !pending {
@@ -1021,6 +1210,9 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	}
 	inst, err := s.instance(ctx, req.InstanceID)
 	if err != nil {
+		return nil, err
+	}
+	if err := authorizeInstance(inst, s.requestPrincipal(req.Principal)); err != nil {
 		return nil, err
 	}
 	switch inst.Status {
@@ -1129,7 +1321,7 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 		InstanceID:           inst.ID,
 		Frame:                model.Frame{CurrentNodeID: target.ID, GroupStack: stack},
 		Context:              restoreCtx,
-		Actor:                s.actor,
+		Actor:                s.requestActor(req.Principal, req.Actor),
 		Reason:               req.Reason,
 		FromNode:             frame.CurrentNodeID,
 		ToNode:               target.ID,
@@ -1244,40 +1436,10 @@ func groupStack(wc *model.WorkflowContent, id string) ([]string, error) {
 	return walk(wc.Nodes, nil)
 }
 
-func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*model.InputDelivery, error) {
-	if strings.TrimSpace(req.IdempotencyKey) == "" {
-		return nil, fmt.Errorf("%w: Idempotency-Key header is required", model.ErrInvalid)
-	}
-	if len(req.Payload) == 0 {
-		return nil, fmt.Errorf("%w: input body is required", model.ErrInvalid)
-	}
-	inst, err := s.instances.GetByID(ctx, req.InstanceID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Idempotent replay: an already recorded delivery for this key returns
-	// the stored result. Reusing a key with a different payload is a
-	// client error (409): the first delivery wins, so a corrected payload
-	// needs a fresh key.
-	if existing, err := s.instances.GetDeliveryByKey(ctx, inst.ID, req.IdempotencyKey); err == nil {
-		if !jsonEqual(existing.Payload, req.Payload) {
-			return nil, fmt.Errorf("%w: Idempotency-Key %q was already used with a different payload", model.ErrConflict, req.IdempotencyKey)
-		}
-		return existing, nil
-	} else if !errors.Is(err, repository.ErrDeliveryNotFound) {
-		return nil, err
-	}
-
-	switch inst.Status {
-	case model.WorkflowFinished, model.WorkflowFailed, model.WorkflowStopped:
-		return nil, fmt.Errorf("%w: instance %s is terminal", model.ErrConflict, req.InstanceID)
-	}
-
-	frame, err := model.ParseFrame(inst.Frame)
-	if err != nil {
-		return nil, err
-	}
+// contentGraph loads and materializes the executable graph of the
+// definition an instance was created from, so a delivery decision reads
+// the same node tree the engine executes.
+func (s *instanceService) contentGraph(ctx context.Context, inst *model.WorkflowInstance) (*contentGraph, error) {
 	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
 	if err != nil {
 		return nil, err
@@ -1290,13 +1452,114 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
-	graph := &contentGraph{wc: wc}
+	return &contentGraph{wc: wc}, nil
+}
+
+// replayDelivery answers a repeated delivery. The stored row is the first
+// writer's result and is never rewritten, but the caller is authorized
+// against the node that delivery targeted, so a key alone does not hand a
+// refused caller someone else's delivery. A mismatched payload is a
+// conflict: the first delivery wins, so a corrected payload needs a fresh
+// key. The target node is resolved fail-closed: a row whose node no longer
+// resolves, or resolves to something that is not an input, denies rather
+// than returning an unauthorized stored result.
+func (s *instanceService) replayDelivery(
+	ctx context.Context,
+	inst *model.WorkflowInstance,
+	graph *contentGraph,
+	existing *model.InputDelivery,
+	req DeliverInput,
+	p auth.Principal,
+) (*model.InputDelivery, error) {
+	if !jsonEqual(existing.Payload, req.Payload) {
+		return nil, fmt.Errorf("%w: Idempotency-Key %q was already used with a different payload", model.ErrConflict, req.IdempotencyKey)
+	}
+	// The row records the occurrence it targeted, so the gate reads the
+	// node the delivery actually addressed even when the instance has
+	// since advanced past it or finished.
+	occ, err := s.instances.GetNodeInstance(ctx, inst.ID, existing.NodeInstanceID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: delivery %s targets an unresolvable node instance", model.ErrForbidden, existing.ID)
+	}
+	nc, err := graph.Node(occ.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: delivery %s targets an unknown node %q", model.ErrForbidden, existing.ID, occ.NodeID)
+	}
+	if nc.Type != model.NodeTypeInput {
+		return nil, fmt.Errorf("%w: delivery %s targets node %q, which is not an input node", model.ErrForbidden, existing.ID, occ.NodeID)
+	}
+	if err := s.authorizeDelivery(ctx, inst, nc, p); err != nil {
+		return nil, err
+	}
+	return existing, nil
+}
+
+func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*model.InputDelivery, error) {
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		return nil, fmt.Errorf("%w: Idempotency-Key header is required", model.ErrInvalid)
+	}
+	if len(req.Payload) == 0 {
+		return nil, fmt.Errorf("%w: input body is required", model.ErrInvalid)
+	}
+	inst, err := s.instances.GetByID(ctx, req.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+
+	principal := s.deliveryPrincipal(req)
+	actor := s.deliveryActor(req, principal)
+	if err := authorizeInstance(inst, principal); err != nil {
+		return nil, err
+	}
+
+	// Idempotent replay: an already recorded delivery for this key returns
+	// the stored result. Reusing a key with a different payload is a client
+	// error (409): the first delivery wins, so a corrected payload needs a
+	// fresh key. The lookup comes first because a finished workflow no
+	// longer has a cursor: the replay is authorized against the node its
+	// own delivery targeted, which the row records.
+	existing, err := s.instances.GetDeliveryByKey(ctx, inst.ID, req.IdempotencyKey)
+	switch {
+	case err == nil:
+		graph, gerr := s.contentGraph(ctx, inst)
+		if gerr != nil {
+			return nil, gerr
+		}
+		return s.replayDelivery(ctx, inst, graph, existing, req, principal)
+	case !errors.Is(err, repository.ErrDeliveryNotFound):
+		return nil, err
+	}
+
+	// A terminal instance is refused once the key is known to be fresh, so a
+	// retry of the delivery that finished the workflow still replays its
+	// stored result.
+	switch inst.Status {
+	case model.WorkflowFinished, model.WorkflowFailed, model.WorkflowStopped:
+		return nil, fmt.Errorf("%w: instance %s is terminal", model.ErrConflict, req.InstanceID)
+	}
+
+	graph, err := s.contentGraph(ctx, inst)
+	if err != nil {
+		return nil, err
+	}
+	frame, err := model.ParseFrame(inst.Frame)
+	if err != nil {
+		return nil, err
+	}
 	inputNode, err := graph.Node(frame.CurrentNodeID)
 	if err != nil {
 		return nil, err
 	}
 	if inputNode.Type != model.NodeTypeInput {
 		return nil, fmt.Errorf("%w: current node is not an input node", model.ErrConflict)
+	}
+	// Authorization is decided here, once the node the delivery targets is
+	// known, and before the channel match, so a source header cannot skip
+	// the gate. The two gates are independent: a caller may hold
+	// input:deliver and still be refused by a node that does not list one
+	// of its roles.
+	if err := s.authorizeDelivery(ctx, inst, inputNode, principal); err != nil {
+		return nil, err
 	}
 	source := req.Source
 	if source == "" {
@@ -1333,7 +1596,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 				Payload:        req.Payload,
 				Accepted:       false,
 				Error:          err.Error(),
-				CreatedBy:      s.actor,
+				CreatedBy:      actor,
 			})
 		}
 	}
@@ -1349,7 +1612,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 			Payload:        req.Payload,
 			Accepted:       false,
 			Error:          vr.Message,
-			CreatedBy:      s.actor,
+			CreatedBy:      actor,
 		})
 	}
 
@@ -1365,7 +1628,11 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if key == "" {
 		key = inputNode.ID
 	}
-	newCtx[key] = payload
+	// The form schema, the validation script, and the post hook's frozen
+	// output global all see the raw payload. Only the context merge
+	// changes, so record_actor cannot be used to smuggle a different shape
+	// past validation.
+	newCtx[key] = inputContextValue(inputNode, principal, actor, payload)
 
 	// The post hook sees the accepted payload as a frozen output global and
 	// may transform the context after the payload was written.
@@ -1412,9 +1679,113 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		NewContext:     mustMarshal(newCtx),
 		Status:         status,
 		FinishedAt:     finished,
-		CreatedBy:      s.actor,
+		CreatedBy:      actor,
 		History:        s.leanInputHistory(inst, ctxMap, newCtx, attempt),
 	})
+}
+
+// inputContextValue is what an accepted delivery writes under the node's
+// output property. Without record_actor that is the bare payload, exactly
+// as before the field existed. With it, the value is the attribution
+// envelope, which carries the deliverer alongside the payload and nothing
+// else, so a template reads {{ key.input_data.x }} and the acting user
+// {{ key.user_id }}.
+func inputContextValue(nc *model.NodeContent, p auth.Principal, actor string, payload any) any {
+	if nc == nil || !nc.RecordActor {
+		return payload
+	}
+	userID := actor
+	if userID == "" {
+		userID = p.UserID
+	}
+	return map[string]any{
+		"user_id":    userID,
+		"input_data": payload,
+	}
+}
+
+// deliveryPrincipal resolves the caller of a delivery. A request that
+// carries no principal is the service principal: the broker consumers and
+// any internal caller carry no credential, and they are exactly the paths
+// the bypass matrix describes.
+func (s *instanceService) deliveryPrincipal(req DeliverInput) auth.Principal {
+	if req.Principal != nil {
+		return *req.Principal
+	}
+	return auth.SystemPrincipal(s.actor)
+}
+
+// deliveryActor picks the users.id uuid recorded on the delivery. An
+// explicit Actor wins, then the resolved principal's user id, then the
+// service default, so a delivery is never written without an actor.
+func (s *instanceService) deliveryActor(req DeliverInput, p auth.Principal) string {
+	if req.Actor != "" {
+		return req.Actor
+	}
+	if p.UserID != "" {
+		return p.UserID
+	}
+	return s.actor
+}
+
+// authorizeDelivery applies the two independent input gates. A service
+// principal passes both: it is a trusted internal caller with the wildcard
+// permission and no roles to intersect. A denial writes no delivery row and
+// records an input_forbidden audit event carrying the instance, the node,
+// and the refused roles, never the payload.
+func (s *instanceService) authorizeDelivery(
+	ctx context.Context,
+	inst *model.WorkflowInstance,
+	inputNode *model.NodeContent,
+	p auth.Principal,
+) error {
+	if p.Service {
+		return nil
+	}
+	if !p.HasPermission(auth.ActionInputDeliver, s.catalog) {
+		return s.denyInput(ctx, inst, inputNode, p, "the "+auth.ActionInputDeliver+" permission is required")
+	}
+	if !p.CanSatisfyRoles(inputNode.AllowedRoles) {
+		return s.denyInput(ctx, inst, inputNode, p,
+			"roles ["+strings.Join(inputNode.AllowedRoles, " ")+"] are required to deliver to this input node")
+	}
+	return nil
+}
+
+// denyInput records the refusal and returns the 403-mapped error. The event
+// names the instance, the node, and the roles the caller actually held, so
+// an operator can tell a wrong role from a missing permission. It never
+// carries the payload: a refused delivery is not data the engine stored.
+func (s *instanceService) denyInput(
+	ctx context.Context,
+	inst *model.WorkflowInstance,
+	inputNode *model.NodeContent,
+	p auth.Principal,
+	reason string,
+) error {
+	actor := p.UserID
+	if actor == "" {
+		actor = s.actor
+	}
+	roles := p.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	data, err := json.Marshal(map[string]any{
+		"node_id": inputNode.ID,
+		"channel": inputNode.Channel,
+		"reason":  reason,
+		"roles":   roles,
+		"subject": p.Subject,
+	})
+	if err != nil {
+		data = json.RawMessage(`{}`)
+	}
+	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
+		ID: mustNewID(), WorkflowInstanceID: inst.ID, Type: "input_forbidden",
+		Data: data, CreatedBy: actor, CreatedAt: nowUTC(),
+	})
+	return fmt.Errorf("%w: %s", model.ErrForbidden, reason)
 }
 
 // leanInputHistory computes the delivery diff in the service (DiffMaps of
@@ -1457,7 +1828,7 @@ func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.Wor
 		NodeStatus:     nodeStatus,
 		NewContext:     mustMarshal(ctxMap),
 		Error:          cause.Error(),
-		CreatedBy:      s.actor,
+		CreatedBy:      s.deliveryActor(req, s.deliveryPrincipal(req)),
 		History:        s.leanInputHistory(inst, reqCtx, ctxMap, attempt),
 	})
 }

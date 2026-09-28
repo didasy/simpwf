@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
@@ -141,6 +142,63 @@ func TestRunShutsDownGracefully(t *testing.T) {
 	if _, err := net.DialTimeout("tcp", host, 500*time.Millisecond); err == nil {
 		t.Error("server still listening after graceful shutdown")
 	}
+}
+
+// TestCheckAuthWiringRefusesUnattributableOIDC: with OIDC on, a missing
+// identity resolver or audit actor is refused at boot. The resolver gap
+// strands human principals; the actor gap silently attributes the service
+// principal and engine background effects to nobody. Neither reports itself
+// at request time.
+func TestCheckAuthWiringRefusesUnattributableOIDC(t *testing.T) {
+	svc := &stubAuthService{}
+	const actor = "00000000-0000-7000-8000-000000000001"
+
+	if err := checkAuthWiring(nil, nil, ""); err != nil {
+		t.Errorf("OIDC off with no resolver: error = %v, want nil", err)
+	}
+	if err := checkAuthWiring(nil, svc, actor); err != nil {
+		t.Errorf("OIDC off with a resolver: error = %v, want nil", err)
+	}
+	if err := checkAuthWiring(stubWiringVerifier{}, svc, actor); err != nil {
+		t.Errorf("OIDC on, resolver and actor present: error = %v, want nil", err)
+	}
+	if err := checkAuthWiring(stubWiringVerifier{}, nil, actor); err == nil {
+		t.Error("OIDC on without a resolver: error = nil, want a refusal")
+	}
+	for _, actor := range []string{"", "   "} {
+		if err := checkAuthWiring(stubWiringVerifier{}, svc, actor); err == nil {
+			t.Errorf("OIDC on with actor %q: error = nil, want a refusal", actor)
+		}
+	}
+}
+
+// stubWiringVerifier stands in for a configured OIDC verifier; the wiring
+// guard only ever asks whether one is present.
+type stubWiringVerifier struct{}
+
+func (stubWiringVerifier) Verify(context.Context, string) (auth.Principal, error) {
+	return auth.Principal{}, nil
+}
+
+func (stubWiringVerifier) Config() auth.AuthConfig {
+	return auth.AuthConfig{Enabled: true, Issuer: "https://issuer.test"}
+}
+
+// stubAuthService stands in for the wired auth service.
+type stubAuthService struct{}
+
+func (stubAuthService) ResolvePrincipal(_ context.Context, p auth.Principal) (auth.Principal, error) {
+	return p, nil
+}
+func (stubAuthService) SeedRoles(context.Context) error { return nil }
+func (stubAuthService) ListRoles(context.Context) ([]model.Role, map[string][]string, error) {
+	return nil, nil, nil
+}
+func (stubAuthService) GetRole(context.Context, string) (model.Role, []string, error) {
+	return model.Role{}, nil, nil
+}
+func (stubAuthService) Me(context.Context, auth.Principal) (model.User, error) {
+	return model.User{}, nil
 }
 
 // TestCompositionNilBrokerDependencies mirrors the app wiring with brokers

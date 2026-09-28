@@ -95,6 +95,15 @@ const inputNodeSchemaJSON = `{
       "required": ["schema"],
       "additionalProperties": false
     },
+    "allowed_roles": {
+      "type": "array",
+      "description": "Roles allowed to deliver to this input node, checked against the caller's live token roles after the endpoint permission. Absent or empty is open to any caller.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "record_actor": {
+      "type": "boolean",
+      "description": "Write {user_id, input_data} under output_property instead of the bare payload, so templates read {{ key.input_data.x }}. The service principal records the system user."
+    },
     "next_node": { "$ref": "#/$defs/nodeId" },
     "retry_on_recovery": { "type": "boolean" },
     "metadata": { "type": "object", "description": "Opaque metadata; never read by the engine." },

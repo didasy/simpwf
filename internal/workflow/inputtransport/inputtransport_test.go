@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/service"
@@ -23,16 +24,16 @@ type fakeInstanceService struct {
 func (f *fakeInstanceService) Create(context.Context, service.CreateInstance) (model.WorkflowInstance, error) {
 	return model.WorkflowInstance{}, nil
 }
-func (f *fakeInstanceService) List(context.Context, repository.InstanceListQuery) ([]model.WorkflowInstance, int64, error) {
+func (f *fakeInstanceService) List(context.Context, repository.InstanceListQuery, auth.Principal) ([]model.WorkflowInstance, int64, error) {
 	return nil, 0, nil
 }
-func (f *fakeInstanceService) GetStatus(context.Context, string) (*model.WorkflowInstance, error) {
+func (f *fakeInstanceService) GetStatus(context.Context, string, auth.Principal) (*model.WorkflowInstance, error) {
 	return nil, nil
 }
-func (f *fakeInstanceService) GetStatusDetail(context.Context, string) (*service.StatusDetail, error) {
+func (f *fakeInstanceService) GetStatusDetail(context.Context, string, auth.Principal) (*service.StatusDetail, error) {
 	return nil, nil
 }
-func (f *fakeInstanceService) GetContext(context.Context, string) (*model.WorkflowInstance, error) {
+func (f *fakeInstanceService) GetContext(context.Context, string, auth.Principal) (*model.WorkflowInstance, error) {
 	return nil, nil
 }
 func (f *fakeInstanceService) UpdateContext(context.Context, service.UpdateContext) (*model.WorkflowInstance, error) {
@@ -51,16 +52,16 @@ func (f *fakeInstanceService) DeliverInput(_ context.Context, req service.Delive
 		Accepted:           true,
 	}, nil
 }
-func (f *fakeInstanceService) NodeDebug(context.Context, string, string, int) (*service.NodeDebugDetail, error) {
+func (f *fakeInstanceService) NodeDebug(context.Context, string, string, int, auth.Principal) (*service.NodeDebugDetail, error) {
 	return nil, nil
 }
-func (f *fakeInstanceService) Pause(context.Context, string) (*service.ControlResult, error) {
+func (f *fakeInstanceService) Pause(context.Context, service.ControlRequest) (*service.ControlResult, error) {
 	return nil, nil
 }
-func (f *fakeInstanceService) Resume(context.Context, string) (*service.ControlResult, error) {
+func (f *fakeInstanceService) Resume(context.Context, service.ControlRequest) (*service.ControlResult, error) {
 	return nil, nil
 }
-func (f *fakeInstanceService) Stop(context.Context, string, string) (*service.ControlResult, error) {
+func (f *fakeInstanceService) Stop(context.Context, service.ControlRequest) (*service.ControlResult, error) {
 	return nil, nil
 }
 func (f *fakeInstanceService) Rollback(context.Context, service.RollbackRequest) (*service.RollbackResult, error) {
@@ -115,6 +116,41 @@ func TestRedisInputDeliversEnvelope(t *testing.T) {
 	var gotPayload any
 	if err := json.Unmarshal(got.Payload, &gotPayload); err != nil || gotPayload == nil {
 		t.Errorf("payload = %s, want JSON object", got.Payload)
+	}
+}
+
+// The broker consumers carry no credential, so they must reach the
+// delivery as the service principal: a nil Principal is what makes the
+// input node's role gate a no-op for them.
+func TestBrokerDeliveryCarriesNoPrincipal(t *testing.T) {
+	svc := &fakeInstanceService{}
+	in := NewRedisInput(&fakeRedisSubscriber{}, svc)
+	envelope := `{"idempotency_key":"broker-key","payload":{"ok":true}}`
+	if err := in.handle(context.Background(), "workflow:input:"+testInstanceID, []byte(envelope)); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	if len(svc.calls) != 1 {
+		t.Fatalf("deliver calls = %d, want 1", len(svc.calls))
+	}
+	if svc.calls[0].Principal != nil {
+		t.Errorf("Principal = %+v, want nil so the service treats it as the service principal", svc.calls[0].Principal)
+	}
+}
+
+func TestRabbitDeliveryCarriesNoPrincipal(t *testing.T) {
+	svc := &fakeInstanceService{}
+	in := NewRabbitInput(&fakeRabbitConsumer{}, svc, "consumer-1")
+	msg := rabbitMsg(`{"ok":1}`, map[string]string{
+		"NodeInstanceId": testInstanceID, "IdempotencyKey": "rabbit-key-1",
+	}, "")
+	if _, err := in.handle(context.Background(), msg); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	if len(svc.calls) != 1 {
+		t.Fatalf("deliver calls = %d, want 1", len(svc.calls))
+	}
+	if svc.calls[0].Principal != nil {
+		t.Errorf("Principal = %+v, want nil so the service treats it as the service principal", svc.calls[0].Principal)
 	}
 }
 
@@ -231,15 +267,39 @@ func TestRabbitInputRequeuesTransientFailures(t *testing.T) {
 }
 
 func TestRabbitInputRejectsPermanentDomainErrors(t *testing.T) {
-	svc := &fakeInstanceService{deliverErr: fmt.Errorf("%w: instance is terminal", model.ErrConflict)}
-	in := NewRabbitInput(&fakeRabbitConsumer{}, svc, "consumer-1")
-	res, err := in.handle(context.Background(), rabbitMsg(`{}`, map[string]string{
-		"NodeInstanceId": testInstanceID, "IdempotencyKey": "k",
-	}, ""))
-	if err != nil {
-		t.Fatalf("handle() error = %v, want nil", err)
+	cases := map[string]error{
+		"conflict":     fmt.Errorf("%w: instance is terminal", model.ErrConflict),
+		"invalid":      fmt.Errorf("%w: bad payload", model.ErrInvalid),
+		"not found":    fmt.Errorf("%w: no instance", model.ErrNotFound),
+		"forbidden":    fmt.Errorf("%w: roles are required", model.ErrForbidden),
+		"delivery 4xx": fmt.Errorf("%w: no delivery", repository.ErrDeliveryNotFound),
 	}
-	if res != transport.ConsumeReject {
-		t.Errorf("result = %v, want ConsumeReject", res)
+	for name, deliverErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc := &fakeInstanceService{deliverErr: deliverErr}
+			in := NewRabbitInput(&fakeRabbitConsumer{}, svc, "consumer-1")
+			res, err := in.handle(context.Background(), rabbitMsg(`{}`, map[string]string{
+				"NodeInstanceId": testInstanceID, "IdempotencyKey": "k",
+			}, ""))
+			if err != nil {
+				t.Fatalf("handle() error = %v, want nil", err)
+			}
+			if res != transport.ConsumeReject {
+				t.Errorf("result = %v, want ConsumeReject", res)
+			}
+		})
+	}
+}
+
+// A refusal is a decision about this message, not a transient fault: the
+// roles that were missing will still be missing on a redelivery, so the
+// message is dropped instead of looping on the queue forever.
+func TestRabbitInputTreatsForbiddenAsPermanent(t *testing.T) {
+	if !isPermanentInputError(fmt.Errorf("%w: roles [manager] are required", model.ErrForbidden)) {
+		t.Error("isPermanentInputError(ErrForbidden) = false, want true")
+	}
+	// A transient fault is still requeued.
+	if isPermanentInputError(errors.New("database connection refused")) {
+		t.Error("isPermanentInputError(transient) = true, want false")
 	}
 }

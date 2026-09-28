@@ -1,4 +1,4 @@
-h1:JGRkls9fqvuqBCloVIMXSSvowmsv2bthJmCF4dCUO0w=
+h1:8TehCtXGxwsqWmMIOti8xp8gQluq05aXETPWmBG0uG8=
 20260805024728.sql h1:ZxeSqFuGsHjUG5MjmjTMpZVyBjyQ4D+hOawuglmpnWY=
 20260805035830_add_node_id.sql h1:9+YSyAmpyKdjnTYAwJz5w+/OIPrdTg5exaN4qHytWIw=
 20260810091127_add_workflow_instance_audit_actors.sql h1:LYvdHYd3oI9Jd1isln3DuZamc50xaj0iKXxkR1uDQRg=
@@ -7,3 +7,5 @@ h1:JGRkls9fqvuqBCloVIMXSSvowmsv2bthJmCF4dCUO0w=
 20260907111000_add_lean_context.sql h1:az+v/YhFGabSA+01aMRwvw4MFwC6fXthTWWJ15ajcnw=
 20260923035910_add_debug_step_through.sql h1:qLO7YwSGR385/My7Sh42MGYu5Tk06JQ5hlev9uL99vE=
 20260925142000_add_secrets.sql h1:xIx9Trae8NhX03sU4Ixw2SSMTSJ9y8f9mTxy3SMyLaQ=
+20260926090000_add_oidc_identity_and_roles.sql h1:Ev2FF6HPjZUDUvGdZgdGtBSkAMt4tXURetbp7QkIRks=
+20260927120000_input_deliveries_instance_key_unique.sql h1:W9KRpKC34vvE/jG6CZM/zYQ9pWJr2y0l7Fs02gq3JT8=

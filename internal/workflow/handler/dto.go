@@ -90,6 +90,62 @@ type SecretResponse struct {
 	UpdatedAt   time.Time `json:"updated_at" validate:"required" format:"date-time"`
 }
 
+// -- auth ---------------------------------------------------------------------
+
+// AuthConfigResponse is the GET /v1/auth/config body. It is the public login
+// contract a frontend needs to start a code+PKCE flow; it carries no secret.
+// When Enabled is false the deployment has no OIDC login, and ApiTokenEnabled
+// says whether the X-Api-Token service credential is the only way in.
+type AuthConfigResponse struct {
+	Enabled  bool   `json:"enabled"`
+	Issuer   string `json:"issuer,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
+	// Audience is the value a token's aud claim must carry for this API. It
+	// is the verifier's audience, so a frontend knows whether to request a
+	// distinct resource audience or whether the client id already serves as
+	// one.
+	Audience         string   `json:"audience,omitempty"`
+	AuthorizationURL string   `json:"authorization_url,omitempty"`
+	TokenURL         string   `json:"token_url,omitempty"`
+	RolesClaim       string   `json:"roles_claim,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	ApiTokenEnabled  bool     `json:"api_token_enabled"`
+	// Roles is every role name the configured catalog knows, so a frontend
+	// can label a role before the caller has one.
+	Roles []string `json:"roles"`
+}
+
+// AuthMeResponse is the GET /v1/auth/me body: the identity behind the
+// credential, plus the effective permissions the UI can act on.
+type AuthMeResponse struct {
+	ID      string  `json:"id"`
+	Subject *string `json:"subject"`
+	Name    string  `json:"name"`
+	Email   string  `json:"email"`
+	// Roles are the roles the live token asserted. An empty array means the
+	// caller is authenticated but holds no role.
+	Roles []string `json:"roles"`
+	// Service marks the API-token principal, which bypasses authorization.
+	Service bool `json:"service"`
+	// Permission is the union of the caller's role permissions, or ["*"]
+	// for the service principal.
+	Permission []string `json:"permissions"`
+}
+
+// RoleResponse is one catalog role with the actions it grants.
+type RoleResponse struct {
+	Name        string    `json:"name"`
+	Description *string   `json:"description"`
+	Permissions []string  `json:"permissions"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// RoleListResponse is the GET /v1/roles body.
+type RoleListResponse struct {
+	Items []RoleResponse `json:"items"`
+}
+
 // -- instances ----------------------------------------------------------------
 
 // CreateInstanceRequest is the POST /v1/workflow/instance body.
@@ -162,6 +218,13 @@ type PendingInputResponse struct {
 	Channel        string        `json:"channel"`
 	OutputProperty string        `json:"output_property"`
 	Form           *InputFormDTO `json:"form"`
+	// AllowedRoles is the node's role gate. Empty means the node is open to
+	// any caller that holds input:deliver.
+	AllowedRoles []string `json:"allowed_roles"`
+	// RecordActor reports that an accepted delivery is written as the
+	// attribution envelope {user_id, input_data} rather than the bare
+	// payload, so the frontend knows which shape the context will hold.
+	RecordActor bool `json:"record_actor"`
 }
 
 // InputFormDTO carries the raw schema contract plus opaque ui render hints.

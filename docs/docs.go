@@ -68,11 +68,84 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/auth/config": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Get the OIDC login contract",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.AuthConfigResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/auth/me": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Get the authenticated caller",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.AuthMeResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/node/definition": {
             "get": {
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -155,6 +228,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -167,6 +252,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -203,6 +291,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "409": {
                         "description": "Conflict",
                         "schema": {
@@ -229,6 +329,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -260,6 +363,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -278,6 +393,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "tags": [
@@ -303,6 +421,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -324,11 +454,125 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/roles": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "List roles and their permissions",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.RoleListResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/roles/{name}": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Get one role and its permissions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Role name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.RoleResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/secrets": {
             "get": {
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -365,6 +609,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -377,6 +633,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -413,6 +672,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "409": {
                         "description": "Conflict",
                         "schema": {
@@ -439,6 +710,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -470,6 +744,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -488,6 +774,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "tags": [
@@ -513,6 +802,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -533,6 +834,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -575,6 +879,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -589,6 +905,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -665,6 +984,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -677,6 +1008,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -713,6 +1047,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "409": {
                         "description": "Conflict",
                         "schema": {
@@ -739,6 +1085,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -770,6 +1119,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -788,6 +1149,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "tags": [
@@ -809,6 +1173,18 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
@@ -839,6 +1215,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -907,6 +1286,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
@@ -919,6 +1310,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -955,6 +1349,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -987,6 +1393,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -1012,6 +1421,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.InstanceContextResponse"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1030,6 +1451,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -1079,6 +1503,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1111,6 +1547,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -1161,6 +1600,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1193,6 +1644,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -1224,6 +1678,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.PauseResponse"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1250,6 +1716,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -1273,6 +1742,18 @@ const docTemplate = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/internal_workflow_handler.ResumeResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
                     "404": {
@@ -1301,6 +1782,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "consumes": [
@@ -1344,6 +1828,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1376,6 +1872,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -1401,6 +1900,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.InstanceStatusResponse"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1421,6 +1932,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -1465,6 +1979,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.Problem"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1485,6 +2011,9 @@ const docTemplate = `{
                 "security": [
                     {
                         "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "produces": [
@@ -1510,6 +2039,18 @@ const docTemplate = `{
                             "$ref": "#/definitions/internal_workflow_handler.StopResponse"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -1533,6 +2074,84 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "internal_workflow_handler.AuthConfigResponse": {
+            "type": "object",
+            "properties": {
+                "api_token_enabled": {
+                    "type": "boolean"
+                },
+                "audience": {
+                    "description": "Audience is the value a token's aud claim must carry for this API. It\nis the verifier's audience, so a frontend knows whether to request a\ndistinct resource audience or whether the client id already serves as\none.",
+                    "type": "string"
+                },
+                "authorization_url": {
+                    "type": "string"
+                },
+                "client_id": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "issuer": {
+                    "type": "string"
+                },
+                "roles": {
+                    "description": "Roles is every role name the configured catalog knows, so a frontend\ncan label a role before the caller has one.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "roles_claim": {
+                    "type": "string"
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "token_url": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.AuthMeResponse": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "permissions": {
+                    "description": "Permission is the union of the caller's role permissions, or [\"*\"]\nfor the service principal.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "roles": {
+                    "description": "Roles are the roles the live token asserted. An empty array means the\ncaller is authenticated but holds no role.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "service": {
+                    "description": "Service marks the API-token principal, which bypasses authorization.",
+                    "type": "boolean"
+                },
+                "subject": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_workflow_handler.CreateInstanceRequest": {
             "type": "object",
             "properties": {
@@ -2018,6 +2637,13 @@ const docTemplate = `{
         "internal_workflow_handler.PendingInputResponse": {
             "type": "object",
             "properties": {
+                "allowed_roles": {
+                    "description": "AllowedRoles is the node's role gate. Empty means the node is open to\nany caller that holds input:deliver.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "channel": {
                     "type": "string"
                 },
@@ -2029,6 +2655,10 @@ const docTemplate = `{
                 },
                 "output_property": {
                     "type": "string"
+                },
+                "record_actor": {
+                    "description": "RecordActor reports that an accepted delivery is written as the\nattribution envelope {user_id, input_data} rather than the bare\npayload, so the frontend knows which shape the context will hold.",
+                    "type": "boolean"
                 }
             }
         },
@@ -2056,6 +2686,40 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.RoleListResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_workflow_handler.RoleResponse"
+                    }
+                }
+            }
+        },
+        "internal_workflow_handler.RoleResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "permissions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at": {
                     "type": "string"
                 }
             }
@@ -2218,9 +2882,15 @@ const docTemplate = `{
     },
     "securityDefinitions": {
         "ApiKeyAuth": {
-            "description": "API token authentication via the X-Api-Token header. Enabled when auth.enabled is true.",
+            "description": "API token authentication via the X-Api-Token header. The token authenticates as the service principal, which bypasses every authorization gate.",
             "type": "apiKey",
             "name": "X-Api-Token",
+            "in": "header"
+        },
+        "BearerAuth": {
+            "description": "OIDC bearer token, sent as \"Authorization: Bearer \u003cjwt\u003e\". The engine is a resource server: the frontend completes a code+PKCE flow against the provider and calls the API with the JWT. The authorization URL, client id, and scopes are served by GET /v1/auth/config.",
+            "type": "apiKey",
+            "name": "Authorization",
             "in": "header"
         }
     }

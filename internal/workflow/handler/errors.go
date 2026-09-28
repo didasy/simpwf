@@ -38,6 +38,7 @@ func WriteProblem(c *gin.Context, status int, detail string) {
 // StatusForError maps domain errors to HTTP status codes:
 //
 //	ErrNotFound      -> 404
+//	ErrForbidden     -> 403
 //	ErrConflict      -> 409
 //	ErrInvalid       -> 422
 //	ErrTerminalState -> 409
@@ -46,6 +47,8 @@ func StatusForError(err error) int {
 	switch {
 	case errors.Is(err, model.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, model.ErrForbidden):
+		return http.StatusForbidden
 	case errors.Is(err, model.ErrConflict), errors.Is(err, model.ErrTerminalState):
 		return http.StatusConflict
 	case errors.Is(err, model.ErrInvalid):

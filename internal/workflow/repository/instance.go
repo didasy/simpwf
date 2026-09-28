@@ -321,6 +321,9 @@ func (r *instanceRepo) List(ctx context.Context, q InstanceListQuery) ([]model.W
 	if len(q.Statuses) > 0 {
 		query = query.Where("status IN ?", q.Statuses)
 	}
+	if q.CreatedBy != "" {
+		query = query.Where("created_by = ?", q.CreatedBy)
+	}
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -834,7 +837,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 	if !c.Accepted {
 		m := InputDeliveryToModel(delivery)
 		res := r.db.WithContext(ctx).Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "node_instance_id"}, {Name: "idempotency_key"}},
+			Columns:   []clause.Column{{Name: "workflow_instance_id"}, {Name: "idempotency_key"}},
 			DoNothing: true,
 		}).Create(&m)
 		if res.Error != nil {
@@ -843,7 +846,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		if res.RowsAffected == 1 {
 			return &delivery, nil
 		}
-		return r.getDelivery(ctx, c.InstanceID, c.NodeInstanceID, c.IdempotencyKey)
+		return r.getDelivery(ctx, c.InstanceID, c.IdempotencyKey)
 	}
 	if c.PostFailure {
 		return r.failInput(ctx, c, &delivery)
@@ -856,7 +859,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		}
 		m := InputDeliveryToModel(delivery)
 		res := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "node_instance_id"}, {Name: "idempotency_key"}},
+			Columns:   []clause.Column{{Name: "workflow_instance_id"}, {Name: "idempotency_key"}},
 			DoNothing: true,
 		}).Create(&m)
 		if res.Error != nil {
@@ -937,7 +940,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		return nil
 	})
 	if errors.Is(err, errDeliveryExists) {
-		return r.getDelivery(ctx, c.InstanceID, c.NodeInstanceID, c.IdempotencyKey)
+		return r.getDelivery(ctx, c.InstanceID, c.IdempotencyKey)
 	}
 	if err != nil {
 		return nil, err
@@ -958,7 +961,7 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 		}
 		m := InputDeliveryToModel(*delivery)
 		res := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "node_instance_id"}, {Name: "idempotency_key"}},
+			Columns:   []clause.Column{{Name: "workflow_instance_id"}, {Name: "idempotency_key"}},
 			DoNothing: true,
 		}).Create(&m)
 		if res.Error != nil {
@@ -1035,7 +1038,7 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 		return nil
 	})
 	if errors.Is(err, errDeliveryExists) {
-		return r.getDelivery(ctx, c.InstanceID, c.NodeInstanceID, c.IdempotencyKey)
+		return r.getDelivery(ctx, c.InstanceID, c.IdempotencyKey)
 	}
 	if err != nil {
 		return nil, err
@@ -1043,11 +1046,15 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 	return delivery, nil
 }
 
+// GetDeliveryByKey returns the single delivery recorded for an idempotency
+// key in a workflow instance. uq_input_deliveries_instance_key makes that
+// key resolve to at most one row; the ordering is belt-and-braces, so the
+// answer does not depend on which row the planner happens to reach first.
 func (r *instanceRepo) GetDeliveryByKey(ctx context.Context, workflowInstanceID, idempotencyKey string) (*model.InputDelivery, error) {
 	var m InputDeliveryModel
 	if err := r.db.WithContext(ctx).
 		Where("workflow_instance_id = ? AND idempotency_key = ?", workflowInstanceID, idempotencyKey).
-		Order("created_at").
+		Order("created_at, id").
 		First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrDeliveryNotFound
@@ -1058,11 +1065,15 @@ func (r *instanceRepo) GetDeliveryByKey(ctx context.Context, workflowInstanceID,
 	return &d, nil
 }
 
-func (r *instanceRepo) getDelivery(ctx context.Context, instanceID, nodeInstanceID, idempotencyKey string) (*model.InputDelivery, error) {
+// getDelivery returns the delivery a key resolved to inside one workflow
+// instance. The lookup matches uq_input_deliveries_instance_key, so the node
+// occurrence is deliberately absent from the predicate: one key is one
+// delivery per instance, whichever node the caller names.
+func (r *instanceRepo) getDelivery(ctx context.Context, instanceID, idempotencyKey string) (*model.InputDelivery, error) {
 	var m InputDeliveryModel
 	if err := r.db.WithContext(ctx).
-		Where("workflow_instance_id = ? AND node_instance_id = ? AND idempotency_key = ?",
-			instanceID, nodeInstanceID, idempotencyKey).
+		Where("workflow_instance_id = ? AND idempotency_key = ?", instanceID, idempotencyKey).
+		Order("created_at, id").
 		First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrDeliveryNotFound

@@ -1,5 +1,68 @@
 basePath: /
 definitions:
+  internal_workflow_handler.AuthConfigResponse:
+    properties:
+      api_token_enabled:
+        type: boolean
+      audience:
+        description: |-
+          Audience is the value a token's aud claim must carry for this API. It
+          is the verifier's audience, so a frontend knows whether to request a
+          distinct resource audience or whether the client id already serves as
+          one.
+        type: string
+      authorization_url:
+        type: string
+      client_id:
+        type: string
+      enabled:
+        type: boolean
+      issuer:
+        type: string
+      roles:
+        description: |-
+          Roles is every role name the configured catalog knows, so a frontend
+          can label a role before the caller has one.
+        items:
+          type: string
+        type: array
+      roles_claim:
+        type: string
+      scopes:
+        items:
+          type: string
+        type: array
+      token_url:
+        type: string
+    type: object
+  internal_workflow_handler.AuthMeResponse:
+    properties:
+      email:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      permissions:
+        description: |-
+          Permission is the union of the caller's role permissions, or ["*"]
+          for the service principal.
+        items:
+          type: string
+        type: array
+      roles:
+        description: |-
+          Roles are the roles the live token asserted. An empty array means the
+          caller is authenticated but holds no role.
+        items:
+          type: string
+        type: array
+      service:
+        description: Service marks the API-token principal, which bypasses authorization.
+        type: boolean
+      subject:
+        type: string
+    type: object
   internal_workflow_handler.CreateInstanceRequest:
     properties:
       context:
@@ -325,6 +388,13 @@ definitions:
     type: object
   internal_workflow_handler.PendingInputResponse:
     properties:
+      allowed_roles:
+        description: |-
+          AllowedRoles is the node's role gate. Empty means the node is open to
+          any caller that holds input:deliver.
+        items:
+          type: string
+        type: array
       channel:
         type: string
       form:
@@ -333,6 +403,12 @@ definitions:
         type: string
       output_property:
         type: string
+      record_actor:
+        description: |-
+          RecordActor reports that an accepted delivery is written as the
+          attribution envelope {user_id, input_data} rather than the bare
+          payload, so the frontend knows which shape the context will hold.
+        type: boolean
     type: object
   internal_workflow_handler.Problem:
     properties:
@@ -350,6 +426,28 @@ definitions:
   internal_workflow_handler.ResumeResponse:
     properties:
       status:
+        type: string
+    type: object
+  internal_workflow_handler.RoleListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.RoleResponse'
+        type: array
+    type: object
+  internal_workflow_handler.RoleResponse:
+    properties:
+      created_at:
+        type: string
+      description:
+        type: string
+      name:
+        type: string
+      permissions:
+        items:
+          type: string
+        type: array
+      updated_at:
         type: string
     type: object
   internal_workflow_handler.RollbackRequest:
@@ -499,6 +597,49 @@ paths:
       summary: Readiness probe
       tags:
       - health
+  /v1/auth/config:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.AuthConfigResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      summary: Get the OIDC login contract
+      tags:
+      - auth
+  /v1/auth/me:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.AuthMeResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Get the authenticated caller
+      tags:
+      - auth
   /v1/node/definition:
     get:
       parameters:
@@ -552,12 +693,21 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: List node definitions
       tags:
       - node-definitions
@@ -582,6 +732,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "409":
           description: Conflict
           schema:
@@ -596,6 +754,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Create node definition
       tags:
       - node-definitions
@@ -614,6 +773,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -628,6 +795,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Delete node definition
       tags:
       - node-definitions
@@ -649,6 +817,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -659,9 +835,78 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get node definition
       tags:
       - node-definitions
+  /v1/roles:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.RoleListResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: List roles and their permissions
+      tags:
+      - auth
+  /v1/roles/{name}:
+    get:
+      parameters:
+      - description: Role name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.RoleResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Get one role and its permissions
+      tags:
+      - auth
   /v1/secrets:
     get:
       parameters:
@@ -684,12 +929,21 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: List secrets
       tags:
       - secrets
@@ -714,6 +968,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "409":
           description: Conflict
           schema:
@@ -728,6 +990,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Create secret
       tags:
       - secrets
@@ -746,6 +1009,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -756,6 +1027,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Delete secret
       tags:
       - secrets
@@ -777,6 +1049,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -787,6 +1067,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get secret
       tags:
       - secrets
@@ -816,12 +1097,21 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get workflow run statistics
       tags:
       - statistics
@@ -874,12 +1164,21 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: List workflow definitions
       tags:
       - workflow-definitions
@@ -904,6 +1203,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "409":
           description: Conflict
           schema:
@@ -918,6 +1225,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Create workflow definition
       tags:
       - workflow-definitions
@@ -936,6 +1244,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -950,6 +1266,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Delete workflow definition
       tags:
       - workflow-definitions
@@ -971,6 +1288,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -981,6 +1306,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get workflow definition
       tags:
       - workflow-definitions
@@ -1028,12 +1354,21 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: List workflow instances
       tags:
       - workflow-instances
@@ -1058,6 +1393,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1076,6 +1419,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Create workflow instance
       tags:
       - workflow-instances
@@ -1094,6 +1438,14 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/internal_workflow_handler.InstanceContextResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1104,6 +1456,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get workflow instance context
       tags:
       - workflow-instances
@@ -1137,6 +1490,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1155,6 +1516,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Replace workflow instance context
       tags:
       - workflow-instances
@@ -1190,6 +1552,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1208,6 +1578,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Deliver input to workflow instance
       tags:
       - workflow-instances
@@ -1230,6 +1601,14 @@ paths:
           description: Accepted
           schema:
             $ref: '#/definitions/internal_workflow_handler.PauseResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1244,6 +1623,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Pause workflow instance
       tags:
       - workflow-instances
@@ -1262,6 +1642,14 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/internal_workflow_handler.ResumeResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1276,6 +1664,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Resume workflow instance
       tags:
       - workflow-instances
@@ -1306,6 +1695,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1324,6 +1721,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Roll back a paused or failed instance to a prior node occurrence
       tags:
       - workflow-instances
@@ -1342,6 +1740,14 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/internal_workflow_handler.InstanceStatusResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1352,6 +1758,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get workflow instance status
       tags:
       - workflow-instances
@@ -1383,6 +1790,14 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1393,6 +1808,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Get workflow node debug detail
       tags:
       - workflow-instances
@@ -1411,6 +1827,14 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/internal_workflow_handler.StopResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
         "404":
           description: Not Found
           schema:
@@ -1425,6 +1849,7 @@ paths:
             $ref: '#/definitions/internal_workflow_handler.Problem'
       security:
       - ApiKeyAuth: []
+      - BearerAuth: []
       summary: Stop workflow instance
       tags:
       - workflow-instances
@@ -1432,9 +1857,17 @@ schemes:
 - http
 securityDefinitions:
   ApiKeyAuth:
-    description: API token authentication via the X-Api-Token header. Enabled when
-      auth.enabled is true.
+    description: API token authentication via the X-Api-Token header. The token authenticates
+      as the service principal, which bypasses every authorization gate.
     in: header
     name: X-Api-Token
+    type: apiKey
+  BearerAuth:
+    description: 'OIDC bearer token, sent as "Authorization: Bearer <jwt>". The engine
+      is a resource server: the frontend completes a code+PKCE flow against the provider
+      and calls the API with the JWT. The authorization URL, client id, and scopes
+      are served by GET /v1/auth/config.'
+    in: header
+    name: Authorization
     type: apiKey
 swagger: "2.0"

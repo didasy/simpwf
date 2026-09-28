@@ -22,6 +22,8 @@ func jsonCol(raw json.RawMessage, fallback string) datatypes.JSON {
 func UserToModel(u model.User) UserModel {
 	return UserModel{
 		ID:        u.ID,
+		Subject:   u.Subject,
+		Issuer:    u.Issuer,
 		Name:      u.Name,
 		Email:     u.Email,
 		Metadata:  jsonCol(u.Metadata, "{}"),
@@ -34,9 +36,52 @@ func UserToModel(u model.User) UserModel {
 func UserFromModel(m UserModel) model.User {
 	return model.User{
 		ID:        m.ID,
+		Subject:   m.Subject,
+		Issuer:    m.Issuer,
 		Name:      m.Name,
 		Email:     m.Email,
 		Metadata:  json.RawMessage(m.Metadata),
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}
+}
+
+// RoleToModel maps a domain role to its persistence model.
+func RoleToModel(r model.Role) RoleModel {
+	return RoleModel{
+		Name:        r.Name,
+		Description: r.Description,
+		CreatedAt:   r.CreatedAt,
+		UpdatedAt:   r.UpdatedAt,
+	}
+}
+
+// RoleFromModel maps a persistence role back to the domain.
+func RoleFromModel(m RoleModel) model.Role {
+	return model.Role{
+		Name:        m.Name,
+		Description: m.Description,
+		CreatedAt:   m.CreatedAt,
+		UpdatedAt:   m.UpdatedAt,
+	}
+}
+
+// RolePermissionToModel maps a domain role permission to persistence.
+func RolePermissionToModel(p model.RolePermission) RolePermissionModel {
+	return RolePermissionModel{
+		Role:      p.Role,
+		Action:    p.Action,
+		CreatedAt: p.CreatedAt,
+		UpdatedAt: p.UpdatedAt,
+	}
+}
+
+// RolePermissionFromModel maps a persistence role permission back to the
+// domain.
+func RolePermissionFromModel(m RolePermissionModel) model.RolePermission {
+	return model.RolePermission{
+		Role:      m.Role,
+		Action:    m.Action,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}

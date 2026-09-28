@@ -257,13 +257,18 @@ func TestDispatcherRetriesThenDeadLettersUnblocksNext(t *testing.T) {
 		}
 	}
 
+	// The webhook recorder only sees the request; the dispatcher marks the
+	// row delivered *after* the HTTP response, so sampling the rows the
+	// instant the third event lands races the dispatcher's own commit. Wait
+	// for the terminal state instead of assuming it is already visible.
 	var row1, row2 repository.StatusUpdateOutboxModel
-	if err := db.Where("id = ?", e1).First(&row1).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Where("id = ?", e2).First(&row2).Error; err != nil {
-		t.Fatal(err)
-	}
+	waitFor(t, func() bool {
+		if err := db.Where("id = ?", e1).First(&row1).Error; err != nil {
+			return false
+		}
+		return db.Where("id = ?", e2).First(&row2).Error == nil &&
+			row1.DeadAt != nil && row2.DeliveredAt != nil
+	}, 15*time.Second)
 	if row1.DeadAt == nil || row1.DeliveredAt != nil {
 		t.Errorf("e1 = %+v, want dead-lettered", row1)
 	}

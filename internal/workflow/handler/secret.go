@@ -29,8 +29,9 @@ func NewSecretHandler(svc service.SecretService) *SecretHandler {
 // @Produce json
 // @Param request body CreateSecretRequest true "Secret"
 // @Success 201 {object} SecretResponse
-// @Failure 400,409,422,500 {object} Problem
+// @Failure 401,403,400,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/secrets [post]
 func (h *SecretHandler) Create(c *gin.Context) {
 	var req CreateSecretRequest
@@ -58,8 +59,9 @@ func (h *SecretHandler) Create(c *gin.Context) {
 // @Param page query int false "Page number"
 // @Param per_page query int false "Items per page"
 // @Success 200 {object} ListResponse[SecretResponse]
-// @Failure 400,500 {object} Problem
+// @Failure 401,403,400,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/secrets [get]
 func (h *SecretHandler) List(c *gin.Context) {
 	page, perPage, err := parsePagination(c)
@@ -92,8 +94,9 @@ func (h *SecretHandler) List(c *gin.Context) {
 // @Produce json
 // @Param key path string true "Secret key"
 // @Success 200 {object} SecretResponse
-// @Failure 400,404,500 {object} Problem
+// @Failure 401,403,400,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/secrets/{key} [get]
 func (h *SecretHandler) Get(c *gin.Context) {
 	key := c.Param("key")
@@ -111,8 +114,9 @@ func (h *SecretHandler) Get(c *gin.Context) {
 // @Tags secrets
 // @Param key path string true "Secret key"
 // @Success 204
-// @Failure 400,404,500 {object} Problem
+// @Failure 401,403,400,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/secrets/{key} [delete]
 func (h *SecretHandler) Delete(c *gin.Context) {
 	key := c.Param("key")

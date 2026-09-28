@@ -149,6 +149,11 @@ func TestParseCustomNodeRejectsBuiltinKeys(t *testing.T) {
 		{"http_config", `{"type":"parsecustom","config":{"city":"x"},"http_config":{"url":"https://example.com"}}`, "does not support"},
 		{"keys", `{"type":"parsecustom","config":{"city":"x"},"keys":{"a":"11111111-1111-7111-8111-111111111111"}}`, "only valid for group"},
 		{"branches", `{"type":"parsecustom","config":{"city":"x"},"branches":{"a":"b"}}`, "branches is not supported"},
+		// A custom type is never an input node, so the input node's
+		// authorization surface is refused by the same guard as any other
+		// builtin executable field.
+		{"allowed_roles", `{"type":"parsecustom","config":{"city":"x"},"allowed_roles":["finance"]}`, "does not support"},
+		{"record_actor", `{"type":"parsecustom","config":{"city":"x"},"record_actor":true}`, "does not support"},
 	}
 	for _, c := range cases {
 		_, err := model.ParseNodeContent([]byte(c.raw), testLimits)

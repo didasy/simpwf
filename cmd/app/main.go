@@ -13,7 +13,12 @@ import (
 	// @securityDefinitions.apikey ApiKeyAuth
 	// @in header
 	// @name X-Api-Token
-	// @description API token authentication via the X-Api-Token header. Enabled when auth.enabled is true.
+	// @description API token authentication via the X-Api-Token header. The token authenticates as the service principal, which bypasses every authorization gate.
+	// @securityDefinitions.apikey BearerAuth
+	// @in header
+	// @name Authorization
+	// @description OIDC bearer token, sent as "Authorization: Bearer <jwt>". The engine is a resource server: the frontend completes a code+PKCE flow against the provider and calls the API with the JWT. The authorization URL, client id, and scopes are served by GET /v1/auth/config.
+	// @type apiKey
 
 	"context"
 	"errors"
@@ -22,10 +27,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/engine"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/handler"
@@ -66,6 +74,65 @@ func main() {
 	logger.Info("app stopped cleanly")
 }
 
+// warnAboutCatalog reports configured role permissions that will never take
+// effect. An unknown action is not rejected: the catalog is data, and a
+// deployment may legitimately grant an action a newer build gates on. But a
+// typo silently grants nothing, which is exactly the failure an operator
+// cannot see from the outside, so it is worth a boot-time line. A role name
+// that is blank once trimmed names nobody at all.
+func warnAboutCatalog(rolePermissions map[string][]string, logger *logrus.Logger) {
+	known := make(map[string]bool, len(auth.KnownActions()))
+	for _, action := range auth.KnownActions() {
+		known[action] = true
+	}
+	roles := make([]string, 0, len(rolePermissions))
+	for role := range rolePermissions {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		if strings.TrimSpace(role) == "" {
+			logger.Warnf("auth: a configured role name is blank and grants nothing")
+			continue
+		}
+		for _, action := range rolePermissions[role] {
+			action = strings.TrimSpace(action)
+			switch {
+			case action == "":
+				logger.Warnf("auth: role %q has a blank permission, which grants nothing", role)
+			case !known[action] && action != auth.WildcardAction:
+				logger.Warnf("auth: role %q grants unknown action %q; no route gates on it", role, action)
+			}
+		}
+	}
+}
+
+// checkAuthWiring refuses to boot an authentication setup that cannot name
+// the caller it just authenticated.
+//
+// OIDC resolves a verified token onto a users row just in time, keyed by
+// (subject, issuer); the human rows get their id from that upsert, not from
+// the configured actor. The dangerous case a blank audit actor creates is
+// narrower but still silent: the API-token service principal resolves to an
+// empty user id, as do the engine background effects that act as the
+// configured actor, so their created_by/updated_by rows are written empty
+// and the work is attributed to nobody. The failure is silent, so it is
+// cheaper to refuse the boot. Without OIDC the same misconfiguration only
+// affects the API-token service principal, which is optional, so it is left
+// to the configured default.
+func checkAuthWiring(verifier auth.Verifier, authSvc service.AuthService, actor string) error {
+	if verifier == nil {
+		return nil
+	}
+	if authSvc == nil {
+		return errors.New("oidc enabled without an identity resolver: the auth service is required")
+	}
+	if strings.TrimSpace(actor) == "" {
+		return errors.New("oidc enabled without a system user id: system.user_id is required")
+	}
+	return nil
+}
+
 // run starts the HTTP server and the dispatcher, and blocks until ctx is
 // cancelled, then shuts down gracefully. It returns nil on a clean shutdown.
 func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) error {
@@ -98,6 +165,35 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	nodeDefs := repository.NewNodeDefinitionRepository(db)
 	wfDefs := repository.NewWorkflowDefinitionRepository(db)
 	secrets := repository.NewSecretRepository(db)
+	users := repository.NewUserRepository(db)
+	roles := repository.NewRoleRepository(db)
+
+	// Authentication is configured, not discovered: the OIDC provider is
+	// contacted at startup so a wrong issuer or client id fails the boot
+	// rather than every request. With OIDC off, the nil verifier leaves the
+	// API-token service principal (or an unauthenticated deployment) as-is.
+	var oidcVerifier auth.Verifier
+	if cfg.Auth.OIDC.Enabled {
+		oidcAuth, err := auth.NewOIDCAuthenticator(ctx, cfg.Auth.OIDC)
+		if err != nil {
+			return fmt.Errorf("oidc: %w", err)
+		}
+		oidcVerifier = oidcAuth
+		logger.Infof("oidc enabled for issuer %s", cfg.Auth.OIDC.Issuer)
+	}
+	catalog := auth.CatalogFromConfig(cfg.Auth)
+	warnAboutCatalog(cfg.Auth.RolePermissions, logger)
+	authSvc := service.NewAuthService(users, roles, catalog, actor)
+	if err := checkAuthWiring(oidcVerifier, authSvc, actor); err != nil {
+		return err
+	}
+	// The catalog is upserted and its stale permissions pruned, but no role
+	// row is ever deleted: a role dropped from the config keeps its rows so
+	// an in-flight token still resolves it.
+	if err := authSvc.SeedRoles(ctx); err != nil {
+		return fmt.Errorf("seed roles: %w", err)
+	}
+
 	leanOpts := model.LeanOptions{
 		LeanContextDefault: cfg.Engine.LeanContextDefault,
 		AnchorEvery:        cfg.Engine.LeanAnchorEvery,
@@ -202,7 +298,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		return wfSvc.Materialize(ctx, wc)
 	}
 	eng := engine.NewEngine(instances, executors, hookRunner, limits, loader, actor, leanOpts)
-	instSvc := service.NewInstanceService(
+	instSvc := service.NewInstanceServiceWithCatalog(
 		instances,
 		wfDefs,
 		secrets,
@@ -213,6 +309,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		nodeLimits,
 		eng,
 		leanOpts,
+		catalog,
 	)
 	statsSvc := service.NewStatisticsService(instances)
 	hostname, _ := os.Hostname()
@@ -318,8 +415,12 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		Secrets:             secretSvc,
 		Instances:           instSvc,
 		Statistics:          statsSvc,
+		Auth:                authSvc,
 		SwaggerEnabled:      cfg.Infra.HTTP.SwaggerEnabled,
-		Auth:                cfg.Auth,
+		AuthSettings:        cfg.Auth,
+		OIDC:                oidcVerifier,
+		Catalog:             catalog,
+		SystemUserID:        actor,
 	})
 
 	srv := &http.Server{

@@ -144,7 +144,21 @@ services:
       SIMPWF_INFRA_RABBITMQ_OUTPUT_QUEUE: simpwf.output
       SIMPWF_INFRA_RABBITMQ_STATUS_QUEUE: simpwf.status
       SIMPWF_AUTH_ENABLED: "false"
+      # Only consulted when SIMPWF_AUTH_ENABLED is true; with authentication
+      # off the token is ignored and every route is open, exactly as before.
       SIMPWF_API_TOKEN: "wadidaw"
+      # OIDC resource server. Off by default so the local stack starts with
+      # no identity provider. To try a login, point SIMPWF_AUTH_OIDC_ISSUER
+      # at a reachable provider (Zitadel, Keycloak, Authentik, ...) and set
+      # the client id it was registered with; the frontend then reads the
+      # endpoints from GET /v1/auth/config and runs code+PKCE. The API is a
+      # resource server only, so no client secret belongs here.
+      SIMPWF_AUTH_OIDC_ENABLED: "${SIMPWF_AUTH_OIDC_ENABLED:-false}"
+      SIMPWF_AUTH_OIDC_ISSUER: "${SIMPWF_AUTH_OIDC_ISSUER:-}"
+      SIMPWF_AUTH_OIDC_CLIENT_ID: "${SIMPWF_AUTH_OIDC_CLIENT_ID:-}"
+      SIMPWF_AUTH_OIDC_AUDIENCE: "${SIMPWF_AUTH_OIDC_AUDIENCE:-}"
+      SIMPWF_AUTH_OIDC_ROLES_CLAIM: "${SIMPWF_AUTH_OIDC_ROLES_CLAIM:-roles}"
+      SIMPWF_AUTH_OIDC_USERNAME_CLAIM: "${SIMPWF_AUTH_OIDC_USERNAME_CLAIM:-name}"
       SIMPWF_WORKER_POOL_SIZE: "50"
       SIMPWF_ENGINE_DEFAULT_NODE_TIMEOUT: 30s
       SIMPWF_ENGINE_MAX_NODE_TIMEOUT: 5m
