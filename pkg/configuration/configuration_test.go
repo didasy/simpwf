@@ -256,6 +256,36 @@ func TestLoadEngineAllowlistsFromEnvCommaSeparated(t *testing.T) {
 	}
 }
 
+func TestLoadEnvDenyOverridesFromEnvCommaSeparated(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_ENGINE_ENV_DENY_EXTRA", "SIMPWF_OPENROUTER*,SIMPWF_FOO")
+	setenv(t, "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS", "SIMPWF_OPENROUTER_MODEL")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !slices.Equal(cfg.Engine.EnvDenyExtra, []string{"SIMPWF_OPENROUTER*", "SIMPWF_FOO"}) {
+		t.Errorf("env_deny_extra = %q", cfg.Engine.EnvDenyExtra)
+	}
+	if !slices.Equal(cfg.Engine.EnvAllowExceptions, []string{"SIMPWF_OPENROUTER_MODEL"}) {
+		t.Errorf("env_allow_exceptions = %q", cfg.Engine.EnvAllowExceptions)
+	}
+}
+
+func TestLoadRejectsInvalidEnvDenyGlob(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_ENGINE_ENV_DENY_EXTRA", "SIMPWF_[")
+	if _, err := configuration.Load(configuration.WithConfigFile(missingPath(t))); err == nil {
+		t.Fatal("Load() error = nil, want error for malformed glob")
+	}
+	setenv(t, "SIMPWF_ENGINE_ENV_DENY_EXTRA", "")
+	setenv(t, "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS", "SIMPWF_*[")
+	if _, err := configuration.Load(configuration.WithConfigFile(missingPath(t))); err == nil {
+		t.Fatal("Load() error = nil, want error for malformed allow glob")
+	}
+}
+
 func TestLoadRejectsMaxBelowDefault(t *testing.T) {
 	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
 	setenv(t, "SIMPWF_ENGINE_DEFAULT_NODE_TIMEOUT", "10m")

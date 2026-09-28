@@ -46,6 +46,7 @@ import (
 	"github.com/simpwf/workflow-engine/pkg/configuration"
 	_ "github.com/simpwf/workflow-engine/pkg/customnode/all"
 	"github.com/simpwf/workflow-engine/pkg/database"
+	"github.com/simpwf/workflow-engine/pkg/envsnapshot"
 	"github.com/sirupsen/logrus"
 )
 
@@ -136,6 +137,10 @@ func checkAuthWiring(verifier auth.Verifier, authSvc service.AuthService, actor 
 // run starts the HTTP server and the dispatcher, and blocks until ctx is
 // cancelled, then shuts down gracefully. It returns nil on a clean shutdown.
 func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) error {
+	// Env snapshot deny adjustments are global state read by every snapshot
+	// and render, so they are installed once here before any workflow runs.
+	envsnapshot.SetOverride(cfg.Engine.EnvDenyExtra, cfg.Engine.EnvAllowExceptions)
+
 	db, err := database.New(database.Options{DSN: cfg.Infra.PostgreSQL.DSN})
 	if err != nil {
 		return fmt.Errorf("database: %w", err)

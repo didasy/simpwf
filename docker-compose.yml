@@ -160,6 +160,11 @@ services:
       SIMPWF_AUTH_OIDC_ROLES_CLAIM: "${SIMPWF_AUTH_OIDC_ROLES_CLAIM:-roles}"
       SIMPWF_AUTH_OIDC_USERNAME_CLAIM: "${SIMPWF_AUTH_OIDC_USERNAME_CLAIM:-name}"
       SIMPWF_WORKER_POOL_SIZE: "50"
+      # SIMPWF_* is snapshotted per instance under {{ env.* }}, except the
+      # denied credentials: SIMPWF_API_TOKEN, SIMPWF_AUTH_*, SIMPWF_SYSTEM_*,
+      # and any SIMPWF_*_DSN (the DSNs set just above). A denied name resolves
+      # as "path not found". Extend or narrow with the patterns below, e.g.
+      # SIMPWF_ENGINE_ENV_DENY_EXTRA: "SIMPWF_OPENROUTER_KEY".
       SIMPWF_ENGINE_DEFAULT_NODE_TIMEOUT: 30s
       SIMPWF_ENGINE_MAX_NODE_TIMEOUT: 5m
       SIMPWF_ENGINE_CONDITION_TIMEOUT: 5s

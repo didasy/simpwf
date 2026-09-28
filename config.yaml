@@ -63,6 +63,19 @@ engine:
   exec_allowlist:
     - "echo"
     - "ls"
+  # Env snapshot deny list. At instance creation, SIMPWF_* process env is
+  # snapshotted into the instance context under the reserved env root, and
+  # these patterns are the credentials that never enter a workflow template:
+  # SIMPWF_API_TOKEN, SIMPWF_AUTH_*, SIMPWF_SYSTEM_*, and any SIMPWF_*_DSN
+  # (PostgreSQL, Redis, RabbitMQ). A denied name is dropped from the snapshot
+  # and {{ env.<denied> }} resolves as "path not found".
+  #
+  # Operator overrides: SIMPWF_ENGINE_ENV_DENY_EXTRA,
+  # SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS (comma-separated globs). These only
+  # extend or narrow the hardcoded defaults, never replace them; an invalid
+  # glob fails startup.
+  env_deny_extra: []
+  env_allow_exceptions: []
 
 # Authentication.
 #

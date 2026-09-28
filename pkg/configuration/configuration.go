@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -99,6 +100,12 @@ type Engine struct {
 	LeanContextDefault   bool          `mapstructure:"lean_context_default"`
 	LeanAnchorEvery      int           `mapstructure:"lean_anchor_every"`
 	LeanReplayMax        int           `mapstructure:"lean_replay_max"`
+	// EnvDenyExtra and EnvAllowExceptions adjust the hardcoded env snapshot
+	// deny list: extra adds patterns, allow narrows it with exceptions. They
+	// never replace the defaults, so a misconfiguration cannot silently open
+	// the whole namespace.
+	EnvDenyExtra       []string `mapstructure:"env_deny_extra"`
+	EnvAllowExceptions []string `mapstructure:"env_allow_exceptions"`
 }
 
 // System holds the configured audit actor (no auth yet).
@@ -200,6 +207,10 @@ func Load(opts ...Option) (*Config, error) {
 	_ = v.BindEnv("engine.lean_context_default", "SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT")
 	_ = v.BindEnv("engine.lean_anchor_every", "SIMPWF_ENGINE_LEAN_ANCHOR_EVERY")
 	_ = v.BindEnv("engine.lean_replay_max", "SIMPWF_ENGINE_LEAN_REPLAY_MAX")
+	// Env snapshot deny adjustments are operator toggles and must override
+	// config.yaml.
+	_ = v.BindEnv("engine.env_deny_extra", "SIMPWF_ENGINE_ENV_DENY_EXTRA")
+	_ = v.BindEnv("engine.env_allow_exceptions", "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS")
 
 	fileRead := false
 	if _, err := os.Stat(path); err == nil {
@@ -274,6 +285,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.lean_context_default", false)
 	v.SetDefault("engine.lean_anchor_every", 20)
 	v.SetDefault("engine.lean_replay_max", 500)
+	v.SetDefault("engine.env_deny_extra", []string{})
+	v.SetDefault("engine.env_allow_exceptions", []string{})
 	v.SetDefault("system.user_id", "00000000-0000-7000-8000-000000000001")
 	v.SetDefault("system.name", "system")
 	v.SetDefault("system.email", "system@localhost")
@@ -300,6 +313,12 @@ func (c *Config) validate() error {
 	}
 	if c.Engine.LeanReplayMax <= 0 {
 		return errors.New("configuration: engine.lean_replay_max must be > 0")
+	}
+	if err := validateEnvPatterns("engine.env_deny_extra", c.Engine.EnvDenyExtra); err != nil {
+		return err
+	}
+	if err := validateEnvPatterns("engine.env_allow_exceptions", c.Engine.EnvAllowExceptions); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Infra.RabbitMQ.DSN) != "" {
 		if strings.TrimSpace(c.Infra.RabbitMQ.InputQueue) == "" {
@@ -341,6 +360,22 @@ func (c *Config) validate() error {
 	// deployment has already served traffic attributed to nobody.
 	if !ids.Valid(c.System.UserID) {
 		return fmt.Errorf("configuration: system.user_id %q must be a canonical uuid", c.System.UserID)
+	}
+	return nil
+}
+
+// validateEnvPatterns rejects a malformed env deny/allow pattern. A pattern
+// that fails to compile would silently never match, leaving the operator's
+// intent unenforced, so it fails the boot instead.
+func validateEnvPatterns(field string, patterns []string) error {
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, err := path.Match(p, "SIMPWF_PROBE"); err != nil {
+			return fmt.Errorf("configuration: %s: %w", field, err)
+		}
 	}
 	return nil
 }

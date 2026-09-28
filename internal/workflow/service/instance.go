@@ -379,8 +379,10 @@ func (s *instanceService) Create(ctx context.Context, req CreateInstance) (model
 	// Snapshot SIMPWF_* process env under the reserved env root so every
 	// existing {{ }} render site resolves {{ env.SIMPWF_X }} with zero
 	// template-engine changes. Snapshot wins per key: callers cannot
-	// shadow env-provided credentials with request-body values.
-	obj["env"] = envsnapshot.Merge(obj["env"], envsnapshot.Snapshot(envsnapshot.Prefix))
+	// shadow env-provided credentials with request-body values. The
+	// caller-supplied base is stripped of denied names first, so a request
+	// body cannot smuggle a denied var past a snapshot that excluded it.
+	obj["env"] = envsnapshot.Merge(envsnapshot.StripDenied(obj["env"]), envsnapshot.Snapshot(envsnapshot.Prefix))
 	var secretSnapshot map[string]string
 	if s.secrets != nil {
 		secretSnapshot, err = s.secrets.GetAll(ctx)
@@ -853,6 +855,8 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 	}
 	// Carry stored env and secret snapshots forward. Replacement bodies must
 	// not drop them or inject values under reserved roots; stored values win.
+	// Denied names are stripped from the replacement body for the same reason
+	// they are excluded from the snapshot.
 	var storedEnv any
 	storedSecrets := map[string]string{}
 	cur, curErr := s.instances.GetByID(ctx, req.InstanceID)
@@ -870,7 +874,7 @@ func (s *instanceService) UpdateContext(ctx context.Context, req UpdateContext) 
 	} else if curErr != nil && !errors.Is(curErr, repository.ErrInstanceNotFound) {
 		return nil, curErr
 	}
-	obj["env"] = envsnapshot.Merge(obj["env"], toStringMap(storedEnv))
+	obj["env"] = envsnapshot.Merge(envsnapshot.StripDenied(obj["env"]), toStringMap(storedEnv))
 	mergeSecretSnapshot(obj, storedSecrets)
 	rebased, err := json.Marshal(obj)
 	if err != nil {

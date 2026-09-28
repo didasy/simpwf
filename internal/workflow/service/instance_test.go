@@ -370,6 +370,43 @@ func TestCreateMergesEnvSnapshot(t *testing.T) {
 	}
 }
 
+func TestCreateStripsDeniedEnvBase(t *testing.T) {
+	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", "host=localhost dbname=gorm")
+	t.Setenv("SIMPWF_API_TOKEN", "tok")
+	t.Setenv("SIMPWF_S3_ENDPOINT", "play.min.io:9000")
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	svc := svcInstanceService(db)
+
+	inst, err := svc.Create(ctx, service.CreateInstance{
+		WorkflowDefinitionID: wfID,
+		Context:              json.RawMessage(`{"env":{"SIMPWF_API_TOKEN":"evil","SIMPWF_S3_ENDPOINT":"caller"}}`),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(inst.Context, &m); err != nil {
+		t.Fatalf("parse stored context: %v", err)
+	}
+	env, ok := m["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("context = %s, want env root", inst.Context)
+	}
+	if _, ok := env["SIMPWF_API_TOKEN"]; ok {
+		t.Errorf("context = %s, denied key stored", inst.Context)
+	}
+	if _, ok := env["SIMPWF_INFRA_POSTGRESQL_DSN"]; ok {
+		t.Errorf("context = %s, denied DSN snapshotted", inst.Context)
+	}
+	if env["SIMPWF_S3_ENDPOINT"] != "play.min.io:9000" {
+		t.Errorf("env = %v, want snapshot to win for allowed key", env)
+	}
+}
+
 func TestCreateMergesSecretSnapshot(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
