@@ -21,6 +21,10 @@ type CreateNodeDefinition struct {
 	Type              string
 	PreviousVersionID *string
 	Content           json.RawMessage
+	// Actor is the users.id uuid recorded as created_by/updated_by. Empty
+	// falls back to the service default (the system user), so a service
+	// call, a test, or an unauthenticated deployment keeps working.
+	Actor string
 }
 
 // NodeDefinitionService is the use-case boundary for node definitions.
@@ -61,15 +65,23 @@ func (s *nodeDefinitionService) Create(ctx context.Context, req CreateNodeDefini
 	if nodeCarriesKeys(nc) {
 		return model.NodeDefinition{}, fmt.Errorf("%w: node definitions cannot carry workflow or group keys", model.ErrInvalid)
 	}
+	// A definition is the leaf of the reference chain: materializeNode
+	// substitutes it with a one-level copy of its own content and does not
+	// recurse, so a definition carrying its own node_definition_id would
+	// resolve to a node with no executable fields instead of failing.
+	if nc.NodeDefinitionID != "" {
+		return model.NodeDefinition{}, fmt.Errorf("%w: node definitions cannot carry node_definition_id; the content must be self-contained", model.ErrInvalid)
+	}
 
 	now := nowUTC()
+	actor := resolveActor(req.Actor, s.actor)
 	def := model.NodeDefinition{
 		ID:        mustNewID(),
 		Name:      req.Name,
 		Type:      req.Type,
 		Content:   req.Content,
-		CreatedBy: s.actor,
-		UpdatedBy: s.actor,
+		CreatedBy: actor,
+		UpdatedBy: actor,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

@@ -28,8 +28,9 @@ func NewNodeDefinitionHandler(svc service.NodeDefinitionService) *NodeDefinition
 // @Produce json
 // @Param request body CreateNodeDefinitionRequest true "Node definition"
 // @Success 201 {object} NodeDefinitionResponse
-// @Failure 400,409,422,500 {object} Problem
+// @Failure 401,403,400,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/node/definition [post]
 func (h *NodeDefinitionHandler) Create(c *gin.Context) {
 	var req CreateNodeDefinitionRequest
@@ -46,6 +47,7 @@ func (h *NodeDefinitionHandler) Create(c *gin.Context) {
 		Type:              req.Type,
 		PreviousVersionID: req.PreviousVersionID,
 		Content:           req.Content,
+		Actor:             principalActor(c),
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -69,8 +71,9 @@ func (h *NodeDefinitionHandler) Create(c *gin.Context) {
 // @Param latest_only query bool false "Only latest versions"
 // @Param type query string false "Node type"
 // @Success 200 {object} ListResponse[NodeDefinitionResponse]
-// @Failure 400,500 {object} Problem
+// @Failure 401,403,400,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/node/definition [get]
 func (h *NodeDefinitionHandler) List(c *gin.Context) {
 	q, err := ParseListQuery(c, ListKindNode)
@@ -103,8 +106,9 @@ func (h *NodeDefinitionHandler) List(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Definition ID"
 // @Success 200 {object} NodeDefinitionResponse
-// @Failure 400,404,500 {object} Problem
+// @Failure 401,403,400,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/node/definition/{id} [get]
 func (h *NodeDefinitionHandler) Get(c *gin.Context) {
 	id := c.Param("id")
@@ -126,8 +130,9 @@ func (h *NodeDefinitionHandler) Get(c *gin.Context) {
 // @Tags node-definitions
 // @Param id path string true "Definition ID"
 // @Success 204
-// @Failure 400,404,409,500 {object} Problem
+// @Failure 401,403,400,404,409,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/node/definition/{id} [delete]
 func (h *NodeDefinitionHandler) Delete(c *gin.Context) {
 	id := c.Param("id")

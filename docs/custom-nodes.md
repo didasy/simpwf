@@ -115,6 +115,13 @@ configs address them as `{{ env.SIMPWF_X }}`:
 
 - Only `SIMPWF_*` is visible. Anything else (`NOT_MINE`, `PATH`, …) never
   enters the context.
+- Credentials are denied, not snapshotted: `SIMPWF_API_TOKEN`, `SIMPWF_AUTH_*`,
+  `SIMPWF_SYSTEM_*`, and any `SIMPWF_*_DSN` (PostgreSQL/Redis/RabbitMQ DSNs)
+  are excluded, and `{{ env.<denied> }}` resolves as missing. Operators add
+  patterns with `engine.env_deny_extra` and narrow them with
+  `engine.env_allow_exceptions` (env: `SIMPWF_ENGINE_ENV_DENY_EXTRA`,
+  `SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS`, comma-separated globs); the hardcoded
+  defaults always apply, so the lists only ever tighten or extend.
 - The snapshot is per-instance, taken once at creation. Later process-env
   changes do not affect running instances.
 - Missing key = render error (`contextpath: path not found`), failing the

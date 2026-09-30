@@ -9,9 +9,20 @@ import (
 	"gorm.io/datatypes"
 )
 
-// UserModel persists model.User.
+// UserModel persists model.User. Subject and Issuer hold the OIDC provider
+// identity, so a just-in-time upsert can find the row again on the caller's
+// next request. Both are empty for a user with no provider identity (the
+// system user, and every locally created user), which is why the uniqueness
+// index is partial: a plain composite unique would allow exactly one such
+// row in the whole table and fail the second insert.
+//
+// Both tags must carry the same predicate. GORM derives one index from the
+// pair, and a mismatch in uniqueIndex or where between the two columns emits
+// a non-unique index, which would silently stop protecting the upsert.
 type UserModel struct {
 	ID        string         `gorm:"column:id;type:uuid;primaryKey"`
+	Subject   string         `gorm:"column:subject;not null;default:'';uniqueIndex:uq_users_subject_issuer,where:subject <> '',priority:1"`
+	Issuer    string         `gorm:"column:issuer;not null;default:'';uniqueIndex:uq_users_subject_issuer,where:subject <> '',priority:2"`
 	Name      string         `gorm:"column:name;not null"`
 	Email     string         `gorm:"column:email;not null"`
 	Metadata  datatypes.JSON `gorm:"column:metadata;type:jsonb;not null;default:'{}'"`
@@ -21,6 +32,29 @@ type UserModel struct {
 
 // TableName is the users table.
 func (UserModel) TableName() string { return "users" }
+
+// RoleModel persists model.Role. Roles are seeded from configuration, so the
+// catalog is owned by the deployment rather than by the API.
+type RoleModel struct {
+	Name        string    `gorm:"column:name;type:text;primaryKey"`
+	Description string    `gorm:"column:description;not null;default:''"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;not null"`
+}
+
+// TableName is the roles table.
+func (RoleModel) TableName() string { return "roles" }
+
+// RolePermissionModel persists model.RolePermission.
+type RolePermissionModel struct {
+	Role      string    `gorm:"column:role;type:text;primaryKey"`
+	Action    string    `gorm:"column:action;type:text;primaryKey"`
+	CreatedAt time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt time.Time `gorm:"column:updated_at;not null"`
+}
+
+// TableName is the role_permissions table.
+func (RolePermissionModel) TableName() string { return "role_permissions" }
 
 // SecretModel persists a secret value. Secret values must only be exposed to
 // the template execution path; API read paths return masked responses.
@@ -183,9 +217,9 @@ func (WorkflowInstanceEventModel) TableName() string { return "workflow_instance
 // InputDeliveryModel persists model.InputDelivery.
 type InputDeliveryModel struct {
 	ID                 string         `gorm:"column:id;type:uuid;primaryKey"`
-	WorkflowInstanceID string         `gorm:"column:workflow_instance_id;type:uuid;not null;index"`
+	WorkflowInstanceID string         `gorm:"column:workflow_instance_id;type:uuid;not null;index;uniqueIndex:uq_input_deliveries_instance_key,priority:1"`
 	NodeInstanceID     string         `gorm:"column:node_instance_id;type:uuid;not null;uniqueIndex:uq_input_deliveries_node_key"`
-	IdempotencyKey     string         `gorm:"column:idempotency_key;not null;uniqueIndex:uq_input_deliveries_node_key"`
+	IdempotencyKey     string         `gorm:"column:idempotency_key;not null;uniqueIndex:uq_input_deliveries_node_key;uniqueIndex:uq_input_deliveries_instance_key,priority:2"`
 	Payload            datatypes.JSON `gorm:"column:payload;type:jsonb;not null"`
 	Accepted           bool           `gorm:"column:accepted;not null;default:false"`
 	Error              string         `gorm:"column:error;not null;default:''"`

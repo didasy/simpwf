@@ -75,8 +75,15 @@ status notifications. Both stay fully disabled when their DSN is absent.
 - Status notifications: per-definition `status_update` webhooks and broker
   messages, delivered from a PostgreSQL transactional outbox, ordered per
   instance and per transport, at-least-once with shared idempotency keys.
-- Auth: optional `X-Api-Token` protection for all `/v1` endpoints
-  (`/health/*` stays public); Swagger UI at `/swagger/index.html`.
+- Auth: two independent credentials on `/v1` (`/health/*` stays public).
+  An OIDC bearer token authenticates a human; the engine is a stateless
+  resource server with no callback, so the frontend runs code+PKCE against
+  the provider and calls the API with the JWT. An `X-Api-Token` authenticates
+  the service principal, which bypasses every authorization gate and is
+  recorded as the system user. With neither configured, `/v1` is open as
+  before. Authorization is role-based over a config-owned action catalog
+  (see [Authentication and authorization](#authentication-and-authorization)).
+  Swagger UI at `/swagger/index.html`.
 
 ## How it works
 
@@ -109,7 +116,13 @@ state machines, and recovery semantics.
 - Go 1.26+
 - Docker and Docker Compose (fastest path, or a local PostgreSQL 16)
 - [Atlas CLI](https://atlasgo.io/) (schema migrations; the app never migrates)
-- `curl` and `jq` (for `scripts/seed.sh` and `scripts/e2e.sh`)
+- `curl` and `jq` (for `scripts/seed.sh`, `scripts/e2e.sh`, and
+  `scripts/e2e-oidc.sh`)
+- For `task e2e-oidc` only: `python3` with the `cryptography` package, and
+  the `openssl` CLI. The throwaway mock provider signs real RS256 JWTs
+  rather than serving unsigned ones, so the app verifies the signature
+  exactly as it would against Zitadel or Keycloak. Install with
+  `pip install cryptography`.
 - Optional: Redis 7, RabbitMQ 4 (only for broker transports)
 
 ## Quickstart
@@ -128,8 +141,10 @@ curl http://localhost:8080/health/ready
   RabbitMQ `5672`, management UI `http://localhost:15672` with
   `simpwf` / `simpwf`).
 - Swagger UI: `http://localhost:8080/swagger/index.html`.
-- Auth is disabled in the compose defaults. To require tokens, set
-  `SIMPWF_AUTH_ENABLED=true` and pass `X-Api-Token: wadidaw` on `/v1` calls.
+- Auth is disabled in the compose defaults. To require the service credential,
+  set `SIMPWF_AUTH_ENABLED=true` and pass `X-Api-Token: wadidaw` on `/v1` calls.
+  To accept human tokens too, set `SIMPWF_AUTH_OIDC_ISSUER` and
+  `SIMPWF_AUTH_OIDC_CLIENT_ID`.
 - Broker-free mode: unset `SIMPWF_INFRA_REDIS_DSN` and
   `SIMPWF_INFRA_RABBITMQ_DSN` on the `app` service.
 
@@ -184,6 +199,18 @@ curl -s http://localhost:8080/v1/workflow/instance/<INSTANCE_ID>/context
 `scripts/e2e.sh [BASE_URL] [WORKFLOW_JSON]` runs black-box API checks
 against a running app (pass an explicit workflow JSON file).
 
+`scripts/e2e-oidc.sh [APP_BASE_URL] [OIDC_ISSUER_URL]` does the same for
+authentication and authorization. It starts a throwaway mock identity
+provider (real RSA key, real JWKS) and drives the app the way a frontend
+would: a public login contract, a 401 with no credential, a token resolving
+to a stable user, the role catalog refusing a role without `roles:read`, a
+caller holding `input:deliver` still refused by a node that lists a
+different role, the same caller accepted once the role matches, and the
+`record_actor` envelope recording the deliverer. Set `SIMPWF_API_TOKEN` to
+also exercise the service-principal bypass. The app must be started with a
+catalog that grants the roles the script uses;
+`config.e2e-oidc.yaml` is a working example.
+
 ## Node types
 
 | Type          | Does                                                                             | Details                           |
@@ -208,21 +235,162 @@ and defaults, and `on_failure` payload shape.
 `config.yaml` holds infra, worker pool, engine limits, auth, and the
 system audit user. Key settings:
 
-| Key                                            | Default             | Notes                                                                                                   |
-| ---------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `infra.http.host`                                | `localhost:9999`      | Compose overrides to `0.0.0.0:8080`                                                                       |
-| `infra.http.swagger_enabled`                     | `true`                | Serves UI at `/swagger/index.html`                                                                        |
-| `infra.postgresql.dsn`                           | local `gorm` DSN      | pgx/postgres wire format                                                                                |
-| `infra.redis.dsn`                                | `""` (disabled)       | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                         |
-| `infra.rabbitmq.dsn`                             | `""` (disabled)       | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
-| `engine.default_node_timeout` / `max_node_timeout` | `30s` / `5m`            | Caps script, `external_call`, and `output` nodes                                                            |
-| `engine.condition_timeout`                       | `5s`                  | Fixed budget for conditions, input validation, poller predicates                                        |
-| `engine.http_allowlist`                          | loopback + examples | `"*"` allows any target (development only, logs a warning)                                                |
-| `engine.exec_allowlist`                          | `echo`, `ls`            | Direct argv only, never a shell                                                                         |
-| `auth.enabled` / `api_token`                       | `false`               | When enabled, `/v1` requires `X-Api-Token`                                                                  |
+| Key                                                  | Default             | Notes                                                                                                   |
+| ---------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `infra.http.host`                                      | `localhost:9999`      | Compose overrides to `0.0.0.0:8080`                                                                       |
+| `infra.http.swagger_enabled`                           | `true`                | Serves UI at `/swagger/index.html`                                                                        |
+| `infra.postgresql.dsn`                                 | local `gorm` DSN      | pgx/postgres wire format                                                                                |
+| `infra.redis.dsn`                                      | `""` (disabled)       | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                         |
+| `infra.rabbitmq.dsn`                                   | `""` (disabled)       | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
+| `engine.default_node_timeout` / `max_node_timeout`       | `30s` / `5m`            | Caps script, `external_call`, and `output` nodes                                                            |
+| `engine.condition_timeout`                             | `5s`                  | Fixed budget for conditions, input validation, poller predicates                                        |
+| `engine.http_allowlist`                                | loopback + examples | `"*"` allows any target (development only, logs a warning)                                                |
+| `engine.exec_allowlist`                                | `echo`, `ls`            | Direct argv only, never a shell                                                                         |
+| `auth.enabled` / `api_token`                             | `false`               | When enabled, `/v1` requires `X-Api-Token` (the service principal)                                          |
+| `auth.oidc.*`                                          | disabled            | OIDC resource server; needs `issuer` and `client_id`                                                        |
+| `auth.role_permissions` / `SIMPWF_AUTH_ROLE_PERMISSIONS` | file / `{}`           | Role-to-action catalog as YAML map or JSON object; env overrides file; invalid JSON fails startup       |
 
 List-valued keys accept comma-separated env values, e.g.
 `SIMPWF_ENGINE_HTTP_ALLOWLIST="api.example.com,jsonplaceholder.typicode.com"`.
+`SIMPWF_AUTH_ROLE_PERMISSIONS` takes a JSON object of role name to action
+list, e.g. `{"admin":["definitions:read","roles:read"]}`. A set value
+overrides the config file; blank falls back to it. Invalid JSON fails
+startup with a `configuration: SIMPWF_AUTH_ROLE_PERMISSIONS: invalid JSON`
+error.
+
+## Authentication and authorization
+
+Two independent credentials, and a role catalog on top of them.
+
+### Authenticating
+
+**OIDC bearer token (humans).** Set `auth.oidc.enabled`, `auth.oidc.issuer`,
+and `auth.oidc.client_id`. The engine is a *resource server only*: it never
+issues tokens, never redirects, and holds no client secret. A frontend reads
+`GET /v1/auth/config` (public, since that is exactly the request made before
+holding a token) to learn the issuer, client id, endpoints, and roles claim,
+then runs authorization-code + PKCE against the provider and calls the API
+with `Authorization: Bearer <jwt>`.
+
+The engine validates each token itself: discovery from the issuer, JWKS
+signature check, `iss`, `aud`, and `exp` with a configurable
+`auth.oidc.clock_skew`. No session, no cookie, no callback route.
+
+```bash
+curl http://localhost:9999/v1/auth/config
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9999/v1/auth/me
+```
+
+**API token (the service principal).** `auth.enabled` + `auth.api_token`
+accepts `X-Api-Token`. This principal bypasses every authorization gate —
+it exists so machines and the broker can drive instances. Treat it like a
+password, and never hand it to a browser. Broker deliveries (Redis, RabbitMQ)
+have no user identity at all and are likewise the service principal.
+
+With both disabled, `/v1` behaves exactly as it did before this feature:
+open.
+
+### Who the caller is
+
+Roles come from the live token (`auth.oidc.roles_claim`, default `roles`;
+arrays, a single string, and space-delimited strings all work), never from
+the database. A verified `(issuer, subject)` is just-in-time upserted into
+`users` on first sight, so a token for someone the instance has never seen
+still resolves to a stable `users.id` that later shows up in attribution.
+
+### Authorizing
+
+The catalog is configuration, not API state:
+
+```yaml
+auth:
+  role_permissions:
+    admin: ["*"]
+    finance: ["instances:read", "input:deliver"]
+    auditor: ["definitions:read", "instances:read", "statistics:read", "roles:read"]
+```
+
+Same catalog via env: `SIMPWF_AUTH_ROLE_PERMISSIONS='{"admin":["*"],"finance":["instances:read","input:deliver"]}'` (overrides the file).
+
+`"*"` is the wildcard: a role holding it passes every gate, the same bypass
+the service principal gets. The other two lines are the shipped defaults from
+`config.yaml`; read them as a starting point rather than a recommendation,
+because the point of a catalog is to grant the least each role needs.
+
+Every role in the catalog is seeded into the `roles` / `role_permissions`
+tables at startup so a frontend can read the catalog back. Each route declares
+the one action it needs:
+
+| Action                       | Covers                            |
+| ---------------------------- | --------------------------------- |
+| `definitions:read`             | node/workflow definition reads    |
+| `definitions:write`            | definition writes and deletes     |
+| `secrets:read` / `secrets:write` | secret reads / writes             |
+| `instances:create`             | instance creation                 |
+| `instances:read`               | status, context, node-debug reads |
+| `instances:update-context`     | context replacement               |
+| `input:deliver`                | the input endpoint gate           |
+| `instances:control`            | pause, resume, stop, rollback     |
+| `statistics:read`              | the statistics summary            |
+| `roles:read`                   | the role catalog                  |
+
+A role the token carries that is absent from the catalog grants nothing, so
+unknown roles deny by default. Seeding upserts the configured roles, prunes
+the permission rows of those roles that the configuration no longer grants,
+and never deletes a role: a role dropped from config keeps its rows but stops
+granting anything, because the grant is computed from the live token plus the
+configured catalog.
+
+`GET /v1/roles` and `GET /v1/roles/{name}` are read-only and need
+`roles:read`.
+
+### Input delivery has two gates
+
+`PUT /v1/workflow/instance/{id}/input` applies, in order:
+
+1. the endpoint permission `input:deliver`;
+2. the input node's `allowed_roles`, intersected with the caller's roles.
+
+Both are independent, so a caller holding `input:deliver` is still refused
+with **403** when the parked node does not list one of its roles. An absent
+or empty `allowed_roles` leaves the node open to any `input:deliver` holder.
+A refusal writes no delivery row and records an `input_forbidden` audit
+event without the payload.
+
+```yaml
+- type: input
+  id: "…"
+  name: Approval
+  channel: http
+  output_property: approval
+  allowed_roles: [manager]   # optional; absent or empty is open
+  record_actor: true         # optional; defaults to false
+```
+
+`allowed_roles` and `record_actor` belong to the node definition, not to the
+occurrence. An occurrence that references a reusable node definition cannot
+override them: it is rejected at parse time, because the occurrence does not
+know its own type until the definition is materialized, so a gate carried
+there would be silently dropped. Every occurrence of a definition therefore
+shares one gate. To park the same input node under a different gate, create a
+second node definition.
+
+### Attribution
+
+`record_actor: true` wraps the accepted payload in an envelope before it
+reaches the context:
+
+```json
+{ "user_id": "…", "input_data": { "approved": true } }
+```
+
+So templates read `{{ approval.input_data.approved }}` and
+`{{ approval.user_id }}`. The form schema, the validation script, and the
+post hook's `output` always see the **raw** payload, so validation code is
+unaffected. With `record_actor` absent or false the bare payload is written
+and existing definitions behave exactly as before. A broker or API-token
+delivery records the system user. Replaying an idempotency key returns the
+first writer's recorded delivery, attribution included.
 
 ## API reference
 
@@ -233,6 +401,10 @@ The authoritative contract is [api/openapi.yaml](api/openapi.yaml)
 | Method     | Path                                             | Purpose                                                                  |
 | ---------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
 | GET        | `/health/live`, `/health/ready`                      | Liveness / readiness (always public)                                     |
+| GET        | `/v1/auth/config`                                  | Public OIDC login contract                                               |
+| GET        | `/v1/auth/me`                                      | The authenticated caller (identity, roles, effective permissions)        |
+| GET        | `/v1/roles`                                        | Role catalog (needs `roles:read`)                                          |
+| GET        | `/v1/roles/{name}`                                 | One role and its permissions                                             |
 | POST       | `/v1/node/definition`                              | Create immutable node definition (201)                                   |
 | GET        | `/v1/node/definition`                              | List (paged, `latest_only`, `type`, ...)                                     |
 | GET/DELETE | `/v1/node/definition/{id}`                         | Get / delete (fails if referenced)                                       |
@@ -247,14 +419,16 @@ The authoritative contract is [api/openapi.yaml](api/openapi.yaml)
 | GET        | `/v1/workflow/instance/{id}/status`                | Status, counters, cursor, per-node `nodes` map, audit actors               |
 | GET/PUT    | `/v1/workflow/instance/{id}/context`               | Get full context / replace it (paused only, 409 on race)                 |
 | GET        | `/v1/workflow/instance/{id}/status/node/{node_id}` | Node debug (`?attempt=N`; `not_started` for never-run nodes)                 |
-| PUT        | `/v1/workflow/instance/{id}/input`                 | Deliver input (`Idempotency-Key` required, 202)                            |
+| PUT        | `/v1/workflow/instance/{id}/input`                 | Deliver input (`Idempotency-Key` required, 202; 403 by either input gate)  |
 | POST       | `/v1/workflow/instance/{id}/pause`                 | Pause (200 immediate / 202 deferred)                                     |
 | POST       | `/v1/workflow/instance/{id}/resume`                | Resume                                                                   |
 | POST       | `/v1/workflow/instance/{id}/stop`                  | Terminal stop (fences workers, cancels in-flight execution)              |
 | POST       | `/v1/workflow/instance/{id}/rollback`              | Roll back paused/failed instance to a prior occurrence (lands paused)    |
 
 Instance statuses: `waiting`, `running`, `paused`, `finished`, `failed`,
-`stopped`. Errors follow RFC 7807 `problem+json`.
+`stopped`. Errors follow RFC 7807 `problem+json`. A missing or invalid
+credential is **401**; a valid caller without the route's permission, or one
+refused by an input node's `allowed_roles`, is **403**.
 
 ### Secrets and templates
 
@@ -351,7 +525,9 @@ api/openapi.yaml           authoritative API contract
 docs/                      generated Swagger docs (via task swagger)
 migrations/                Atlas config + versioned SQL
 workflow.yaml              annotated sample workflow definition
-scripts/                   seed.sh (sample seed) + e2e.sh (black-box checks)
+scripts/                   seed.sh (sample seed), e2e.sh (black-box checks),
+                           e2e-oidc.sh (auth/RBAC/input-gate checks)
+config.e2e-oidc.yaml       app config for scripts/e2e-oidc.sh
 ```
 
 ## Further reading
@@ -388,6 +564,17 @@ is clean, and `task test` passes.
   is still arbitrary code execution by design.
 - Enable `auth.enabled` and set a strong `api_token` for any shared or
   production deployment. Treat tokens like passwords.
+- The API token is the **service principal** and bypasses every authorization
+  gate by design, so it is equivalent to full administrative access for any
+  workflow. Never send it from a browser or ship it in a frontend bundle; use
+  it only from trusted machine callers. Enabling OIDC alone does not restrict
+  it.
+- `GET /v1/auth/config` is intentionally public and returns no secret: it
+  carries only the issuer, client id, endpoints, and roles claim, which the
+  provider publishes anyway.
+- Roles are taken from the verified token, never from the request body, so a
+  caller cannot escalate by claiming a role in a parameter. A role absent
+  from `auth.role_permissions` grants nothing.
 - Found a vulnerability? Please use GitHub's private vulnerability
   reporting on this repository instead of opening a public issue, so a fix
   can land before disclosure.

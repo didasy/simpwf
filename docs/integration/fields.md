@@ -146,7 +146,10 @@ url/method/key/channel/queue. Header names and body property names never render.
 
 Reserved context roots (`env`, `secret`): snapshotted into every instance context at creation, readable everywhere
 context is readable. `env` holds process env vars starting `SIMPWF_` (`{{ env.SIMPWF_S3_ENDPOINT }}`,
-`context.env.SIMPWF_S3_ENDPOINT` in scripts); only that prefix ever enters context. `secret` holds the frozen
+`context.env.SIMPWF_S3_ENDPOINT` in scripts); only that prefix ever enters context, and denied credentials
+(`SIMPWF_API_TOKEN`, `SIMPWF_AUTH_*`, `SIMPWF_SYSTEM_*`, `SIMPWF_*_DSN`) are excluded — a denied name is dropped
+from the snapshot, stripped from any caller-supplied `env` root, and resolves as `contextpath: path not found` even
+if a value was written there, so a create body cannot inject one. `secret` holds the frozen
 `/v1/secrets` table keyed by secret key (`{{ secret.API_KEY }}`, `context.secret.API_KEY`). Definitions carry only the
 templates, never values. At creation the snapshot overlays any caller-supplied `env` root (snapshot wins per key) and
 the caller `secret` root is always discarded and replaced; context replace re-applies the stored snapshot the same

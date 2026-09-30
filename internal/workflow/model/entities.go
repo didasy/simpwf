@@ -7,13 +7,36 @@ import (
 	"time"
 )
 
-// User is an audit actor. No authentication is implemented yet; the
-// configured system user is the actor for all operations.
+// User is an audit actor. Authentication is a separate concern: this row
+// records who acted, and for an OIDC caller it also caches the provider
+// identity so the same human resolves to the same uuid across requests.
+// Subject and Issuer are the provider identity and are unique together;
+// both are empty for the configured system user.
 type User struct {
 	ID        string
+	Subject   string
+	Issuer    string
 	Name      string
 	Email     string
 	Metadata  json.RawMessage
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Role is a named bundle of resource-action permissions. Roles are seeded
+// from configuration at startup and are read-only over the API.
+type Role struct {
+	Name        string
+	Description string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// RolePermission grants one resource-action to a role. The pair is the
+// primary key; it is seeded from configuration and never written at runtime.
+type RolePermission struct {
+	Role      string
+	Action    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

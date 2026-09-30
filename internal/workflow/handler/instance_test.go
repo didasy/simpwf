@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/service"
+	"github.com/simpwf/workflow-engine/pkg/configuration"
 )
 
 const (
@@ -34,6 +37,7 @@ type fakeInstanceSvc struct {
 	updateCtxErr error
 	delivery     *model.InputDelivery
 	deliveryErr  error
+	deliverReq   *service.DeliverInput
 	nodeDebug    *service.NodeDebugDetail
 	nodeDebugErr error
 	pauseRes     *service.ControlResult
@@ -44,48 +48,57 @@ type fakeInstanceSvc struct {
 	stopErr      error
 	rollbackRes  *service.RollbackResult
 	rollbackErr  error
+	rollbackReq  *service.RollbackRequest
 	listQuery    repository.InstanceListQuery
 	listItems    []model.WorkflowInstance
 	listTotal    int64
 	listErr      error
+	// controls records each control call as verb:instanceID:actor, so a
+	// test can assert the authenticated caller was threaded through.
+	controls []string
 }
 
 func (f *fakeInstanceSvc) Create(_ context.Context, req service.CreateInstance) (model.WorkflowInstance, error) {
 	f.createReq = &req
 	return f.createInst, f.createErr
 }
-func (f *fakeInstanceSvc) GetStatus(_ context.Context, _ string) (*model.WorkflowInstance, error) {
+func (f *fakeInstanceSvc) GetStatus(_ context.Context, _ string, _ auth.Principal) (*model.WorkflowInstance, error) {
 	return f.statusInst, f.statusErr
 }
-func (f *fakeInstanceSvc) GetStatusDetail(_ context.Context, _ string) (*service.StatusDetail, error) {
+func (f *fakeInstanceSvc) GetStatusDetail(_ context.Context, _ string, _ auth.Principal) (*service.StatusDetail, error) {
 	return f.detail, f.statusErr
 }
-func (f *fakeInstanceSvc) GetContext(_ context.Context, _ string) (*model.WorkflowInstance, error) {
+func (f *fakeInstanceSvc) GetContext(_ context.Context, _ string, _ auth.Principal) (*model.WorkflowInstance, error) {
 	return f.contextInst, f.statusErr
 }
 func (f *fakeInstanceSvc) UpdateContext(_ context.Context, req service.UpdateContext) (*model.WorkflowInstance, error) {
 	f.updateCtxReq = &req
 	return f.updateCtxRes, f.updateCtxErr
 }
-func (f *fakeInstanceSvc) DeliverInput(_ context.Context, _ service.DeliverInput) (*model.InputDelivery, error) {
+func (f *fakeInstanceSvc) DeliverInput(_ context.Context, req service.DeliverInput) (*model.InputDelivery, error) {
+	f.deliverReq = &req
 	return f.delivery, f.deliveryErr
 }
-func (f *fakeInstanceSvc) NodeDebug(_ context.Context, _, _ string, _ int) (*service.NodeDebugDetail, error) {
+func (f *fakeInstanceSvc) NodeDebug(_ context.Context, _, _ string, _ int, _ auth.Principal) (*service.NodeDebugDetail, error) {
 	return f.nodeDebug, f.nodeDebugErr
 }
-func (f *fakeInstanceSvc) Pause(_ context.Context, _ string) (*service.ControlResult, error) {
+func (f *fakeInstanceSvc) Pause(_ context.Context, req service.ControlRequest) (*service.ControlResult, error) {
+	f.controls = append(f.controls, "pause:"+req.InstanceID+":"+req.Actor)
 	return f.pauseRes, f.pauseErr
 }
-func (f *fakeInstanceSvc) Resume(_ context.Context, _ string) (*service.ControlResult, error) {
+func (f *fakeInstanceSvc) Resume(_ context.Context, req service.ControlRequest) (*service.ControlResult, error) {
+	f.controls = append(f.controls, "resume:"+req.InstanceID+":"+req.Actor)
 	return f.resumeRes, f.resumeErr
 }
-func (f *fakeInstanceSvc) Stop(_ context.Context, _, _ string) (*service.ControlResult, error) {
+func (f *fakeInstanceSvc) Stop(_ context.Context, req service.ControlRequest) (*service.ControlResult, error) {
+	f.controls = append(f.controls, "stop:"+req.InstanceID+":"+req.Actor)
 	return f.stopRes, f.stopErr
 }
-func (f *fakeInstanceSvc) Rollback(_ context.Context, _ service.RollbackRequest) (*service.RollbackResult, error) {
+func (f *fakeInstanceSvc) Rollback(_ context.Context, req service.RollbackRequest) (*service.RollbackResult, error) {
+	f.rollbackReq = &req
 	return f.rollbackRes, f.rollbackErr
 }
-func (f *fakeInstanceSvc) List(_ context.Context, q repository.InstanceListQuery) ([]model.WorkflowInstance, int64, error) {
+func (f *fakeInstanceSvc) List(_ context.Context, q repository.InstanceListQuery, _ auth.Principal) ([]model.WorkflowInstance, int64, error) {
 	f.listQuery = q
 	return f.listItems, f.listTotal, f.listErr
 }
@@ -897,5 +910,72 @@ func TestInstanceListServiceError(t *testing.T) {
 	w := performJSON(r, http.MethodGet, "/v1/workflow/instance", "", nil)
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
+	}
+}
+
+// TestControlsThreadTheServicePrincipal is the end-to-end proof that the
+// authenticated caller reaches the audit actor: the handler reads the
+// principal off the request and the service records it. A control that
+// stopped an instance is only actionable if it names who stopped it.
+func TestControlsThreadTheServicePrincipal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &fakeInstanceSvc{
+		pauseRes:    &service.ControlResult{Status: model.WorkflowPaused},
+		resumeRes:   &service.ControlResult{Status: model.WorkflowWaiting},
+		stopRes:     &service.ControlResult{Status: model.WorkflowStopped},
+		rollbackRes: &service.RollbackResult{Status: model.WorkflowPaused},
+	}
+	r := NewRouter(Deps{
+		Health:       NewHealth(fakePinger{}),
+		Instances:    svc,
+		Auth:         &fakeAuthSvc{},
+		AuthSettings: configuration.Auth{Enabled: true, APIToken: "secret"},
+		Catalog:      auth.NewCatalog(map[string][]string{"op": {"*"}}),
+		SystemUserID: testSystemUserID,
+	})
+	headers := map[string]string{APIKeyHeader: "secret"}
+
+	performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/pause", "", headers)
+	performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/resume", "", headers)
+	performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/stop", "", headers)
+	performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/rollback",
+		`{"target_occurrence_id":"`+occurrenceID+`"}`, headers)
+
+	// A valid API token is the service principal, so every control must be
+	// attributed to the configured system user rather than left blank.
+	want := []string{
+		"pause:" + instanceID + ":" + testSystemUserID,
+		"resume:" + instanceID + ":" + testSystemUserID,
+		"stop:" + instanceID + ":" + testSystemUserID,
+	}
+	for i, w := range want {
+		if i >= len(svc.controls) || svc.controls[i] != w {
+			t.Fatalf("controls = %v, want prefix %v", svc.controls, want)
+		}
+	}
+	if svc.rollbackReq == nil {
+		t.Fatal("rollback request was not forwarded")
+	}
+	if svc.rollbackReq.Actor != testSystemUserID {
+		t.Errorf("rollback actor = %q, want the system user %q", svc.rollbackReq.Actor, testSystemUserID)
+	}
+	if svc.rollbackReq.TargetOccurrenceID != occurrenceID {
+		t.Errorf("rollback target = %q, want %q", svc.rollbackReq.TargetOccurrenceID, occurrenceID)
+	}
+}
+
+// An unauthenticated deployment must keep working: the actor falls back to
+// empty and the service applies its own default.
+func TestControlsWithoutAuthSendNoActor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &fakeInstanceSvc{pauseRes: &service.ControlResult{Status: model.WorkflowPaused}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
+
+	w := performJSON(r, http.MethodPost, "/v1/workflow/instance/"+instanceID+"/pause", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if len(svc.controls) != 1 || svc.controls[0] != "pause:"+instanceID+":" {
+		t.Errorf("controls = %v, want an empty actor", svc.controls)
 	}
 }

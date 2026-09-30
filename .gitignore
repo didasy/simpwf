@@ -1,4 +1,8 @@
+zitadel.sh
 push.sh
 run.sh
 clear.sh
 coverage.out
+docker-compose.yml.zitadel
+zitadel.docker-compose.yml
+zitadel.nginx.conf

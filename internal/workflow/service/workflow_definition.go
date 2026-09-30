@@ -16,6 +16,10 @@ type CreateWorkflowDefinition struct {
 	Name              string
 	PreviousVersionID *string
 	Content           json.RawMessage
+	// Actor is the users.id uuid recorded as created_by/updated_by. Empty
+	// falls back to the service default (the system user), so a service
+	// call, a test, or an unauthenticated deployment keeps working.
+	Actor string
 }
 
 // WorkflowDefinitionService is the use-case boundary for workflow
@@ -67,12 +71,13 @@ func (s *workflowDefinitionService) Create(ctx context.Context, req CreateWorkfl
 	}
 
 	now := nowUTC()
+	actor := resolveActor(req.Actor, s.actor)
 	def := model.WorkflowDefinition{
 		ID:        mustNewID(),
 		Name:      req.Name,
 		Content:   req.Content,
-		CreatedBy: s.actor,
-		UpdatedBy: s.actor,
+		CreatedBy: actor,
+		UpdatedBy: actor,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

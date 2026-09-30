@@ -66,13 +66,16 @@ func (r *RabbitInput) handle(ctx context.Context, msg transport.RabbitMessage) (
 }
 
 // isPermanentInputError classifies a delivery failure as never retryable.
-// Domain sentinel errors (invalid input, conflicts, missing rows) are
-// permanent; any other error (e.g. a database outage) is treated as
-// transient and requeued.
+// Domain sentinel errors (invalid input, conflicts, refusals, missing
+// rows) are permanent; any other error (e.g. a database outage) is treated
+// as transient and requeued. A refusal belongs here because it is a
+// decision about this message: the missing permission or role will still be
+// missing on a redelivery, so requeueing would loop the message forever.
 func isPermanentInputError(err error) bool {
 	return errors.Is(err, model.ErrInvalid) ||
 		errors.Is(err, model.ErrConflict) ||
 		errors.Is(err, model.ErrNotFound) ||
+		errors.Is(err, model.ErrForbidden) ||
 		errors.Is(err, repository.ErrInstanceNotFound) ||
 		errors.Is(err, repository.ErrNodeInstanceNotFound) ||
 		errors.Is(err, repository.ErrDeliveryNotFound)

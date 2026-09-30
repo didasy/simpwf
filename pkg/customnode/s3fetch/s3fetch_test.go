@@ -20,12 +20,17 @@ type fakeHTTP struct {
 	status int
 	err    error
 	gotURL string
+	// validateErr, when set, is what ValidateTarget returns — the node must
+	// refuse to build an S3 client for an endpoint the policy rejects.
+	validateErr error
 }
 
 func (f *fakeHTTP) Do(_ context.Context, _, target string, _ map[string]string, _ []byte, _ time.Duration) ([]byte, int, http.Header, error) {
 	f.gotURL = target
 	return f.body, f.status, http.Header{}, f.err
 }
+
+func (f *fakeHTTP) ValidateTarget(_ string) error { return f.validateErr }
 
 type fakeS3 struct {
 	putBucket string

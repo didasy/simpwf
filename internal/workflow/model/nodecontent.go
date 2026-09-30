@@ -26,6 +26,9 @@ const (
 	NodeTypePoller       NodeType = "poller"
 )
 
+// maxAllowedRoles bounds an input node's role gate. See parseAllowedRoles.
+const maxAllowedRoles = 64
+
 // Input channel names. An input node's channel fixes which transport may
 // deliver its payload; the engine parks the instance the same way for all
 // channels.
@@ -73,10 +76,21 @@ type NodeContent struct {
 	ContextPath      string            // output: source context path
 	Validation       *ValidationScript // input
 	Form             *InputForm        // input: dynamic form contract (schema + ui hints)
-	HTTP             *HTTPConfig       // external_call
-	Execution        *ExecutionConfig  // external_call
-	OutputProperty   string
-	NextNode         string
+	// AllowedRoles is the input node's second authorization gate. It is
+	// checked against the caller's live token roles after the endpoint
+	// permission, so a role may hold input:deliver and still be refused by
+	// a node that does not list it. Absent or empty means open, which is
+	// what every definition written before this field existed resolves to.
+	AllowedRoles []string `json:"allowed_roles,omitempty"`
+	// RecordActor wraps the accepted payload in the attribution envelope
+	// {user_id, input_data} instead of writing the bare payload under
+	// output_property. It is opt-in per node so a definition that predates
+	// the flag keeps producing the shape its templates already read.
+	RecordActor    bool             `json:"record_actor,omitempty"`
+	HTTP           *HTTPConfig      // external_call
+	Execution      *ExecutionConfig // external_call
+	OutputProperty string
+	NextNode       string
 	// OnFailure routes execution failures on external_call, poller, and
 	// custom nodes to a fallback node in the same scope without failing
 	// the workflow.
@@ -221,6 +235,8 @@ type rawNode struct {
 	ContextPath      *string                  `json:"context_path"`
 	Validation       *rawValidation           `json:"validation"`
 	Form             *rawForm                 `json:"form"`
+	AllowedRoles     []string                 `json:"allowed_roles"`
+	RecordActor      *bool                    `json:"record_actor"`
 	HTTPConfig       *rawHTTPConfig           `json:"http_config"`
 	ExecutionConfig  *rawExecutionConfig      `json:"execution_config"`
 	PollerHTTP       *rawPollerHTTPConfig     `json:"http"`
@@ -385,7 +401,12 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 			return nil, errors.New("input node does not support context_path; use output_property")
 		}
 		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
-			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil || len(r.Config) > 0 {
+			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil || len(r.Config) > 0 ||
+			// allowed_roles and record_actor are the input node's
+			// authorization surface. A reference resolves its type from the
+			// definition, so the occurrence cannot be judged here and
+			// materializing it would drop the fields silently.
+			len(r.AllowedRoles) > 0 || r.RecordActor != nil {
 			return nil, errors.New("node referencing a node_definition_id cannot carry inline executable fields")
 		}
 		nc.NodeDefinitionID = *r.NodeDefinitionID
@@ -494,6 +515,13 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 			return nil, err
 		}
 		nc.Form = form
+		nc.AllowedRoles, err = parseAllowedRoles(r.AllowedRoles)
+		if err != nil {
+			return nil, err
+		}
+		if r.RecordActor != nil {
+			nc.RecordActor = *r.RecordActor
+		}
 		nc.Timeout = limits.ConditionTimeout
 
 	case NodeTypeOutput:
@@ -731,10 +759,54 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 	if _, ok := LookupCustomType(string(nc.Type)); !ok && nc.Type != NodeTypeInput && r.Form != nil {
 		return nil, fmt.Errorf("node type %q does not support form", nc.Type)
 	}
+	// allowed_roles and record_actor are the input node's authorization
+	// surface, so no other builtin type may carry them. The guard sits
+	// after the type switch because a referenced node definition resolves
+	// its type from the definition, not from the occurrence.
+	if nc.Type != NodeTypeInput && (len(r.AllowedRoles) > 0 || r.RecordActor != nil) {
+		return nil, fmt.Errorf("node type %q does not support allowed_roles or record_actor", nc.Type)
+	}
 	if _, ok := LookupCustomType(string(nc.Type)); !ok && len(r.Config) > 0 {
 		return nil, fmt.Errorf("node type %q does not support config", nc.Type)
 	}
 	return nc, nil
+}
+
+// parseAllowedRoles normalizes the input node's role gate: entries are
+// trimmed and duplicates removed while keeping the authored order. A blank
+// entry is a refusal to name a role, not an open gate, so it is an error
+// rather than something to drop: silently deleting it would turn a typo
+// into an authorization the author did not intend. An absent or empty list
+// means the node is open to every caller that already passed the endpoint
+// permission.
+//
+// The list is bounded. A node is matched on every delivery attempt against
+// the caller's token roles, so a definition listing a very large number of
+// roles turns a single parked input node into quadratic work for whoever can
+// create definitions. 64 is far above any real gate and low enough that the
+// cost stays trivial; it is a guard against a pathological payload, not a
+// limit an author will meet.
+func parseAllowedRoles(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if len(raw) > maxAllowedRoles {
+		return nil, fmt.Errorf("allowed_roles has %d entries, at most %d are allowed", len(raw), maxAllowedRoles)
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for i, role := range raw {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("allowed_roles[%d] must be a non-empty role name", i)
+		}
+		if seen[role] {
+			continue
+		}
+		seen[role] = true
+		out = append(out, role)
+	}
+	return out, nil
 }
 
 // parseCustomNode resolves a custom node: it rejects every builtin
@@ -747,7 +819,10 @@ func parseCustomNode(nc *NodeContent, r *rawNode, limits NodeLimits) (*NodeConte
 	if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Validation != nil ||
 		r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil ||
 		r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil ||
-		r.Nodes != nil || r.StartNodeID != nil || r.ContextPath != nil {
+		r.Nodes != nil || r.StartNodeID != nil || r.ContextPath != nil ||
+		// A custom type is never an input node, so the input node's
+		// authorization surface is refused like any other builtin field.
+		len(r.AllowedRoles) > 0 || r.RecordActor != nil {
 		return nil, fmt.Errorf("node type %q does not support that field; custom nodes carry only type and config", nc.Type)
 	}
 	if len(r.Config) == 0 || strings.TrimSpace(string(r.Config)) == "null" {

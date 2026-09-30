@@ -27,8 +27,9 @@ func NewWorkflowDefinitionHandler(svc service.WorkflowDefinitionService) *Workfl
 // @Produce json
 // @Param request body CreateWorkflowDefinitionRequest true "Workflow definition"
 // @Success 201 {object} WorkflowDefinitionResponse
-// @Failure 400,409,422,500 {object} Problem
+// @Failure 401,403,400,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/definition [post]
 func (h *WorkflowDefinitionHandler) Create(c *gin.Context) {
 	var req CreateWorkflowDefinitionRequest
@@ -44,6 +45,7 @@ func (h *WorkflowDefinitionHandler) Create(c *gin.Context) {
 		Name:              req.Name,
 		PreviousVersionID: req.PreviousVersionID,
 		Content:           req.Content,
+		Actor:             principalActor(c),
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -66,8 +68,9 @@ func (h *WorkflowDefinitionHandler) Create(c *gin.Context) {
 // @Param version query int false "Version"
 // @Param latest_only query bool false "Only latest versions"
 // @Success 200 {object} ListResponse[WorkflowDefinitionResponse]
-// @Failure 400,500 {object} Problem
+// @Failure 401,403,400,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/definition [get]
 func (h *WorkflowDefinitionHandler) List(c *gin.Context) {
 	q, err := ParseListQuery(c, ListKindWorkflow)
@@ -100,8 +103,9 @@ func (h *WorkflowDefinitionHandler) List(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Definition ID"
 // @Success 200 {object} WorkflowDefinitionResponse
-// @Failure 400,404,500 {object} Problem
+// @Failure 401,403,400,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/definition/{id} [get]
 func (h *WorkflowDefinitionHandler) Get(c *gin.Context) {
 	id := c.Param("id")
@@ -123,8 +127,9 @@ func (h *WorkflowDefinitionHandler) Get(c *gin.Context) {
 // @Tags workflow-definitions
 // @Param id path string true "Definition ID"
 // @Success 204
-// @Failure 400,404,409,500 {object} Problem
+// @Failure 401,403,400,404,409,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/definition/{id} [delete]
 func (h *WorkflowDefinitionHandler) Delete(c *gin.Context) {
 	id := c.Param("id")

@@ -160,10 +160,30 @@ func stripScheme(endpoint string) string {
 	return endpoint
 }
 
-// httpDo is the subset of HTTPExecutor the s3fetch node needs. It is an
-// interface (not *executor.HTTPExecutor) so unit tests can fake it.
+// s3EndpointURL rebuilds an absolute http(s) URL from a bare S3
+// host:port so it can be checked against the engine's outbound policy.
+// The path is the bucket, matching how the S3 client addresses the target.
+func s3EndpointURL(endpoint string, useSSL bool) string {
+	scheme := "https://"
+	if !useSSL {
+		scheme = "http://"
+	}
+	return scheme + endpoint + "/"
+}
+
+// httpDo is the subset of executor.HTTPExecutor the s3fetch node needs. It is
+// an interface (not *executor.HTTPExecutor) so unit tests can fake it.
+//
+// ValidateTarget is the executor's own SSRF policy (scheme + allowlist +
+// DNS + redirect revalidation). The S3 connection is an outbound request
+// like any other, so the rendered endpoint must clear that same policy
+// before a client is built for it; otherwise the minio client dials a
+// host the engine would refuse.
+//
+// *executor.HTTPExecutor satisfies this interface.
 type httpDo interface {
 	Do(ctx context.Context, method, target string, headers map[string]string, body []byte, timeout time.Duration) ([]byte, int, http.Header, error)
+	ValidateTarget(target string) error
 }
 
 // S3Client is the subset of the minio client the node needs, so unit tests
@@ -284,6 +304,21 @@ func (e *Executor) Execute(ctx context.Context, req executor.Request) (*executor
 	if err != nil {
 		return nil, &executor.NodeError{Node: req.Node, Reason: "s3fetch", Err: fmt.Errorf("endpoint: %w", err)}
 	}
+	useSSL := true
+	if cfg.UseSSL != nil {
+		useSSL = *cfg.UseSSL
+	}
+	// The rendered endpoint is attacker-influenceable (it may be a template
+	// over instance context), and the S3 client signs every request with the
+	// node's access key. Enforce the engine's outbound HTTP policy on it so
+	// this node cannot reach a host the rest of the engine refuses, and
+	// cannot forward the access key id to one.
+	if e.http == nil {
+		return nil, &executor.NodeError{Node: req.Node, Reason: "s3fetch", Err: fmt.Errorf("shared HTTP client is not configured")}
+	}
+	if err := e.http.ValidateTarget(s3EndpointURL(stripScheme(endpoint), useSSL)); err != nil {
+		return nil, &executor.NodeError{Node: req.Node, Reason: "s3fetch", Err: fmt.Errorf("endpoint: %w", err)}
+	}
 	bucket, err := renderField(cfg.Bucket, tplCtx)
 	if err != nil {
 		return nil, &executor.NodeError{Node: req.Node, Reason: "s3fetch", Err: fmt.Errorf("bucket: %w", err)}
@@ -299,10 +334,6 @@ func (e *Executor) Execute(ctx context.Context, req executor.Request) (*executor
 	secretKey, err := renderField(cfg.SecretKey, tplCtx)
 	if err != nil {
 		return nil, &executor.NodeError{Node: req.Node, Reason: "s3fetch", Err: fmt.Errorf("secret_key: %w", err)}
-	}
-	useSSL := true
-	if cfg.UseSSL != nil {
-		useSSL = *cfg.UseSSL
 	}
 	newClient := e.newClient
 	if newClient == nil {

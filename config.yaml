@@ -63,14 +63,105 @@ engine:
   exec_allowlist:
     - "echo"
     - "ls"
+  # Env snapshot deny list. At instance creation, SIMPWF_* process env is
+  # snapshotted into the instance context under the reserved env root, and
+  # these patterns are the credentials that never enter a workflow template:
+  # SIMPWF_API_TOKEN, SIMPWF_AUTH_*, SIMPWF_SYSTEM_*, and any SIMPWF_*_DSN
+  # (PostgreSQL, Redis, RabbitMQ). A denied name is dropped from the snapshot
+  # and {{ env.<denied> }} resolves as "path not found".
+  #
+  # Operator overrides: SIMPWF_ENGINE_ENV_DENY_EXTRA,
+  # SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS (comma-separated globs). These only
+  # extend or narrow the hardcoded defaults, never replace them; an invalid
+  # glob fails startup.
+  env_deny_extra: []
+  env_allow_exceptions: []
 
-# Optional API token authentication. When enabled, every /v1 endpoint
-# requires the X-Api-Token header; /health/* stays public. The token
-# may also be set via the SIMPWF_API_TOKEN environment variable when no
-# config file is present.
+# Authentication.
+#
+# Two credentials are accepted, and they are independent:
+#
+#   * X-Api-Token authenticates the service principal. It bypasses every
+#     authorization gate, so treat it as a machine credential. The broker
+#     input consumers act as the same principal because they carry no JWT.
+#   * OIDC bearer tokens authenticate a human. The engine is a stateless
+#     resource server: the frontend runs code+PKCE against the provider and
+#     calls the API with the resulting JWT. There is no callback and no
+#     session on this side.
+#
+# With auth.enabled false and oidc.enabled false, /v1 stays open exactly as
+# before this section existed.
 auth:
   enabled: false
   api_token: ""
+
+  # OIDC resource-server settings. Any compliant provider works; the
+  # frontend reads the login contract (issuer, client_id, endpoints, roles
+  # claim) from GET /v1/auth/config, so nothing here is provider-specific.
+  oidc:
+    enabled: false
+    issuer: "https://issuer.example.com"
+    # The aud claim a token must carry for this API to accept it. Empty
+    # falls back to client_id, which is the usual case for a single
+    # resource server; set it only when the provider issues a distinct
+    # resource audience. GET /v1/auth/config reports the effective value in
+    # "audience" so a frontend does not have to know the fallback.
+    client_id: "simpwf"
+    audience: ""
+    # Claim carrying the caller's roles. Accepts an array of strings, a
+    # single string, or a space-delimited string.
+    roles_claim: "roles"
+    # Claim used as the display name; falls back to preferred_username and
+    # then email when the named claim is absent.
+    username_claim: "name"
+    # Tolerance for clock drift on a token's exp. A token that expired less
+    # than clock_skew ago is retried against a widened window, and only
+    # then: a skew never relaxes the signature, issuer, or audience
+    # checks. It does not cover nbf, so a token issued ahead of this
+    # clock is still rejected.
+    clock_skew: 1m
+    # How long a fetched JWKS stays fresh before the next verification
+    # re-reads it. This is the bound on provider traffic, not just a
+    # freshness hint: a rejected token never forces its own fetch, so a
+    # flood of bad tokens costs one JWKS read per window rather than one
+    # each. Raising it means a rotated key takes longer to take effect;
+    # lowering it below 1m is clamped, because re-reading more often is the
+    # provider-amplification problem the bound exists to prevent.
+    cache_ttl: 5m
+
+  # Equivalent env var: SIMPWF_AUTH_ROLE_PERMISSIONS (JSON object). A set
+  # value overrides this file section; blank falls back to it.
+  # Role catalog: role name to the resource-actions it grants. At startup it
+  # upserts the role and permission rows and prunes the permission rows of
+  # these roles that are no longer granted; no role row is ever deleted. A
+  # role the token carries that is absent here grants nothing, so an unknown
+  # role denies by default.
+  #
+  # Actions: definitions:read, definitions:write, secrets:read,
+  # secrets:write, instances:create, instances:read,
+  # instances:update-context, input:deliver, instances:control,
+  # statistics:read, roles:read.
+  role_permissions:
+    admin:
+      - "definitions:read"
+      - "definitions:write"
+      - "secrets:read"
+      - "secrets:write"
+      - "instances:create"
+      - "instances:read"
+      - "instances:update-context"
+      - "input:deliver"
+      - "instances:control"
+      - "statistics:read"
+      - "roles:read"
+    finance:
+      - "instances:read"
+      - "input:deliver"
+    auditor:
+      - "definitions:read"
+      - "instances:read"
+      - "statistics:read"
+      - "roles:read"
 
 # The configured system user is the audit actor for engine and service
 # side effects.

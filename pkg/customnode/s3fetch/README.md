@@ -113,6 +113,10 @@ only (reports, thumbnails, CSVs), not multi-GB objects.
 
 Only `SIMPWF_*` process env is visible to workflows, snapshotted at
 instance creation under the reserved `env` root (`{{ env.SIMPWF_X }}`).
+Denied credentials (`SIMPWF_API_TOKEN`, `SIMPWF_AUTH_*`, `SIMPWF_SYSTEM_*`,
+`SIMPWF_*_DSN`) are never snapshotted and resolve as missing, so the
+endpoint/keys above work while the deployment's own credentials cannot be
+read this way.
 Workflow authors who can set config templates can exfiltrate those
 values via outputs — treat workflow authoring as trusted, same as
 script nodes that can already read full context.

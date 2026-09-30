@@ -1746,3 +1746,137 @@ func TestInstanceListPagination(t *testing.T) {
 		}
 	}
 }
+
+// One idempotency key is one delivery per workflow instance. The narrower
+// (node_instance_id, idempotency_key) index alone let the same key be
+// recorded against two different node occurrences, while the replay lookup
+// is by instance; uq_input_deliveries_instance_key closes that gap, so a
+// conflicting insert is refused by the database rather than by luck.
+func TestInputDeliveryKeyIsUniquePerInstance(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	instanceID := "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaa70"
+	insertInstance(t, db, newTestInstance(instanceID, model.WorkflowWaiting, model.WaitingReasonInput))
+	repo := repository.NewInstanceRepository(db)
+	now := time.Now().UTC()
+	nodes := []struct{ occurrenceID, nodeID string }{
+		{"cccccccc-cccc-7ccc-8ccc-cccccccccc70", "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbb1"},
+		{"cccccccc-cccc-7ccc-8ccc-cccccccccc71", "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbb2"},
+	}
+	for _, n := range nodes {
+		if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+			ID:                 n.occurrenceID,
+			WorkflowInstanceID: instanceID,
+			NodeID:             n.nodeID,
+			Type:               string(model.NodeTypeInput),
+			Status:             model.NodeRunning,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}); err != nil {
+			t.Fatalf("InsertNodeInstance(%s) error = %v", n.occurrenceID, err)
+		}
+	}
+
+	row := func(id, occurrenceID, key string) repository.InputDeliveryModel {
+		return repository.InputDeliveryToModel(model.InputDelivery{
+			ID:                 id,
+			WorkflowInstanceID: instanceID,
+			NodeInstanceID:     occurrenceID,
+			IdempotencyKey:     key,
+			Payload:            json.RawMessage(`{"ok":true}`),
+			Accepted:           true,
+			CreatedAt:          now,
+		})
+	}
+	first := row("dddddddd-dddd-7ddd-8ddd-dddddddddd70", nodes[0].occurrenceID, "shared-key")
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatalf("insert first delivery: %v", err)
+	}
+	second := row("dddddddd-dddd-7ddd-8ddd-dddddddddd71", nodes[1].occurrenceID, "shared-key")
+	if err := db.Create(&second).Error; err == nil {
+		t.Error("inserting the same key on another node instance: error = nil, want a unique violation")
+	}
+
+	// The lookup by instance resolves to exactly the one stored row.
+	got, err := repo.GetDeliveryByKey(ctx, instanceID, "shared-key")
+	if err != nil {
+		t.Fatalf("GetDeliveryByKey() error = %v", err)
+	}
+	if got.ID != first.ID || got.NodeInstanceID != nodes[0].occurrenceID {
+		t.Errorf("GetDeliveryByKey() = %+v, want the first writer's row %s", got, first.ID)
+	}
+	if _, err := repo.GetDeliveryByKey(ctx, instanceID, "no-such-key"); !errors.Is(err, repository.ErrDeliveryNotFound) {
+		t.Errorf("GetDeliveryByKey(unknown) error = %v, want ErrDeliveryNotFound", err)
+	}
+}
+
+// The uniqueness has to hold on the write path the service actually uses.
+// DeliverInput resolves a conflict itself and hands back the first writer's
+// row; a rejected delivery is the cheap case, so it is enough to prove the
+// conflict target is the instance and not the node occurrence.
+func TestDeliverInputReplaysAcrossNodeOccurrences(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	instanceID := "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaa71"
+	insertInstance(t, db, newTestInstance(instanceID, model.WorkflowWaiting, model.WaitingReasonInput))
+	repo := repository.NewInstanceRepository(db)
+	now := time.Now().UTC()
+
+	occurrence := func(id string) string {
+		if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+			ID:                 id,
+			WorkflowInstanceID: instanceID,
+			NodeID:             "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbb1",
+			Type:               string(model.NodeTypeInput),
+			Status:             model.NodeRunning,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}); err != nil {
+			t.Fatalf("InsertNodeInstance(%s) error = %v", id, err)
+		}
+		return id
+	}
+	first := occurrence("cccccccc-cccc-7ccc-8ccc-cccccccccc80")
+	second := occurrence("cccccccc-cccc-7ccc-8ccc-cccccccccc81")
+
+	// A rejected delivery only records the row, so the replay path is
+	// reachable without a full instance transition.
+	delivery := func(occurrenceID string) repository.InputCompletion {
+		return repository.InputCompletion{
+			InstanceID:     instanceID,
+			NodeInstanceID: occurrenceID,
+			IdempotencyKey: "replayed-key",
+			Payload:        json.RawMessage(`{"ok":true}`),
+			CreatedBy:      fixtureUserID,
+		}
+	}
+	got, err := repo.DeliverInput(ctx, delivery(first))
+	if err != nil {
+		t.Fatalf("first DeliverInput() error = %v", err)
+	}
+
+	// The same key on a different occurrence of the same instance replays
+	// the first writer's row instead of failing the write.
+	replay, err := repo.DeliverInput(ctx, delivery(second))
+	if err != nil {
+		t.Fatalf("replay on another node occurrence: error = %v, want the first writer's row", err)
+	}
+	if replay.ID != got.ID {
+		t.Errorf("replay.ID = %s, want the first writer's %s", replay.ID, got.ID)
+	}
+	if replay.NodeInstanceID != first {
+		t.Errorf("replay.NodeInstanceID = %s, want %s", replay.NodeInstanceID, first)
+	}
+
+	var count int64
+	if err := db.Model(&repository.InputDeliveryModel{}).
+		Where("workflow_instance_id = ? AND idempotency_key = ?", instanceID, "replayed-key").
+		Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("input_deliveries rows for the key = %d, want 1", count)
+	}
+}

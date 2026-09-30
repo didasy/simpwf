@@ -20,6 +20,8 @@ import (
 func main() {
 	ddl, err := gormschema.New("postgres").Load(
 		&repository.UserModel{},
+		&repository.RoleModel{},
+		&repository.RolePermissionModel{},
 		&repository.SecretModel{},
 		&repository.NodeDefinitionModel{},
 		&repository.WorkflowDefinitionModel{},
@@ -60,6 +62,8 @@ func foreignKeyDDL() string {
 	add("node_definitions", "fk_node_definitions_created_by", "\"created_by\"", "users", "\"id\"")
 	add("node_definitions", "fk_node_definitions_updated_by", "\"updated_by\"", "users", "\"id\"")
 	add("node_definitions", "fk_node_definitions_previous_version", "\"previous_version_id\"", "node_definitions", "\"id\"")
+	// role_permissions
+	add("role_permissions", "fk_role_permissions_role", "\"role\"", "roles", "\"name\"")
 	// workflow_definitions
 	add("workflow_definitions", "fk_workflow_definitions_created_by", "\"created_by\"", "users", "\"id\"")
 	add("workflow_definitions", "fk_workflow_definitions_updated_by", "\"updated_by\"", "users", "\"id\"")

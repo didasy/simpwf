@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/simpwf/workflow-engine/pkg/configuration"
+	"github.com/simpwf/workflow-engine/pkg/ids"
 )
 
 const testDSN = "host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable"
@@ -255,6 +256,36 @@ func TestLoadEngineAllowlistsFromEnvCommaSeparated(t *testing.T) {
 	}
 }
 
+func TestLoadEnvDenyOverridesFromEnvCommaSeparated(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_ENGINE_ENV_DENY_EXTRA", "SIMPWF_OPENROUTER*,SIMPWF_FOO")
+	setenv(t, "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS", "SIMPWF_OPENROUTER_MODEL")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !slices.Equal(cfg.Engine.EnvDenyExtra, []string{"SIMPWF_OPENROUTER*", "SIMPWF_FOO"}) {
+		t.Errorf("env_deny_extra = %q", cfg.Engine.EnvDenyExtra)
+	}
+	if !slices.Equal(cfg.Engine.EnvAllowExceptions, []string{"SIMPWF_OPENROUTER_MODEL"}) {
+		t.Errorf("env_allow_exceptions = %q", cfg.Engine.EnvAllowExceptions)
+	}
+}
+
+func TestLoadRejectsInvalidEnvDenyGlob(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_ENGINE_ENV_DENY_EXTRA", "SIMPWF_[")
+	if _, err := configuration.Load(configuration.WithConfigFile(missingPath(t))); err == nil {
+		t.Fatal("Load() error = nil, want error for malformed glob")
+	}
+	setenv(t, "SIMPWF_ENGINE_ENV_DENY_EXTRA", "")
+	setenv(t, "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS", "SIMPWF_*[")
+	if _, err := configuration.Load(configuration.WithConfigFile(missingPath(t))); err == nil {
+		t.Fatal("Load() error = nil, want error for malformed allow glob")
+	}
+}
+
 func TestLoadRejectsMaxBelowDefault(t *testing.T) {
 	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
 	setenv(t, "SIMPWF_ENGINE_DEFAULT_NODE_TIMEOUT", "10m")
@@ -352,5 +383,159 @@ infra:
 	}
 	if !strings.Contains(err.Error(), "input_queue") {
 		t.Errorf("error = %q, want mention of input_queue", err)
+	}
+}
+
+// The system user is the audit actor the service bypasses are recorded as,
+// so a value that is not a canonical uuid has to fail the boot rather than
+// the first foreign key.
+//
+// An empty value is not in this table: Viper substitutes the default before
+// validate runs, so a blank user id in the environment is the shipped
+// default rather than a misconfiguration. It is TestShippedConfigUsesAUUID
+// that pins the fallback.
+func TestLoadRejectsNonUUIDSystemUserID(t *testing.T) {
+	for _, id := range []string{"system", "not-a-uuid", "  ", "00000000-0000-7000-8000-00000000000", "00000000000070008000000000000001"} {
+		setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+		setenv(t, "SIMPWF_SYSTEM_USER_ID", id)
+		_, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+		if err == nil {
+			t.Errorf("system.user_id = %q: error = nil, want a rejection", id)
+			continue
+		}
+		if !strings.Contains(err.Error(), "system.user_id") {
+			t.Errorf("system.user_id = %q: error = %q, want mention of system.user_id", id, err)
+		}
+	}
+}
+
+// A valid system user id still loads.
+func TestLoadAcceptsUUIDSystemUserID(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_SYSTEM_USER_ID", "00000000-0000-7000-8000-000000000001")
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.System.UserID != "00000000-0000-7000-8000-000000000001" {
+		t.Errorf("system.user_id = %q, want the configured uuid", cfg.System.UserID)
+	}
+}
+
+// The validation is new, so the default the code falls back to has to
+// satisfy it: a deployment that never sets system.user_id must still boot.
+func TestShippedConfigUsesAUUIDSystemUserByDefault(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_SYSTEM_USER_ID", "")
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !ids.Valid(cfg.System.UserID) {
+		t.Errorf("default system.user_id = %q, want a canonical uuid", cfg.System.UserID)
+	}
+}
+
+// The shipped config.yaml and the e2e config both name a system user, so
+// the new validation must not reject either. config.e2e-oidc.yaml is started
+// by `task e2e-oidc`, which exports the API token the same way.
+func TestShippedConfigsPassSystemUserValidation(t *testing.T) {
+	setenv(t, "SIMPWF_API_TOKEN", "e2e-service-token")
+	for _, name := range []string{"config.yaml", "config.e2e-oidc.yaml"} {
+		path := filepath.Join("..", "..", name)
+		if _, err := os.Stat(path); err != nil {
+			t.Skipf("%s not available: %v", name, err)
+		}
+		if _, err := configuration.Load(configuration.WithConfigFile(path)); err != nil {
+			t.Errorf("Load(%s) error = %v", name, err)
+		}
+	}
+}
+
+// The shipped config.yaml documents clock_skew above the cache_ttl it belongs
+// to. A comment describing a key that is not there reads as if the tolerance
+// is set, so the file is loaded here to keep the key and its comment together.
+func TestShippedConfigParsesClockSkew(t *testing.T) {
+	path := filepath.Join("..", "..", "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("shipped config not available: %v", err)
+	}
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load(%s) error = %v", path, err)
+	}
+	if cfg.Auth.OIDC.ClockSkew != time.Minute {
+		t.Errorf("auth.oidc.clock_skew = %v, want 1m", cfg.Auth.OIDC.ClockSkew)
+	}
+}
+
+// The role catalog is a map, which cannot ride Viper's AutomaticEnv, so it
+// is exposed through an explicit post-unmarshal JSON override.
+func TestLoadRolePermissionsFromEnvJSON(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", `{"admin":["definitions:read","roles:read"],"finance":["instances:read"]}`)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Auth.RolePermissions["admin"]; !slices.Equal(got, []string{"definitions:read", "roles:read"}) {
+		t.Errorf("admin = %v, want [definitions:read roles:read]", got)
+	}
+	if got := cfg.Auth.RolePermissions["finance"]; !slices.Equal(got, []string{"instances:read"}) {
+		t.Errorf("finance = %v, want [instances:read]", got)
+	}
+}
+
+func TestLoadRolePermissionsEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+auth:
+  role_permissions:
+    admin: ["definitions:read"]
+`)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", `{"finance":["instances:read"]}`)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Auth.RolePermissions) != 1 || cfg.Auth.RolePermissions["finance"] == nil {
+		t.Errorf("RolePermissions = %v, want only env value {finance:...}", cfg.Auth.RolePermissions)
+	}
+}
+
+func TestLoadRolePermissionsInvalidJSONFails(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", `not-json`)
+
+	_, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err == nil {
+		t.Fatal("Load() error = nil, want fail-fast on invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "SIMPWF_AUTH_ROLE_PERMISSIONS") {
+		t.Errorf("error = %q, want it to name SIMPWF_AUTH_ROLE_PERMISSIONS", err.Error())
+	}
+}
+
+func TestLoadRolePermissionsBlankEnvUsesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+auth:
+  role_permissions:
+    admin: ["definitions:read"]
+`)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", "   ")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !slices.Equal(cfg.Auth.RolePermissions["admin"], []string{"definitions:read"}) {
+		t.Errorf("admin = %v, want file value [definitions:read]", cfg.Auth.RolePermissions["admin"])
 	}
 }

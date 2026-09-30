@@ -15,7 +15,7 @@ handler ──> service ──> engine ──> executor ─┐
    │            │          │                 │
    │            │          └─> repository ──>├──> model ──> pkg/*
    │            └─> repository ─────────────>│
-   └─> model ───────────────────────────────>┘
+   └──> auth ───────────────────────────────┘
 
 inputtransport ──> service / transport
 executor ──> transport (narrow publish and poller interfaces)
@@ -42,8 +42,9 @@ behind narrow interfaces.
 | `internal/workflow/inputtransport` | Broker input consumers: Redis pattern subscriber (`workflow:input:*`, envelope decode) and RabbitMQ queue consumer (`NodeInstanceId` + `IdempotencyKey` headers, `message_id` fallback, manual ack/requeue), both delivering through `InstanceService.DeliverInput` with the matching source channel.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `internal/workflow/statusupdate`   | Status-notification dispatcher: claims the oldest unresolved outbox event per instance/transport, loads the immutable per-definition config, publishes through the transport's publisher (http/redis/rabbitmq), retries with the transport's `retry_delay` and dead-letters past its `max_retry`.                                                                                                                                                                                                                                                                                                                                                                                    |
 | `internal/workflow/form`           | JSON Schema (draft 2020-12) validation of input payloads against the waiting input node's `form.schema`, with joined human-readable messages; nil when the node carries no form (legacy script-only path).                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `internal/workflow/service`        | Use-case orchestration: definitions, secrets validation, instance create/status/context/input (source channel must match the input node channel; schema-then-script enforcement on delivery), node debug, pause/resume/stop controls (events + local cancellation signal), rollback of paused/failed instances to a prior occurrence (context restore, recomputed group stack). Instance creation snapshots all secrets under reserved `secret`; read views redact that root and rendered secret values. |
-| `internal/workflow/handler`        | Gin routes, HTTP DTOs, query parsing, RFC 7807 problem+json.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `internal/workflow/auth`          | Framework-free authentication and authorization: the OIDC discovery + JWKS verifier, the claim-to-`Principal` mapping, the `Principal` carried on the request context, the config-owned role catalog, and the resource-action constants every route gates on. Knows nothing about Gin or GORM.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `internal/workflow/service`        | Use-case orchestration: definitions, secrets validation, instance create/status/context/input (source channel must match the input node channel; the two-gate authorization check, then schema-then-script enforcement on delivery), node debug, pause/resume/stop controls (events + local cancellation signal), rollback of paused/failed instances to a prior occurrence (context restore, recomputed group stack), and identity resolution (JIT user upsert, role seeding, role reads). Instance creation snapshots all secrets under reserved `secret`; read views redact that root and rendered secret values. |
+| `internal/workflow/handler`        | Gin routes, HTTP DTOs, query parsing, RFC 7807 problem+json, the authentication middleware (API token → service principal, OIDC bearer → user) and the per-route permission middleware.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `pkg/*`                            | Configuration (Viper), database (GORM over the Postgres driver with the pgx wire format), UUIDv7 ids, context paths + typed rendering, host-function registry. No `internal` imports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `migrations/`                      | Atlas config + immutable versioned SQL + `atlas.sum`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
@@ -301,6 +302,112 @@ Both consumers call `InstanceService.DeliverInput` with their source
 channel; the service rejects a delivery whose source does not match the
 channel of the input node the instance is parked on.
 
+They also pass **no principal**, which the service reads as the service
+principal: broker traffic has no human identity, so it bypasses both
+authorization gates and `record_actor` attributes it to the system user.
+
+## Authentication and authorization
+
+Authentication and authorization are separate concerns with separate
+failure modes: a bad credential is 401, a valid caller who lacks a grant is
+403.
+
+### Principals
+
+A `*auth.Principal` is the single identity type crossing the boundary. It
+carries `Subject`, `Issuer`, `Name`, `Email`, the live `Roles`, a `Service`
+flag, and the resolved `UserID` (`users.id`). It is a value, not a pointer,
+and never comes from the request body — a caller cannot claim a role in a
+parameter.
+
+Two things produce one:
+
+- **The API token** (`auth.enabled`) is the *service principal*: `Service`
+  true, no subject, the system user's id, and the wildcard role `*`.
+- **A verified OIDC token** carries the identity and its roles.
+
+Handlers put the principal on Gin's request context;
+`service.InstanceService` takes it as an explicit argument rather than
+reaching for a context value, so the broker path can pass `nil` and be
+unambiguously the service principal.
+
+### OIDC as a resource server
+
+`internal/workflow/auth` performs discovery against
+`{issuer}/.well-known/openid-configuration`, builds a `go-oidc` verifier over
+the advertised `jwks_uri`, and validates signature, `iss`, `aud`, and `exp`
+itself. There is no callback route, no session, no cookie, and no client
+secret in the engine: the engine only ever *validates*. A frontend drives
+code+PKCE and calls the API with the resulting JWT.
+
+Verification is two-pass. A strict pass runs first; on an expiry failure
+only, it retries with a clock pulled back by `auth.oidc.clock_skew`, which
+absorbs provider/host clock drift without widening any other check. The skew
+covers `exp` only, so a token issued ahead of this clock is still refused on
+`nbf`. Roles are read from `auth.oidc.roles_claim` and accept an array, a
+single string, or a space-delimited string. `GET /v1/auth/config` publishes
+issuer, client id, the effective audience, endpoints, and the claim name,
+and is deliberately outside the authentication middleware: a frontend needs
+it precisely when it has no token yet.
+
+### Identity, just in time
+
+A verified `(issuer, subject)` is upserted into `users` on first sight, so
+the identity is stable across requests without a login step. The user's
+`subject`/`issuer` pair carries a unique index, which is what makes the
+upsert a lookup-or-insert rather than a race. Named claims (name, email) are
+refreshed on every sighting; the last-seen roles are recorded for operators
+but are **not** the authorization source.
+
+Authorization reads roles from the live token, intersected with the
+configured catalog. The database role tables are a startup-seeded *read
+model*, so a frontend can render the catalog, and they are never consulted
+to decide a grant. Seeding upserts the configured roles, prunes the
+permission rows of those roles that the configuration no longer grants, and
+never deletes a role: dropping a role from config stops it granting anything,
+without destroying history.
+
+### The two input gates
+
+`InstanceService.DeliverInput` is the single choke point both the HTTP
+endpoint and the broker consumers reach, so the node-level gate lives there
+rather than in the handler:
+
+1. `input:deliver`, from the union of the caller's roles; the service
+   principal short-circuits to allowed.
+2. The input node's `allowed_roles`, intersected with the caller's roles.
+   Absent or empty is open. A role in the token that is absent from the
+   catalog is not in the intersection, so unknown roles deny by default.
+
+Both are checked before the channel match, so a refusal is a clean 403 with
+no delivery row, and it records an `input_forbidden` audit event
+deliberately *without* the payload — the denial itself must not become a
+side channel that echoes a rejected secret.
+
+`allowed_roles` and `record_actor` are properties of the node *definition*.
+An occurrence referencing a reusable definition may not carry them: the
+occurrence's type is only known once the definition is materialized, so a
+gate written there would be dropped without a word. Every occurrence of one
+definition therefore shares one gate, and a different gate means a different
+definition.
+
+### Attribution
+
+`record_actor` is opt-in and changes only what lands in the context. The
+accepted payload becomes `{"user_id": ..., "input_data": <raw payload>}`
+under `output_property`, so templates read `{{ key.input_data.x }}` and
+`{{ key.user_id }}`.
+
+The split matters: the form schema, the validation script, and the post
+hook's `output` all still receive the **raw** payload, so validation code
+written before this feature keeps working unchanged. The envelope is applied
+at the single point where the delivery becomes context, and only after
+validation has passed, so an unvalidated payload can never be attributed.
+A replay of an idempotency key returns the first writer's recorded
+delivery, attribution included, so retries do not silently re-attribute.
+`pending_input` in the status response reports both fields so a frontend
+knows which shape to expect before it submits.
+
 ## Output nodes
 
 An `output` node publishes the exact JSON of its selected `context_path` to
@@ -360,9 +467,12 @@ Capacity and delivery semantics to design against:
 for a healthy database, applies `migrations/versions`), Redis 7 and
 RabbitMQ 4 (with management UI), and `app` (waits for the migration to
 complete and both brokers to be healthy, then serves the API, dispatcher,
-status dispatcher, and broker consumers). The compose stack enables auth
-(`SIMPWF_AUTH_ENABLED=true`, token `wadidaw`) and the wildcard HTTP
-allowlist for dev. The app never migrates. Broker
+status dispatcher, and broker consumers). The compose stack ships with
+authentication **disabled** (`SIMPWF_AUTH_ENABLED=false`) and the wildcard
+HTTP allowlist for dev; the `SIMPWF_API_TOKEN` value present in the file is
+inert while auth is off, and is ignored unless `SIMPWF_AUTH_ENABLED=true` is
+set. Turning auth on therefore takes two variables, not one. The role catalog comes from `config.yaml` unless `SIMPWF_AUTH_ROLE_PERMISSIONS` holds a JSON object, which overrides the file; invalid JSON fails startup. The app never
+migrates. Broker
 DSNs are optional: without them the app runs HTTP-only. Horizontal scaling
 is safe: multiple `app` replicas share the database; leases and SKIP LOCKED
 prevent duplicate execution, the heartbeat propagates stops across replicas,

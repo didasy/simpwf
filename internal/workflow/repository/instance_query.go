@@ -10,6 +10,10 @@ type InstanceListQuery struct {
 	IDs                  []string
 	WorkflowDefinitionID string
 	Statuses             []string
+	// CreatedBy scopes the listing to one owner. The service sets it from the
+	// authenticated principal, so a caller cannot widen the result set by
+	// naming another user: the field is not parsed from the query string.
+	CreatedBy string
 }
 
 var instanceOrderFields = map[string]bool{

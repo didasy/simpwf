@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/simpwf/workflow-engine/pkg/envsnapshot"
 )
 
 // ErrPathNotFound is returned when a path does not resolve in the context.
@@ -59,11 +61,22 @@ func Parse(path string) (Path, error) {
 	return out, nil
 }
 
+// envRoot is the reserved context key holding the process env snapshot.
+const envRoot = "env"
+
 // Get resolves path against ctx.
+//
+// A path into the env snapshot that names a denied variable resolves as
+// missing, even when a value was smuggled into the context under that name.
+// The error is the same as for an unknown key so the refusal leaks neither
+// the deny list nor the value.
 func Get(ctx map[string]any, path string) (any, error) {
 	p, err := Parse(path)
 	if err != nil {
 		return nil, err
+	}
+	if len(p) >= 2 && p[0].Index == nil && p[0].Key == envRoot && p[1].Index == nil && envsnapshot.IsDenied(p[1].Key) {
+		return nil, fmt.Errorf("%w: key %q", ErrPathNotFound, p[1].Key)
 	}
 	return getPath(ctx, p)
 }

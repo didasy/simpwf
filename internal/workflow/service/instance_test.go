@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/engine"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
@@ -50,7 +51,8 @@ func setupSvcDB(t *testing.T) *gorm.DB {
 		}
 	})
 	if err := db.AutoMigrate(
-		&repository.UserModel{}, &repository.SecretModel{}, &repository.NodeDefinitionModel{},
+		&repository.UserModel{}, &repository.RoleModel{}, &repository.RolePermissionModel{},
+		&repository.SecretModel{}, &repository.NodeDefinitionModel{},
 		&repository.WorkflowDefinitionModel{}, &repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{}, &repository.WorkflowInstanceModel{},
 		&repository.NodeContextHistoryModel{},
@@ -60,6 +62,7 @@ func setupSvcDB(t *testing.T) *gorm.DB {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 	if err := db.Exec(`TRUNCATE TABLE
+		role_permissions, roles,
 		secrets, status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users RESTART IDENTITY`).Error; err != nil {
@@ -68,6 +71,24 @@ func setupSvcDB(t *testing.T) *gorm.DB {
 	ctx := context.Background()
 	if err := repository.UpsertSystemUser(ctx, db, model.User{ID: svcSysUserID, Name: "system", Email: "system@localhost"}); err != nil {
 		t.Fatalf("seed system user: %v", err)
+	}
+	// A second user stands in for a just-in-time OIDC identity, so the
+	// actor tests can tell "the caller" apart from "the system user". The
+	// audit columns are foreign keys, so the row has to exist.
+	if err := repository.UpsertSystemUser(ctx, db, model.User{
+		ID: "44444444-4444-7444-8444-444444444444", Name: "ada", Email: "ada@example.test",
+		Subject: "ada-1", Issuer: "https://idp.example.test",
+	}); err != nil {
+		t.Fatalf("seed actor user: %v", err)
+	}
+	// The input-gate fixture caller. Deliveries and refusals record this id
+	// on the delivery row and the audit event, so it must satisfy the same
+	// foreign key.
+	if err := repository.UpsertSystemUser(ctx, db, model.User{
+		ID: "22222222-2222-7222-8222-222222222222", Name: "moss", Email: "moss@example.test",
+		Subject: "moss-1", Issuer: "https://idp.example.test",
+	}); err != nil {
+		t.Fatalf("seed gate user: %v", err)
 	}
 	return db
 }
@@ -160,6 +181,30 @@ func svcInstanceServiceWithOptions(db *gorm.DB, options model.LeanOptions) servi
 		svcLimits,
 		nil,
 		options,
+	)
+}
+
+// svcInstanceServiceWithCatalog mirrors production wiring plus the role
+// catalog the input authorization gate reads.
+func svcInstanceServiceWithCatalog(db *gorm.DB, catalog auth.Catalog) service.InstanceService {
+	return svcInstanceServiceWithCatalogAndOptions(db, model.LeanOptions{}, catalog)
+}
+
+func svcInstanceServiceWithCatalogAndOptions(db *gorm.DB, options model.LeanOptions, catalog auth.Catalog) service.InstanceService {
+	instances := repository.NewInstanceRepositoryWithOptions(db, options)
+	validator := &executor.InputExecutor{}
+	return service.NewInstanceServiceWithCatalog(
+		instances,
+		repository.NewWorkflowDefinitionRepository(db),
+		repository.NewSecretRepository(db),
+		svcWorkflowService(db),
+		validator,
+		executor.NewHookRunner(nil),
+		svcSysUserID,
+		svcLimits,
+		nil,
+		options,
+		catalog,
 	)
 }
 
@@ -284,7 +329,7 @@ func TestCreateInstance(t *testing.T) {
 	if inst.CreatedBy != svcSysUserID || inst.UpdatedBy != svcSysUserID {
 		t.Errorf("audit actors = %q/%q, want %q", inst.CreatedBy, inst.UpdatedBy, svcSysUserID)
 	}
-	got, err := svc.GetStatus(ctx, inst.ID)
+	got, err := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatus() error = %v", err)
 	}
@@ -325,6 +370,43 @@ func TestCreateMergesEnvSnapshot(t *testing.T) {
 	}
 }
 
+func TestCreateStripsDeniedEnvBase(t *testing.T) {
+	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", "host=localhost dbname=gorm")
+	t.Setenv("SIMPWF_API_TOKEN", "tok")
+	t.Setenv("SIMPWF_S3_ENDPOINT", "play.min.io:9000")
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	svc := svcInstanceService(db)
+
+	inst, err := svc.Create(ctx, service.CreateInstance{
+		WorkflowDefinitionID: wfID,
+		Context:              json.RawMessage(`{"env":{"SIMPWF_API_TOKEN":"evil","SIMPWF_S3_ENDPOINT":"caller"}}`),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(inst.Context, &m); err != nil {
+		t.Fatalf("parse stored context: %v", err)
+	}
+	env, ok := m["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("context = %s, want env root", inst.Context)
+	}
+	if _, ok := env["SIMPWF_API_TOKEN"]; ok {
+		t.Errorf("context = %s, denied key stored", inst.Context)
+	}
+	if _, ok := env["SIMPWF_INFRA_POSTGRESQL_DSN"]; ok {
+		t.Errorf("context = %s, denied DSN snapshotted", inst.Context)
+	}
+	if env["SIMPWF_S3_ENDPOINT"] != "play.min.io:9000" {
+		t.Errorf("env = %v, want snapshot to win for allowed key", env)
+	}
+}
+
 func TestCreateMergesSecretSnapshot(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
@@ -355,21 +437,21 @@ func TestCreateMergesSecretSnapshot(t *testing.T) {
 	if err := secrets.Delete(ctx, "API_KEY"); err != nil {
 		t.Fatal(err)
 	}
-	read, err := svc.GetContext(ctx, inst.ID)
+	read, err := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(read.Context), "stored-value") || !strings.Contains(string(read.Context), secretMaskForTest) {
 		t.Fatalf("GetContext() did not redact frozen snapshot: %s", read.Context)
 	}
-	status, err := svc.GetStatus(ctx, inst.ID)
+	status, err := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(status.Context), "stored-value") || !strings.Contains(string(status.Context), secretMaskForTest) {
 		t.Fatalf("GetStatus() did not redact frozen snapshot: %s", status.Context)
 	}
-	detail, err := svc.GetStatusDetail(ctx, inst.ID)
+	detail, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +475,7 @@ func TestUpdateContextPreservesSecretSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := svc.UpdateContext(ctx, service.UpdateContext{
@@ -430,7 +512,7 @@ func TestUpdateContextPreservesEnvSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 
@@ -479,7 +561,7 @@ func TestCreateInstanceDebugStartsPaused(t *testing.T) {
 	if inst.PauseRequested || inst.TerminationPending {
 		t.Errorf("pause/termination flags = %v/%v, want false/false", inst.PauseRequested, inst.TerminationPending)
 	}
-	got, err := svc.GetStatus(ctx, inst.ID)
+	got, err := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatus() error = %v", err)
 	}
@@ -533,7 +615,7 @@ func TestCreateDebugInputDeliversThenStepPauses(t *testing.T) {
 
 	// Resume runs the input node, which parks waiting/input (not paused)
 	// so the delivery below is accepted.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	cur := driveEngineWithExecLimitsAndOptions(t, db, inst.ID, executor.Limits{}, model.LeanOptions{})
@@ -547,14 +629,14 @@ func TestCreateDebugInputDeliversThenStepPauses(t *testing.T) {
 	}
 	// A debug delivery that advances the cursor parks paused, so the
 	// script node after the input still waits for a resume.
-	got, err := svc.GetStatus(ctx, inst.ID)
+	got, err := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != model.WorkflowPaused || got.WaitingReason != model.WaitingReasonRunnable {
 		t.Fatalf("status = %s/%s after delivery, want paused/runnable", got.Status, got.WaitingReason)
 	}
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	repo := repository.NewInstanceRepository(db)
@@ -565,14 +647,14 @@ func TestCreateDebugInputDeliversThenStepPauses(t *testing.T) {
 	if err := driveOne(t, db, claimed[0]); err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}
-	got, err = svc.GetStatus(ctx, inst.ID)
+	got, err = svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Status != model.WorkflowPaused {
 		t.Fatalf("status = %s after delivered step, want paused", got.Status)
 	}
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	cur = driveEngineWithExecLimitsAndOptions(t, db, inst.ID, executor.Limits{}, model.LeanOptions{})
@@ -681,7 +763,7 @@ func TestDeliverInputValidResumes(t *testing.T) {
 	if cur.Status != model.WorkflowFinished {
 		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	wh, ok := ctxMap["webhook"].(map[string]any)
@@ -719,7 +801,7 @@ func TestDeliverInputBlankOutputPropertyDefaultsToNodeID(t *testing.T) {
 	if !delivery.Accepted {
 		t.Fatalf("delivery = %+v, want accepted", delivery)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	v, ok := ctxMap[n1].(map[string]any)
@@ -768,11 +850,11 @@ func TestDeliverInputMaterializesReferencedInputNode(t *testing.T) {
 		t.Fatalf("delivery = %+v, want accepted", delivery)
 	}
 
-	curStatus, _ := svc.GetStatus(ctx, inst.ID)
+	curStatus, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if curStatus.Status != model.WorkflowFinished {
 		t.Fatalf("status = %s, want finished after delivery", curStatus.Status)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	wh, ok := ctxMap["webhook"].(map[string]any)
@@ -810,7 +892,7 @@ func TestDeliverInputRejectsWithMessage(t *testing.T) {
 		t.Errorf("delivery = %+v, want rejected with message", delivery)
 	}
 	// instance still waits on input
-	cur, _ := svc.GetStatus(ctx, inst.ID)
+	cur, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
 		t.Errorf("instance = %+v, want still waiting on input", cur)
 	}
@@ -855,7 +937,7 @@ func TestDeliverInputFormSchemaRejects(t *testing.T) {
 	if !strings.Contains(delivery.Error, "schema validation failed") {
 		t.Errorf("delivery.Error = %q, want schema failure (script must not run)", delivery.Error)
 	}
-	cur, _ := svc.GetStatus(ctx, inst.ID)
+	cur, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
 		t.Errorf("instance = %+v, want still waiting on input", cur)
 	}
@@ -1091,7 +1173,7 @@ func TestDeliverInputFinishesWorkflow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DeliverInput() error = %v", err)
 	}
-	cur, _ := svc.GetStatus(ctx, inst.ID)
+	cur, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if cur.Status != model.WorkflowFinished {
 		t.Errorf("status = %s, want finished", cur.Status)
 	}
@@ -1113,7 +1195,7 @@ func TestNodeDebugNotStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111102", 0)
+	d, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111102", 0, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug() error = %v", err)
 	}
@@ -1145,7 +1227,7 @@ func TestNodeDebugFinishedLatestAndExact(t *testing.T) {
 	}
 	driveEngine(t, db, inst.ID)
 
-	d, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 0)
+	d, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 0, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug() error = %v", err)
 	}
@@ -1166,7 +1248,7 @@ func TestNodeDebugFinishedLatestAndExact(t *testing.T) {
 	}
 
 	// Exact attempt 1 is selectable.
-	d1, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 1)
+	d1, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 1, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug(attempt=1) error = %v", err)
 	}
@@ -1175,7 +1257,7 @@ func TestNodeDebugFinishedLatestAndExact(t *testing.T) {
 	}
 
 	// Attempt 2 never ran.
-	if _, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 2); !errors.Is(err, model.ErrNotFound) {
+	if _, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 2, auth.Principal{}); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("NodeDebug(attempt=2) error = %v, want ErrNotFound", err)
 	}
 }
@@ -1210,7 +1292,7 @@ func TestNodeDebugLoopAttemptsAndRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 0)
+	d, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 0, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug() error = %v", err)
 	}
@@ -1228,7 +1310,7 @@ func TestNodeDebugLoopAttemptsAndRunning(t *testing.T) {
 	}
 
 	// Exact attempt 1 resolves with the occurrence's metadata.
-	d1, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 1)
+	d1, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 1, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug(attempt=1) error = %v", err)
 	}
@@ -1237,12 +1319,12 @@ func TestNodeDebugLoopAttemptsAndRunning(t *testing.T) {
 	}
 
 	// Attempt 3 never ran.
-	if _, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 3); !errors.Is(err, model.ErrNotFound) {
+	if _, err := svc.NodeDebug(ctx, inst.ID, "11111111-1111-7111-8111-111111111101", 3, auth.Principal{}); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("NodeDebug(attempt=3) error = %v, want ErrNotFound", err)
 	}
 
 	// The occurrence id resolves to the same occurrence.
-	dOcc, err := svc.NodeDebug(ctx, inst.ID, n.ID, 0)
+	dOcc, err := svc.NodeDebug(ctx, inst.ID, n.ID, 0, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug(occurrence id) error = %v", err)
 	}
@@ -1280,7 +1362,7 @@ func TestNodeDebugMasksRenderedSecretValues(t *testing.T) {
 	if err := instances.InsertNodeInstance(ctx, node); err != nil {
 		t.Fatal(err)
 	}
-	detail, err := svc.NodeDebug(ctx, inst.ID, node.NodeID, 1)
+	detail, err := svc.NodeDebug(ctx, inst.ID, node.NodeID, 1, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1306,13 +1388,13 @@ func TestNodeDebugErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.NodeDebug(ctx, svcNewID(), "11111111-1111-7111-8111-111111111101", 0); !errors.Is(err, model.ErrNotFound) {
+	if _, err := svc.NodeDebug(ctx, svcNewID(), "11111111-1111-7111-8111-111111111101", 0, auth.Principal{}); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("NodeDebug(unknown instance) error = %v, want ErrNotFound", err)
 	}
-	if _, err := svc.NodeDebug(ctx, inst.ID, "99999999-9999-7999-8999-999999999999", 0); !errors.Is(err, model.ErrNotFound) {
+	if _, err := svc.NodeDebug(ctx, inst.ID, "99999999-9999-7999-8999-999999999999", 0, auth.Principal{}); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("NodeDebug(unknown node) error = %v, want ErrNotFound", err)
 	}
-	if _, err := svc.NodeDebug(ctx, inst.ID, "99999999-9999-7999-8999-999999999998", 1); !errors.Is(err, model.ErrNotFound) {
+	if _, err := svc.NodeDebug(ctx, inst.ID, "99999999-9999-7999-8999-999999999998", 1, auth.Principal{}); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("NodeDebug(unknown occurrence) error = %v, want ErrNotFound", err)
 	}
 }
@@ -1364,6 +1446,38 @@ func svcEventTypes(t *testing.T, db *gorm.DB, instanceID string) map[string]bool
 	return types
 }
 
+// loadEvents returns the audit trail of an instance in insertion order.
+func loadEvents(t *testing.T, db *gorm.DB, instanceID string) []model.WorkflowInstanceEvent {
+	t.Helper()
+	var rows []repository.WorkflowInstanceEventModel
+	if err := db.Where("workflow_instance_id = ?", instanceID).Order("created_at, id").Find(&rows).Error; err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	out := make([]model.WorkflowInstanceEvent, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, repository.WorkflowInstanceEventFromModel(row))
+	}
+	return out
+}
+
+// assertNoDelivery fails when any delivery row exists for the instance:
+// a refused delivery must leave no trace in the idempotency table.
+func assertNoDelivery(t *testing.T, db *gorm.DB, instanceID string) {
+	t.Helper()
+	var count int64
+	if err := db.Model(&repository.InputDeliveryModel{}).
+		Where("workflow_instance_id = ?", instanceID).Count(&count).Error; err != nil {
+		t.Fatalf("count deliveries: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("found %d delivery rows after a refusal, want none", count)
+	}
+}
+
+func containsAny(haystack, needle string) bool {
+	return needle != "" && len(haystack) >= len(needle) && strings.Contains(haystack, needle)
+}
+
 func TestControlPauseImmediateAndIdempotent(t *testing.T) {
 	db := setupSvcDB(t)
 	ctx := context.Background()
@@ -1377,14 +1491,14 @@ func TestControlPauseImmediateAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := svc.Pause(ctx, inst.ID)
+	res, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID})
 	if err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 	if res.Status != model.WorkflowPaused || res.PauseRequested {
 		t.Errorf("res = %+v, want paused immediately", res)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowPaused {
 		t.Errorf("status = %s, want paused", stored.Status)
 	}
@@ -1392,7 +1506,7 @@ func TestControlPauseImmediateAndIdempotent(t *testing.T) {
 		t.Error("event 'paused' missing")
 	}
 
-	res2, err := svc.Pause(ctx, inst.ID)
+	res2, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID})
 	if err != nil || res2.Status != model.WorkflowPaused {
 		t.Errorf("second pause = %+v, err %v, want idempotent", res2, err)
 	}
@@ -1416,7 +1530,7 @@ func TestControlPauseDeferred(t *testing.T) {
 		t.Fatalf("claim = %d, err %v", len(claimed), err)
 	}
 
-	res, err := svc.Pause(ctx, inst.ID)
+	res, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID})
 	if err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
@@ -1442,7 +1556,7 @@ func TestControlPauseTerminalConflict(t *testing.T) {
 	}
 	driveEngine(t, db, inst.ID) // finishes
 
-	if _, err := svc.Pause(ctx, inst.ID); !errors.Is(err, model.ErrConflict) {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); !errors.Is(err, model.ErrConflict) {
 		t.Errorf("Pause(finished) error = %v, want ErrConflict", err)
 	}
 }
@@ -1459,17 +1573,17 @@ func TestControlResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := svc.Resume(ctx, inst.ID)
+	res, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID})
 	if err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	if res.Status != model.WorkflowWaiting {
 		t.Errorf("res = %+v, want waiting", res)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowWaiting {
 		t.Errorf("status = %s, want waiting", stored.Status)
 	}
@@ -1478,7 +1592,7 @@ func TestControlResume(t *testing.T) {
 	}
 
 	// Resume of an active instance is idempotent.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Errorf("resume active error = %v, want nil", err)
 	}
 }
@@ -1499,13 +1613,13 @@ func TestControlResumeClearsPendingPause(t *testing.T) {
 	if _, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.PauseRequested {
 		t.Errorf("stored = %+v, want pause_requested cleared", stored)
 	}
@@ -1529,14 +1643,14 @@ func TestControlStop(t *testing.T) {
 	}
 
 	// Stop a waiting instance: immediate terminal, no cancellation.
-	res, err := svc.Stop(ctx, inst.ID, "operator")
+	res, err := svc.Stop(ctx, service.ControlRequest{InstanceID: inst.ID, Reason: "operator"})
 	if err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
 	if res.Status != model.WorkflowStopped || res.TerminationPending {
 		t.Errorf("res = %+v, want stopped without pending", res)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowStopped {
 		t.Errorf("status = %s, want stopped", stored.Status)
 	}
@@ -1548,7 +1662,7 @@ func TestControlStop(t *testing.T) {
 	}
 
 	// Repeat stop is idempotent.
-	if _, err := svc.Stop(ctx, inst.ID, "operator"); err != nil {
+	if _, err := svc.Stop(ctx, service.ControlRequest{InstanceID: inst.ID, Reason: "operator"}); err != nil {
 		t.Errorf("second stop error = %v, want nil", err)
 	}
 
@@ -1561,7 +1675,7 @@ func TestControlStop(t *testing.T) {
 	if _, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10); err != nil {
 		t.Fatal(err)
 	}
-	res2, err := svc.Stop(ctx, inst2.ID, "operator")
+	res2, err := svc.Stop(ctx, service.ControlRequest{InstanceID: inst2.ID, Reason: "operator"})
 	if err != nil {
 		t.Fatalf("Stop(running) error = %v", err)
 	}
@@ -1587,10 +1701,10 @@ func TestControlStopTerminalConflict(t *testing.T) {
 	}
 	driveEngine(t, db, inst.ID) // finished
 
-	if _, err := svc.Stop(ctx, inst.ID, "operator"); !errors.Is(err, model.ErrConflict) {
+	if _, err := svc.Stop(ctx, service.ControlRequest{InstanceID: inst.ID, Reason: "operator"}); !errors.Is(err, model.ErrConflict) {
 		t.Errorf("Stop(finished) error = %v, want ErrConflict", err)
 	}
-	if _, err := svc.Resume(ctx, inst.ID); !errors.Is(err, model.ErrConflict) {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); !errors.Is(err, model.ErrConflict) {
 		t.Errorf("Resume(finished) error = %v, want ErrConflict", err)
 	}
 }
@@ -1611,7 +1725,7 @@ func TestControlStopParksInputAttemptStopped(t *testing.T) {
 	}
 	driveEngine(t, db, inst.ID) // parks waiting on input
 
-	if _, err := svc.Stop(ctx, inst.ID, "operator"); err != nil {
+	if _, err := svc.Stop(ctx, service.ControlRequest{InstanceID: inst.ID, Reason: "operator"}); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
 	attempts, _ := repository.NewInstanceRepository(db).ListNodeInstances(ctx, inst.ID)
@@ -1649,7 +1763,7 @@ func TestInstanceServiceListDelegatesAndFilters(t *testing.T) {
 		Page: 1, PerPage: 50, Order: "-created_at",
 		WorkflowDefinitionID: wfID,
 		Statuses:             []string{"waiting"},
-	})
+	}, auth.Principal{})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -1667,7 +1781,7 @@ func TestInstanceServiceListDelegatesAndFilters(t *testing.T) {
 	}
 
 	// No filters: all three, oldest first.
-	items, total, err = svc.List(ctx, repository.InstanceListQuery{Page: 1, PerPage: 50, Order: "created_at"})
+	items, total, err = svc.List(ctx, repository.InstanceListQuery{Page: 1, PerPage: 50, Order: "created_at"}, auth.Principal{})
 	if err != nil {
 		t.Fatalf("List(all) error = %v", err)
 	}
@@ -1679,7 +1793,7 @@ func TestInstanceServiceListDelegatesAndFilters(t *testing.T) {
 	}
 
 	// Pagination is honored: page 2 of 2 per page yields the last item.
-	items, total, err = svc.List(ctx, repository.InstanceListQuery{Page: 2, PerPage: 2, Order: "created_at"})
+	items, total, err = svc.List(ctx, repository.InstanceListQuery{Page: 2, PerPage: 2, Order: "created_at"}, auth.Principal{})
 	if err != nil {
 		t.Fatalf("List(page 2) error = %v", err)
 	}
@@ -1711,7 +1825,7 @@ func TestUpdateContextReplacesPausedContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 
@@ -1748,7 +1862,7 @@ func TestUpdateContextRejectsNonObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1804,13 +1918,13 @@ func TestUpdateContextFeedsResumedExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.UpdateContext(ctx, service.UpdateContext{InstanceID: inst.ID, Context: json.RawMessage(`{"debug_flag":true}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
 	cur := driveEngine(t, db, inst.ID)
@@ -1844,7 +1958,7 @@ func TestDeliverInputPreHookRunsOnceBeforeParking(t *testing.T) {
 	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
 		t.Fatalf("instance = %+v, want waiting on input", cur)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if ctxMap["pre_ran"] != float64(1) {
@@ -1864,7 +1978,7 @@ func TestDeliverInputPreHookRunsOnceBeforeParking(t *testing.T) {
 	if cur.Status != model.WorkflowFinished {
 		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
 	}
-	got, _ = svc.GetContext(ctx, inst.ID)
+	got, _ = svc.GetContext(ctx, inst.ID, auth.Principal{})
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if ctxMap["pre_ran"] != float64(1) {
 		t.Errorf("pre_ran = %v, want 1 (pre ran once, not on delivery)", ctxMap["pre_ran"])
@@ -1900,7 +2014,7 @@ func TestDeliverInputPostHookSeesPayload(t *testing.T) {
 	if cur.Status != model.WorkflowFinished {
 		t.Fatalf("status = %s, want finished (error %q)", cur.Status, cur.Error)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if ctxMap["post_ran"] != true || ctxMap["post_sees"] != "yes" {
@@ -1938,7 +2052,7 @@ func TestDeliverInputRejectedRerunsNoHooks(t *testing.T) {
 	if rejected.Accepted {
 		t.Errorf("delivery = %+v, want rejected", rejected)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if ctxMap["pre_ran"] != float64(1) {
@@ -1961,7 +2075,7 @@ func TestDeliverInputRejectedRerunsNoHooks(t *testing.T) {
 	if cur.Status != model.WorkflowFinished {
 		t.Fatalf("status = %s, want finished", cur.Status)
 	}
-	got, _ = svc.GetContext(ctx, inst.ID)
+	got, _ = svc.GetContext(ctx, inst.ID, auth.Principal{})
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if ctxMap["pre_ran"] != float64(1) {
 		t.Errorf("pre_ran = %v, want 1 across the whole lifecycle", ctxMap["pre_ran"])
@@ -2000,7 +2114,7 @@ func TestDeliverInputPostFailureFailsWorkflow(t *testing.T) {
 	if !strings.Contains(delivery.Error, "ipost boom") {
 		t.Errorf("delivery error = %q, want post-script cause", delivery.Error)
 	}
-	cur, _ := svc.GetStatus(ctx, inst.ID)
+	cur, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if cur.Status != model.WorkflowFailed {
 		t.Fatalf("status = %s, want failed after accepted input post failure", cur.Status)
 	}
@@ -2014,7 +2128,7 @@ func TestDeliverInputPostFailureFailsWorkflow(t *testing.T) {
 	if attempt.Status != model.NodeFailed {
 		t.Errorf("attempt status = %s, want failed", attempt.Status)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if _, ok := ctxMap["webhook"]; !ok {
@@ -2053,7 +2167,7 @@ func TestDeliverInputGroupPostFailureFinishesInputAttempt(t *testing.T) {
 	if !delivery.Accepted {
 		t.Fatalf("delivery = %+v, want accepted", delivery)
 	}
-	cur, _ := svc.GetStatus(ctx, inst.ID)
+	cur, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if cur.Status != model.WorkflowFailed {
 		t.Fatalf("status = %s, want failed after group post failure", cur.Status)
 	}
@@ -2067,7 +2181,7 @@ func TestDeliverInputGroupPostFailureFinishesInputAttempt(t *testing.T) {
 	if attempt.Status != model.NodeFinished {
 		t.Errorf("input attempt status = %s, want finished", attempt.Status)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if _, ok := ctxMap["webhook"]; !ok {
@@ -2122,7 +2236,7 @@ func TestExternalCallFailureRoutesToInputAndResumes(t *testing.T) {
 	}
 
 	// 2. Failure payload is visible in workflow context
-	gotCtx, err := svc.GetContext(ctx, inst.ID)
+	gotCtx, err := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2158,7 +2272,7 @@ func TestExternalCallFailureRoutesToInputAndResumes(t *testing.T) {
 	}
 
 	// 5. Downstream node reads replacement data
-	gotFinalCtx, err := svc.GetContext(ctx, inst.ID)
+	gotFinalCtx, err := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2205,7 +2319,7 @@ func TestRollbackPausedToPaused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNodeInstanceByNode(n1) error = %v", err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 
@@ -2219,14 +2333,14 @@ func TestRollbackPausedToPaused(t *testing.T) {
 	if len(res.GroupStack) != 0 {
 		t.Errorf("group stack = %v, want empty", res.GroupStack)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(got.Context, &ctxMap)
 	if _, ok := ctxMap["out1"]; ok {
 		t.Errorf("context = %s, want ContextBefore without n1 output", got.Context)
 	}
 	// Resume re-executes forward: n1 runs again (Attempt 2), then n2.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	final := driveEngine(t, db, inst.ID)
@@ -2272,14 +2386,14 @@ func TestRollbackFailedToPaused(t *testing.T) {
 	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
 		t.Errorf("res = %+v, want paused at %s", res, n1)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowPaused || stored.Error != "" || stored.FinishedAt != nil {
 		t.Errorf("stored = %+v, want paused with cleared error/finished_at", stored)
 	}
 	if stored.StartedAt == nil {
 		t.Error("started_at = nil, want preserved")
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{"seed":1}`)) {
 		t.Errorf("context = %s, want restored seed", got.Context)
 	}
@@ -2356,11 +2470,11 @@ func TestRollbackNestedGroupStack(t *testing.T) {
 	if len(res.GroupStack) != 2 || res.GroupStack[0] != outer || res.GroupStack[1] != mid {
 		t.Errorf("group stack = %v, want [%s %s]", res.GroupStack, outer, mid)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{"seed":1}`)) {
 		t.Errorf("context = %s, want restored seed", got.Context)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowPaused || stored.Error != "" || stored.FinishedAt != nil {
 		t.Errorf("stored = %+v, want paused with cleared error/finished_at", stored)
 	}
@@ -2398,7 +2512,7 @@ func TestRollbackErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 
@@ -2418,14 +2532,14 @@ func TestRollbackErrors(t *testing.T) {
 		t.Errorf("Rollback(empty occurrence) error = %v, want ErrInvalid", err)
 	}
 	// Wrong state: resume then rollback while waiting.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID}); !errors.Is(err, model.ErrConflict) {
 		t.Errorf("Rollback(waiting) error = %v, want ErrConflict", err)
 	}
 	// not_started node (n2 never ran): no occurrence row.
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: n2}); !errors.Is(err, model.ErrNotFound) {
@@ -2455,7 +2569,7 @@ func TestRollbackParkedInputIsNoOp(t *testing.T) {
 	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
 		t.Fatalf("instance = %+v, want parked on input", cur)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 	repo := repository.NewInstanceRepository(db)
@@ -2463,7 +2577,7 @@ func TestRollbackParkedInputIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := svc.GetStatus(ctx, inst.ID)
+	before, err := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2476,7 +2590,7 @@ func TestRollbackParkedInputIsNoOp(t *testing.T) {
 	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n2 {
 		t.Errorf("res = %+v, want paused at %s", res, n2)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowPaused {
 		t.Errorf("status = %s, want still paused", stored.Status)
 	}
@@ -2498,7 +2612,7 @@ func TestRollbackParkedInputIsNoOp(t *testing.T) {
 		t.Errorf("events = %d types, want no rollback event on no-op", len(events))
 	}
 	// No-op preserves the park: resume + deliver still works.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
@@ -2531,7 +2645,7 @@ func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
 	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonInput {
 		t.Fatalf("instance = %+v, want parked on input", cur)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 	occ1, err := repo.GetNodeInstanceByNode(ctx, inst.ID, n1)
@@ -2551,7 +2665,7 @@ func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
 	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
 		t.Fatalf("res = %+v, want paused at %s", res, n1)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.Status != model.WorkflowPaused {
 		t.Errorf("status = %s, want still paused", stored.Status)
 	}
@@ -2565,7 +2679,7 @@ func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
 	if frame.CurrentNodeID != n1 {
 		t.Errorf("cursor = %q, want %q", frame.CurrentNodeID, n1)
 	}
-	gotCtx, _ := svc.GetContext(ctx, inst.ID)
+	gotCtx, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if !jsonEqualCtx(t, gotCtx.Context, json.RawMessage(`{}`)) {
 		t.Errorf("context = %s, want restored pre-n1 {}", gotCtx.Context)
 	}
@@ -2588,7 +2702,7 @@ func TestRollbackSupersedesLiveParkedAttemptElsewhere(t *testing.T) {
 	// Resume re-executes forward from n1: n1 runs again on the same
 	// occurrence row (attempt++), then re-parks on n2 as a fresh row
 	// (the superseded park stays stopped).
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	cur = driveEngine(t, db, inst.ID)
@@ -2695,11 +2809,11 @@ func TestRollbackToFinishedInputReparks(t *testing.T) {
 	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
 		t.Errorf("res = %+v, want paused at %s", res, n1)
 	}
-	stored, _ := svc.GetStatus(ctx, inst.ID)
+	stored, _ := svc.GetStatus(ctx, inst.ID, auth.Principal{})
 	if stored.WaitingReason != model.WaitingReasonInput {
 		t.Errorf("waiting_reason = %q, want input (re-park)", stored.WaitingReason)
 	}
-	got, _ := svc.GetContext(ctx, inst.ID)
+	got, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if !jsonEqualCtx(t, got.Context, json.RawMessage(`{}`)) {
 		t.Errorf("context = %s, want restored pre-input {}", got.Context)
 	}
@@ -2709,7 +2823,7 @@ func TestRollbackToFinishedInputReparks(t *testing.T) {
 	}
 	// Resume re-parks on the input node; a fresh delivery with a new key
 	// is accepted on the same occurrence row.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	cur = driveEngine(t, db, inst.ID)
@@ -2729,7 +2843,7 @@ func TestRollbackToFinishedInputReparks(t *testing.T) {
 	if final.Status != model.WorkflowFailed {
 		t.Fatalf("status = %s, want failed again at n2 (error %q)", final.Status, final.Error)
 	}
-	gotFinal, _ := svc.GetContext(ctx, inst.ID)
+	gotFinal, _ := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	var ctxMap map[string]any
 	_ = json.Unmarshal(gotFinal.Context, &ctxMap)
 	if gate, ok := ctxMap["gate"].(map[string]any); !ok || gate["v"] != float64(3) {
@@ -2794,7 +2908,7 @@ func TestRollbackToFinishedInputSupersedesOtherLivePark(t *testing.T) {
 	if finishedFirst.Status != model.NodeFinished {
 		t.Fatalf("n1 occurrence status = %s, want finished", finishedFirst.Status)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 	res, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: first.ID})
@@ -2818,7 +2932,7 @@ func TestRollbackToFinishedInputSupersedesOtherLivePark(t *testing.T) {
 	if rearmed.Status != model.NodeRunning || rearmed.Attempt != 2 {
 		t.Errorf("re-armed n1 = %s/%d, want running/2", rearmed.Status, rearmed.Attempt)
 	}
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
 	cur = driveEngine(t, db, inst.ID)
@@ -2890,11 +3004,11 @@ func TestStatusDetailNodesMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNodeInstanceByNode(n1) error = %v", err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 
-	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -2932,10 +3046,10 @@ func TestStatusDetailNodesMap(t *testing.T) {
 	}
 
 	// Instance gate: while waiting nothing is rollbackable.
-	if _, err := svc.Resume(ctx, inst.ID); err != nil {
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Resume() error = %v", err)
 	}
-	d, err = svc.GetStatusDetail(ctx, inst.ID)
+	d, err = svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -2970,7 +3084,7 @@ func TestStatusDetailPendingInputWithForm(t *testing.T) {
 	}
 	driveEngine(t, db, inst.ID)
 
-	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -3005,7 +3119,7 @@ func TestStatusDetailPendingInputNilWhenNotWaitingOnInput(t *testing.T) {
 	}
 	driveEngine(t, db, inst.ID)
 
-	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -3026,7 +3140,7 @@ func TestStatusDetailPendingInputNilWhenNotWaitingOnInput(t *testing.T) {
 	}
 	driveEngine(t, db, inst2.ID)
 
-	d2, err := svc.GetStatusDetail(ctx, inst2.ID)
+	d2, err := svc.GetStatusDetail(ctx, inst2.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -3074,7 +3188,7 @@ func TestStatusDetailNodesMapNestedGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -3135,7 +3249,7 @@ func TestStatusDetailNodesMapUnrestorableContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Pause(ctx, inst.ID); err != nil {
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 
@@ -3145,7 +3259,7 @@ func TestStatusDetailNodesMapUnrestorableContext(t *testing.T) {
 	if err := repo.UpdateNodeInstance(ctx, *occ1); err != nil {
 		t.Fatalf("UpdateNodeInstance() error = %v", err)
 	}
-	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -3227,7 +3341,7 @@ func leanOccurrence(t *testing.T, db *gorm.DB, instanceID, nodeID string) model.
 
 func leanMustPause(t *testing.T, svc service.InstanceService, instanceID string) {
 	t.Helper()
-	if _, err := svc.Pause(context.Background(), instanceID); err != nil {
+	if _, err := svc.Pause(context.Background(), service.ControlRequest{InstanceID: instanceID}); err != nil {
 		t.Fatalf("Pause() error = %v", err)
 	}
 }
@@ -3307,7 +3421,7 @@ func TestLeanRollbackAfterPauseFailsWithoutServiceReplay(t *testing.T) {
 	if res.Status != model.WorkflowPaused || res.CurrentNodeID != n1 {
 		t.Fatalf("res = %+v, want paused at %s", res, n1)
 	}
-	got, err := svc.GetContext(ctx, inst.ID)
+	got, err := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3351,7 +3465,7 @@ func TestLeanNodeDebugReconstructsFullContexts(t *testing.T) {
 	}
 	leanDriveEngine(t, db, inst.ID, opts)
 
-	d, err := svc.NodeDebug(ctx, inst.ID, n1, 0)
+	d, err := svc.NodeDebug(ctx, inst.ID, n1, 0, auth.Principal{})
 	if err != nil {
 		t.Fatalf("NodeDebug() error = %v", err)
 	}
@@ -3469,7 +3583,7 @@ func TestLeanStatusNodesAvoidPerNodeFanOut(t *testing.T) {
 	}
 	leanMustPause(t, svc, inst.ID)
 
-	d, err := svc.GetStatusDetail(ctx, inst.ID)
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatalf("GetStatusDetail() error = %v", err)
 	}
@@ -3536,7 +3650,7 @@ func TestLeanDeliverInputPersistsDiffAtomically(t *testing.T) {
 	if last.IsAnchor {
 		t.Fatalf("last history = %+v, want delivery diff row, not anchor", last)
 	}
-	got, err := svc.GetContext(ctx, inst.ID)
+	got, err := svc.GetContext(ctx, inst.ID, auth.Principal{})
 	if err != nil {
 		t.Fatal(err)
 	}

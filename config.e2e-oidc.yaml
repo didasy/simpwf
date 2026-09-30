@@ -1,0 +1,64 @@
+# Configuration for scripts/e2e-oidc.sh. Not part of the shipped default
+# deployment: it points at a throwaway mock identity provider and enables the
+# API token so the script can also exercise the service-principal bypass.
+infra:
+  http:
+    host: "127.0.0.1:9999"
+    swagger_enabled: false
+  postgresql:
+    dsn: "host=localhost user=gorm password=gorm dbname=simpwf_e2e port=9921 sslmode=disable"
+  redis:
+    dsn: ""
+  rabbitmq:
+    dsn: ""
+
+engine:
+  default_node_timeout: 10s
+  max_node_timeout: 30s
+  condition_timeout: 5s
+  http_allowlist:
+    - "127.0.0.1"
+    - "localhost"
+  exec_allowlist: []
+
+auth:
+  # api_token is deliberately absent: the Taskfile exports SIMPWF_API_TOKEN
+  # once and both the app (auth.api_token binds to it) and the e2e script read
+  # that one value. Spelling the credential here as well would give the two
+  # halves of the harness two answers to drift apart.
+  enabled: true
+
+  oidc:
+    enabled: true
+    issuer: "http://127.0.0.1:9099"
+    client_id: "simpwf"
+    audience: "simpwf"
+    roles_claim: "roles"
+    username_claim: "name"
+    clock_skew: 1m
+    cache_ttl: 1m
+
+  # Deliberately not the shipped catalog: the script needs a "manager" role
+  # to satisfy the node gate, and "finance" to prove the endpoint gate passes
+  # while the node gate still refuses. Note finance holds neither
+  # definitions:write nor roles:read, which the script also asserts.
+  role_permissions:
+    manager:
+      - "definitions:read"
+      - "definitions:write"
+      - "instances:create"
+      - "instances:read"
+      - "instances:update-context"
+      - "input:deliver"
+      - "instances:control"
+      - "statistics:read"
+      - "roles:read"
+    finance:
+      - "instances:create"
+      - "instances:read"
+      - "input:deliver"
+
+system:
+  user_id: "00000000-0000-7000-8000-000000000001"
+  name: "system"
+  email: "system@localhost.local"

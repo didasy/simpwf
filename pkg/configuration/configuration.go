@@ -7,13 +7,16 @@
 package configuration
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/simpwf/workflow-engine/pkg/ids"
 	"github.com/spf13/viper"
 )
 
@@ -98,6 +101,12 @@ type Engine struct {
 	LeanContextDefault   bool          `mapstructure:"lean_context_default"`
 	LeanAnchorEvery      int           `mapstructure:"lean_anchor_every"`
 	LeanReplayMax        int           `mapstructure:"lean_replay_max"`
+	// EnvDenyExtra and EnvAllowExceptions adjust the hardcoded env snapshot
+	// deny list: extra adds patterns, allow narrows it with exceptions. They
+	// never replace the defaults, so a misconfiguration cannot silently open
+	// the whole namespace.
+	EnvDenyExtra       []string `mapstructure:"env_deny_extra"`
+	EnvAllowExceptions []string `mapstructure:"env_allow_exceptions"`
 }
 
 // System holds the configured audit actor (no auth yet).
@@ -107,10 +116,48 @@ type System struct {
 	Email  string `mapstructure:"email"`
 }
 
-// Auth holds the optional API token authentication settings.
+// Auth holds the authentication settings: the optional API token service
+// principal and the optional OIDC resource-server settings.
 type Auth struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	APIToken string `mapstructure:"api_token"`
+	// OIDC enables bearer-token authentication against any OIDC provider.
+	// The engine keeps no sessions and no callback: the frontend runs
+	// code+PKCE against the provider and calls the API with the JWT.
+	OIDC OIDC `mapstructure:"oidc"`
+	// RolePermissions is the static role catalog: role name to the
+	// resource-action permissions it grants. At startup it upserts the
+	// role and permission rows and prunes the permission rows of these
+	// roles that are no longer granted; no role row is ever deleted.
+	RolePermissions map[string][]string `mapstructure:"role_permissions"`
+}
+
+// OIDC holds the OIDC resource-server settings.
+type OIDC struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Issuer is the provider base URL used for discovery and for the
+	// iss check.
+	Issuer string `mapstructure:"issuer"`
+	// ClientID is the expected aud value.
+	ClientID string `mapstructure:"client_id"`
+	// Audience overrides the expected aud value when the provider issues
+	// an API audience distinct from the client id.
+	Audience string `mapstructure:"audience"`
+	// RolesClaim is the claim carrying the caller's roles. Default "roles".
+	// A dotted path reads a nested claim, e.g. "realm_access.roles".
+	RolesClaim string `mapstructure:"roles_claim"`
+	// UsernameClaim overrides the claim used as the display name.
+	// Default "name", falling back to "preferred_username" then email.
+	// A dotted path reads a nested claim, e.g. "profile.display".
+	UsernameClaim string `mapstructure:"username_claim"`
+	// ClockSkew tolerates a small issuer/applicant clock difference on a
+	// token's exp: a token that expired less than ClockSkew ago is retried
+	// against a widened window. It is not applied to nbf, so a token issued
+	// ahead of this clock is still rejected. Default 1m.
+	ClockSkew time.Duration `mapstructure:"clock_skew"`
+	// CacheTTL is how long a fetched discovery document and JWKS stay
+	// fresh before they are refetched. Default 5m.
+	CacheTTL time.Duration `mapstructure:"cache_ttl"`
 }
 
 // Option customizes Load behavior.
@@ -145,10 +192,26 @@ func Load(opts ...Option) (*Config, error) {
 	// auth.api_token is exposed as SIMPWF_API_TOKEN (not
 	// SIMPWF_AUTH_API_TOKEN) to match the requested env contract.
 	_ = v.BindEnv("auth.api_token", "SIMPWF_API_TOKEN")
+	// auth.enabled is bound explicitly because SIMPWF_AUTH_ENABLED is the
+	// switch compose and the e2e harness use to turn authentication on
+	// without rewriting config.yaml.
+	_ = v.BindEnv("auth.enabled", "SIMPWF_AUTH_ENABLED")
+	// auth.oidc.* is exposed as SIMPWF_AUTH_OIDC_* (the default mapping),
+	// which is bound explicitly so the keys resolve without a config file.
+	for _, key := range []string{
+		"enabled", "issuer", "client_id", "audience",
+		"roles_claim", "username_claim", "clock_skew", "cache_ttl",
+	} {
+		_ = v.BindEnv("auth.oidc."+key, "SIMPWF_AUTH_OIDC_"+strings.ToUpper(key))
+	}
 	// Lean settings are operator toggles and must override config.yaml.
 	_ = v.BindEnv("engine.lean_context_default", "SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT")
 	_ = v.BindEnv("engine.lean_anchor_every", "SIMPWF_ENGINE_LEAN_ANCHOR_EVERY")
 	_ = v.BindEnv("engine.lean_replay_max", "SIMPWF_ENGINE_LEAN_REPLAY_MAX")
+	// Env snapshot deny adjustments are operator toggles and must override
+	// config.yaml.
+	_ = v.BindEnv("engine.env_deny_extra", "SIMPWF_ENGINE_ENV_DENY_EXTRA")
+	_ = v.BindEnv("engine.env_allow_exceptions", "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS")
 
 	fileRead := false
 	if _, err := os.Stat(path); err == nil {
@@ -169,6 +232,17 @@ func Load(opts ...Option) (*Config, error) {
 	))); err != nil {
 		return nil, fmt.Errorf("configuration: unmarshal: %w", err)
 	}
+	// auth.role_permissions is exposed as SIMPWF_AUTH_ROLE_PERMISSIONS, a JSON
+	// object of role name to action list. Applied as a post-unmarshal override
+	// (not BindEnv): a map cannot ride AutomaticEnv, and an explicit override
+	// gives env-wins precedence plus a fail-fast JSON error.
+	if raw := strings.TrimSpace(os.Getenv("SIMPWF_AUTH_ROLE_PERMISSIONS")); raw != "" {
+		var catalog map[string][]string
+		if err := json.Unmarshal([]byte(raw), &catalog); err != nil {
+			return nil, fmt.Errorf("configuration: SIMPWF_AUTH_ROLE_PERMISSIONS: invalid JSON: %w", err)
+		}
+		cfg.Auth.RolePermissions = catalog
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -180,6 +254,22 @@ func setDefaults(v *viper.Viper) {
 	// default keeps validation meaningful.
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.api_token", "")
+	// auth.role_permissions has no default: Load reads it from
+	// SIMPWF_AUTH_ROLE_PERMISSIONS as a post-unmarshal override. Registering
+	// it here would put it in AllKeys and let AutomaticEnv hand the raw JSON
+	// string to the map decoder in env-only mode. Omitting it leaves the
+	// catalog nil until the file or the override supplies one, which
+	// validate() already treats as "no catalog".
+	// OIDC stays inert until enabled; the defaults keep every key
+	// env-addressable so validation stays meaningful.
+	v.SetDefault("auth.oidc.enabled", false)
+	v.SetDefault("auth.oidc.issuer", "")
+	v.SetDefault("auth.oidc.client_id", "")
+	v.SetDefault("auth.oidc.audience", "")
+	v.SetDefault("auth.oidc.roles_claim", "roles")
+	v.SetDefault("auth.oidc.username_claim", "name")
+	v.SetDefault("auth.oidc.clock_skew", "1m")
+	v.SetDefault("auth.oidc.cache_ttl", "5m")
 	v.SetDefault("infra.postgresql.dsn", "")
 	v.SetDefault("infra.http.host", "localhost:8080")
 	v.SetDefault("infra.http.swagger_enabled", true)
@@ -212,6 +302,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.lean_context_default", false)
 	v.SetDefault("engine.lean_anchor_every", 20)
 	v.SetDefault("engine.lean_replay_max", 500)
+	v.SetDefault("engine.env_deny_extra", []string{})
+	v.SetDefault("engine.env_allow_exceptions", []string{})
 	v.SetDefault("system.user_id", "00000000-0000-7000-8000-000000000001")
 	v.SetDefault("system.name", "system")
 	v.SetDefault("system.email", "system@localhost")
@@ -239,6 +331,12 @@ func (c *Config) validate() error {
 	if c.Engine.LeanReplayMax <= 0 {
 		return errors.New("configuration: engine.lean_replay_max must be > 0")
 	}
+	if err := validateEnvPatterns("engine.env_deny_extra", c.Engine.EnvDenyExtra); err != nil {
+		return err
+	}
+	if err := validateEnvPatterns("engine.env_allow_exceptions", c.Engine.EnvAllowExceptions); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Infra.RabbitMQ.DSN) != "" {
 		if strings.TrimSpace(c.Infra.RabbitMQ.InputQueue) == "" {
 			return errors.New("configuration: infra.rabbitmq.input_queue is required when infra.rabbitmq.dsn is set")
@@ -252,6 +350,49 @@ func (c *Config) validate() error {
 	}
 	if c.Auth.Enabled && strings.TrimSpace(c.Auth.APIToken) == "" {
 		return errors.New("configuration: auth.api_token is required when auth.enabled is true")
+	}
+	if c.Auth.OIDC.Enabled {
+		if strings.TrimSpace(c.Auth.OIDC.Issuer) == "" {
+			return errors.New("configuration: auth.oidc.issuer is required when auth.oidc.enabled is true")
+		}
+		if strings.TrimSpace(c.Auth.OIDC.ClientID) == "" {
+			return errors.New("configuration: auth.oidc.client_id is required when auth.oidc.enabled is true")
+		}
+		if c.Auth.OIDC.ClockSkew < 0 {
+			return errors.New("configuration: auth.oidc.clock_skew must be >= 0")
+		}
+		if c.Auth.OIDC.CacheTTL <= 0 {
+			return errors.New("configuration: auth.oidc.cache_ttl must be > 0")
+		}
+	}
+	for role := range c.Auth.RolePermissions {
+		if strings.TrimSpace(role) == "" {
+			return errors.New("configuration: auth.role_permissions keys must be non-empty")
+		}
+	}
+	// The system user is the audit actor the API-token and broker bypasses
+	// are recorded as, so every created_by/updated_by written on their behalf
+	// points at this uuid. A value that is blank or is not a canonical uuid
+	// fails the foreign key at the first write instead, by which point the
+	// deployment has already served traffic attributed to nobody.
+	if !ids.Valid(c.System.UserID) {
+		return fmt.Errorf("configuration: system.user_id %q must be a canonical uuid", c.System.UserID)
+	}
+	return nil
+}
+
+// validateEnvPatterns rejects a malformed env deny/allow pattern. A pattern
+// that fails to compile would silently never match, leaving the operator's
+// intent unenforced, so it fails the boot instead.
+func validateEnvPatterns(field string, patterns []string) error {
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, err := path.Match(p, "SIMPWF_PROBE"); err != nil {
+			return fmt.Errorf("configuration: %s: %w", field, err)
+		}
 	}
 	return nil
 }

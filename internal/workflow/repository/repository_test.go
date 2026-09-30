@@ -37,6 +37,8 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	// Atlas migrations (cmd/atlas-loader); AutoMigrate never runs there.
 	if err := db.AutoMigrate(
 		&repository.UserModel{},
+		&repository.RoleModel{},
+		&repository.RolePermissionModel{},
 		&repository.SecretModel{},
 		&repository.NodeDefinitionModel{},
 		&repository.WorkflowDefinitionModel{},
@@ -52,9 +54,23 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 
+	// AutoMigrate creates tables but not the fk_role_permissions_role
+	// foreign key the production migration declares, so add it here to keep
+	// the test schema faithful. Test-only: production owns this constraint
+	// via Atlas. The guard keeps per-test setup idempotent.
+	if err := db.Exec(`DO $$ BEGIN
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_role_permissions_role') THEN
+			ALTER TABLE role_permissions ADD CONSTRAINT fk_role_permissions_role
+				FOREIGN KEY (role) REFERENCES roles (name) ON UPDATE RESTRICT ON DELETE RESTRICT;
+		END IF;
+	END $$`).Error; err != nil {
+		t.Fatalf("add fk_role_permissions_role: %v", err)
+	}
+
 	// Truncate all tables in one statement so foreign-key ordering never
 	// blocks the reset.
 	if err := db.Exec(`TRUNCATE TABLE
+		role_permissions, roles,
 		secrets, status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users

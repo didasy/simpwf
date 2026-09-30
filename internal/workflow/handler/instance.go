@@ -30,8 +30,9 @@ func NewInstanceHandler(svc service.InstanceService) *InstanceHandler {
 // @Produce json
 // @Param request body CreateInstanceRequest true "Workflow instance"
 // @Success 202 {object} CreateInstanceResponse
-// @Failure 400,404,409,422,500 {object} Problem
+// @Failure 401,403,400,404,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance [post]
 func (h *InstanceHandler) Create(c *gin.Context) {
 	var req CreateInstanceRequest
@@ -43,6 +44,7 @@ func (h *InstanceHandler) Create(c *gin.Context) {
 		WorkflowDefinitionID: req.WorkflowDefinitionID,
 		Context:              req.Context,
 		Debug:                req.Debug,
+		Actor:                principalActor(c),
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -63,8 +65,9 @@ func (h *InstanceHandler) Create(c *gin.Context) {
 // @Param workflow_definition_id query string false "Workflow definition ID"
 // @Param status query []string false "Statuses"
 // @Success 200 {object} ListResponse[InstanceSummaryResponse]
-// @Failure 400,500 {object} Problem
+// @Failure 401,403,400,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance [get]
 func (h *InstanceHandler) List(c *gin.Context) {
 	q, err := ParseInstanceListQuery(c)
@@ -72,7 +75,7 @@ func (h *InstanceHandler) List(c *gin.Context) {
 		WriteProblem(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	items, total, err := h.svc.List(c.Request.Context(), toInstanceListQuery(q))
+	items, total, err := h.svc.List(c.Request.Context(), toInstanceListQuery(q), requestPrincipalValue(c))
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -97,11 +100,12 @@ func (h *InstanceHandler) List(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Instance ID"
 // @Success 200 {object} InstanceStatusResponse
-// @Failure 404,500 {object} Problem
+// @Failure 401,403,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/status [get]
 func (h *InstanceHandler) Status(c *gin.Context) {
-	d, err := h.svc.GetStatusDetail(c.Request.Context(), c.Param("id"))
+	d, err := h.svc.GetStatusDetail(c.Request.Context(), c.Param("id"), requestPrincipalValue(c))
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -143,11 +147,12 @@ func (h *InstanceHandler) Status(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Instance ID"
 // @Success 200 {object} InstanceContextResponse
-// @Failure 404,500 {object} Problem
+// @Failure 401,403,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/context [get]
 func (h *InstanceHandler) Context(c *gin.Context) {
-	inst, err := h.svc.GetContext(c.Request.Context(), c.Param("id"))
+	inst, err := h.svc.GetContext(c.Request.Context(), c.Param("id"), requestPrincipalValue(c))
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -165,8 +170,9 @@ func (h *InstanceHandler) Context(c *gin.Context) {
 // @Param X-Context-Update-Reason header string false "Audit reason"
 // @Param request body object true "Full replacement context"
 // @Success 200 {object} InstanceContextResponse
-// @Failure 400,404,409,422,500 {object} Problem
+// @Failure 401,403,400,404,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/context [put]
 func (h *InstanceHandler) UpdateContext(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
@@ -178,6 +184,8 @@ func (h *InstanceHandler) UpdateContext(c *gin.Context) {
 		InstanceID: c.Param("id"),
 		Context:    body,
 		Reason:     c.GetHeader("X-Context-Update-Reason"),
+		Principal:  requestPrincipal(c),
+		Actor:      principalActor(c),
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -195,8 +203,9 @@ func (h *InstanceHandler) UpdateContext(c *gin.Context) {
 // @Param node_id path string true "Node occurrence ID"
 // @Param attempt query int false "Attempt number"
 // @Success 200 {object} NodeDebugResponse
-// @Failure 400,404,500 {object} Problem
+// @Failure 401,403,400,404,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/status/node/{node_id} [get]
 func (h *InstanceHandler) NodeDebug(c *gin.Context) {
 	attempt := 0
@@ -208,7 +217,7 @@ func (h *InstanceHandler) NodeDebug(c *gin.Context) {
 		}
 		attempt = n
 	}
-	d, err := h.svc.NodeDebug(c.Request.Context(), c.Param("id"), c.Param("node_id"), attempt)
+	d, err := h.svc.NodeDebug(c.Request.Context(), c.Param("id"), c.Param("node_id"), attempt, requestPrincipalValue(c))
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -226,8 +235,9 @@ func (h *InstanceHandler) NodeDebug(c *gin.Context) {
 // @Param Idempotency-Key header string true "Idempotency key"
 // @Param request body object true "Input payload"
 // @Success 202 {object} InputDeliveryResponse
-// @Failure 400,404,409,422,500 {object} Problem
+// @Failure 401,403,400,404,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/input [put]
 func (h *InstanceHandler) Input(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
@@ -235,12 +245,23 @@ func (h *InstanceHandler) Input(c *gin.Context) {
 		WriteProblem(c, http.StatusBadRequest, "cannot read request body")
 		return
 	}
-	delivery, err := h.svc.DeliverInput(c.Request.Context(), service.DeliverInput{
+	// The principal is passed through so the service can apply the input
+	// node's role gate and record the deliverer. With authentication off
+	// there is no principal, and a nil one is what the service reads as
+	// the service principal: an unauthenticated deployment keeps accepting
+	// deliveries on nodes that list allowed_roles.
+	principal, authenticated := PrincipalFrom(c)
+	req := service.DeliverInput{
 		InstanceID:     c.Param("id"),
 		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 		Payload:        body,
 		Source:         model.InputChannelHTTP,
-	})
+	}
+	if authenticated {
+		req.Principal = &principal
+		req.Actor = principalActor(c)
+	}
+	delivery, err := h.svc.DeliverInput(c.Request.Context(), req)
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -260,11 +281,16 @@ func (h *InstanceHandler) Input(c *gin.Context) {
 // @Param id path string true "Instance ID"
 // @Success 200 {object} PauseResponse
 // @Success 202 {object} PauseResponse
-// @Failure 404,409,500 {object} Problem
+// @Failure 401,403,404,409,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/pause [post]
 func (h *InstanceHandler) Pause(c *gin.Context) {
-	res, err := h.svc.Pause(c.Request.Context(), c.Param("id"))
+	res, err := h.svc.Pause(c.Request.Context(), service.ControlRequest{
+		InstanceID: c.Param("id"),
+		Principal:  requestPrincipal(c),
+		Actor:      principalActor(c),
+	})
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -283,11 +309,16 @@ func (h *InstanceHandler) Pause(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Instance ID"
 // @Success 200 {object} ResumeResponse
-// @Failure 404,409,500 {object} Problem
+// @Failure 401,403,404,409,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/resume [post]
 func (h *InstanceHandler) Resume(c *gin.Context) {
-	res, err := h.svc.Resume(c.Request.Context(), c.Param("id"))
+	res, err := h.svc.Resume(c.Request.Context(), service.ControlRequest{
+		InstanceID: c.Param("id"),
+		Principal:  requestPrincipal(c),
+		Actor:      principalActor(c),
+	})
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -302,11 +333,17 @@ func (h *InstanceHandler) Resume(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Instance ID"
 // @Success 200 {object} StopResponse
-// @Failure 404,409,500 {object} Problem
+// @Failure 401,403,404,409,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/stop [post]
 func (h *InstanceHandler) Stop(c *gin.Context) {
-	res, err := h.svc.Stop(c.Request.Context(), c.Param("id"), "operator")
+	res, err := h.svc.Stop(c.Request.Context(), service.ControlRequest{
+		InstanceID: c.Param("id"),
+		Reason:     "operator",
+		Principal:  requestPrincipal(c),
+		Actor:      principalActor(c),
+	})
 	if err != nil {
 		WriteError(c, err)
 		return
@@ -323,8 +360,9 @@ func (h *InstanceHandler) Stop(c *gin.Context) {
 // @Param id path string true "Instance ID"
 // @Param request body RollbackRequest true "Rollback target"
 // @Success 200 {object} RollbackResponse
-// @Failure 400,404,409,422,500 {object} Problem
+// @Failure 401,403,400,404,409,422,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/workflow/instance/{id}/rollback [post]
 func (h *InstanceHandler) Rollback(c *gin.Context) {
 	var req RollbackRequest
@@ -336,6 +374,8 @@ func (h *InstanceHandler) Rollback(c *gin.Context) {
 		InstanceID:         c.Param("id"),
 		TargetOccurrenceID: req.TargetOccurrenceID,
 		Reason:             req.Reason,
+		Principal:          requestPrincipal(c),
+		Actor:              principalActor(c),
 	})
 	if err != nil {
 		WriteError(c, err)
@@ -369,10 +409,16 @@ func toPendingInputResponse(p *service.PendingInput) *PendingInputResponse {
 	if p == nil {
 		return nil
 	}
+	allowed := p.AllowedRoles
+	if allowed == nil {
+		allowed = []string{}
+	}
 	resp := &PendingInputResponse{
 		NodeID:         p.NodeID,
 		Channel:        p.Channel,
 		OutputProperty: p.OutputProperty,
+		AllowedRoles:   allowed,
+		RecordActor:    p.RecordActor,
 	}
 	if p.Form != nil {
 		resp.Form = &InputFormDTO{Schema: p.Form.Schema, UI: p.Form.UI}

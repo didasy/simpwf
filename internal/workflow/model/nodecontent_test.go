@@ -1,6 +1,7 @@
 package model_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -785,6 +786,184 @@ func TestParseInputNodeFormAccepted(t *testing.T) {
 	}
 	if !strings.Contains(string(nc.Form.UI), `"order"`) {
 		t.Errorf("form ui not stored: %s", nc.Form.UI)
+	}
+}
+
+// allowed_roles and record_actor are the input node's authorization
+// surface. Both are optional; absent means the behavior that predates them.
+func TestParseInputNodeAllowedRoles(t *testing.T) {
+	nc := mustParseContent(t, `{
+		"type": "input", "channel": "http", "output_property": "user",
+		"allowed_roles": ["finance", " manager ", "finance"]
+	}`)
+	// Entries are trimmed, duplicates removed, and the authored order is
+	// preserved.
+	want := []string{"finance", "manager"}
+	if len(nc.AllowedRoles) != len(want) {
+		t.Fatalf("AllowedRoles = %v, want %v", nc.AllowedRoles, want)
+	}
+	for i := range want {
+		if nc.AllowedRoles[i] != want[i] {
+			t.Fatalf("AllowedRoles = %v, want %v", nc.AllowedRoles, want)
+		}
+	}
+}
+
+// An absent or empty allowed_roles means the node is open, which is what
+// every definition written before the field existed resolves to.
+func TestParseInputNodeAllowedRolesAbsentIsOpen(t *testing.T) {
+	for name, raw := range map[string]string{
+		"absent": `{"type":"input","channel":"http","output_property":"user"}`,
+		"empty":  `{"type":"input","channel":"http","output_property":"user","allowed_roles":[]}`,
+		"null":   `{"type":"input","channel":"http","output_property":"user","allowed_roles":null}`,
+	} {
+		nc := mustParseContent(t, raw)
+		if len(nc.AllowedRoles) != 0 {
+			t.Errorf("%s: AllowedRoles = %v, want empty", name, nc.AllowedRoles)
+		}
+	}
+	// A bare string is a definition error, not a one-element list: the
+	// shape is a list of names, and guessing would hide the mistake.
+	if _, err := model.ParseNodeContent(
+		[]byte(`{"type":"input","channel":"http","output_property":"user","allowed_roles":"finance"}`),
+		testLimits,
+	); err == nil {
+		t.Error("allowed_roles as a string: error = nil, want error")
+	}
+}
+
+// A blank entry is a refusal to name a role, and dropping it would silently
+// open or narrow the gate the author wrote. It is rejected instead, so a
+// typo surfaces as a definition error rather than as a different
+// authorization.
+func TestParseAllowedRolesRejectsBlank(t *testing.T) {
+	cases := map[string]string{
+		"single empty":  `{"type":"input","channel":"http","output_property":"user","allowed_roles":[""]}`,
+		"single blank":  `{"type":"input","channel":"http","output_property":"user","allowed_roles":["   "]}`,
+		"only blanks":   `{"type":"input","channel":"http","output_property":"user","allowed_roles":["","  "]}`,
+		"leading blank": `{"type":"input","channel":"http","output_property":"user","allowed_roles":["","finance"]}`,
+		"trailing":      `{"type":"input","channel":"http","output_property":"user","allowed_roles":["finance",""]}`,
+		"middle":        `{"type":"input","channel":"http","output_property":"user","allowed_roles":["finance","   ","manager"]}`,
+	}
+	for name, raw := range cases {
+		_, err := model.ParseNodeContent([]byte(raw), testLimits)
+		if err == nil {
+			t.Errorf("%s: error = nil, want the blank entry rejected", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "allowed_roles") {
+			t.Errorf("%s: error = %q, want it to name allowed_roles", name, err)
+		}
+	}
+	// The valid list still normalizes, and an absent list is still open.
+	nc := mustParseContent(t, `{"type":"input","channel":"http","output_property":"user","allowed_roles":[" finance ","manager"]}`)
+	if len(nc.AllowedRoles) != 2 || nc.AllowedRoles[0] != "finance" || nc.AllowedRoles[1] != "manager" {
+		t.Errorf("AllowedRoles = %v, want the trimmed valid list", nc.AllowedRoles)
+	}
+	open := mustParseContent(t, `{"type":"input","channel":"http","output_property":"user"}`)
+	if open.AllowedRoles != nil {
+		t.Errorf("AllowedRoles = %v, want nil for an absent list", open.AllowedRoles)
+	}
+}
+
+func TestParseInputNodeRecordActor(t *testing.T) {
+	// Opted in.
+	nc := mustParseContent(t, `{"type":"input","channel":"http","output_property":"user","record_actor":true}`)
+	if !nc.RecordActor {
+		t.Error("RecordActor = false, want true")
+	}
+	// Every other shape is off, so a definition that predates the flag
+	// keeps writing the bare payload.
+	for name, raw := range map[string]string{
+		"absent": `{"type":"input","channel":"http","output_property":"user"}`,
+		"false":  `{"type":"input","channel":"http","output_property":"user","record_actor":false}`,
+		"null":   `{"type":"input","channel":"http","output_property":"user","record_actor":null}`,
+	} {
+		nc := mustParseContent(t, raw)
+		if nc.RecordActor {
+			t.Errorf("%s: RecordActor = true, want false", name)
+		}
+	}
+	// A non-boolean is a definition error rather than a silent false.
+	if _, err := model.ParseNodeContent(
+		[]byte(`{"type":"input","channel":"http","output_property":"user","record_actor":"yes"}`),
+		testLimits,
+	); err == nil {
+		t.Error("record_actor as a string: error = nil, want error")
+	}
+}
+
+// Only an input node may carry the two fields; the same guard that rejects
+// form on other types applies here.
+func TestParseAllowedRolesRejectsNonInputTypes(t *testing.T) {
+	cases := map[string]string{
+		"allowed_roles on script": `{"type":"script","script":"return 1;","allowed_roles":["finance"]}`,
+		"record_actor on script":  `{"type":"script","script":"return 1;","record_actor":true}`,
+		"allowed_roles on output": `{"type":"output","channel":"redis","context_path":"a.b","allowed_roles":["finance"]}`,
+		"record_actor on group":   `{"type":"group","start_node_id":"22222222-2222-7222-8222-222222222222","nodes":[{"type":"script","id":"22222222-2222-7222-8222-222222222222","script":"return 1;"}],"record_actor":true}`,
+	}
+	for name, raw := range cases {
+		_, err := model.ParseNodeContent([]byte(raw), testLimits)
+		if err == nil {
+			t.Errorf("%s: error = nil, want error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "allowed_roles") && !strings.Contains(err.Error(), "record_actor") {
+			t.Errorf("%s: error = %q, want it to name the offending field", name, err)
+		}
+	}
+}
+
+// A referenced occurrence takes its type from the node definition, so the
+// occurrence alone cannot decide whether the input node's authorization
+// fields are legal. Carrying them inline is refused by the same message the
+// other inline executable fields use, instead of being carried and then
+// silently dropped by materialization.
+func TestParseAllowedRolesRejectsNodeDefinitionRefs(t *testing.T) {
+	for name, raw := range map[string]string{
+		"allowed_roles": `{"type":"input","node_definition_id":"22222222-2222-7222-8222-222222222222","allowed_roles":["finance"]}`,
+		"record_actor":  `{"type":"input","node_definition_id":"22222222-2222-7222-8222-222222222222","record_actor":true}`,
+		"both":          `{"type":"input","node_definition_id":"22222222-2222-7222-8222-222222222222","allowed_roles":["finance"],"record_actor":true}`,
+	} {
+		_, err := model.ParseNodeContent([]byte(raw), testLimits)
+		if err == nil {
+			t.Errorf("%s: error = nil, want error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "cannot carry inline executable fields") {
+			t.Errorf("%s: error = %q, want the inline-fields rejection", name, err)
+		}
+	}
+}
+
+// The gate is matched on every delivery attempt against the caller's token
+// roles, so an unbounded list turns one parked input node into quadratic
+// work for whoever can create definitions. 64 roles is far above any real
+// gate, so the bound only refuses a pathological payload.
+func TestParseAllowedRolesRejectsOversizedLists(t *testing.T) {
+	node := func(roles []string) string {
+		quoted := make([]string, len(roles))
+		for i, r := range roles {
+			quoted[i] = `"` + r + `"`
+		}
+		return `{"type":"input","channel":"http","output_property":"user","allowed_roles":[` +
+			strings.Join(quoted, ",") + `]}`
+	}
+	atCap := make([]string, 64)
+	for i := range atCap {
+		atCap[i] = fmt.Sprintf("role-%d", i)
+	}
+	nc := mustParseContent(t, node(atCap))
+	if len(nc.AllowedRoles) != 64 {
+		t.Errorf("AllowedRoles = %d entries, want all 64 kept", len(nc.AllowedRoles))
+	}
+	overCap := append(atCap, "role-64")
+	_, err := model.ParseNodeContent([]byte(node(overCap)), testLimits)
+	if err == nil {
+		t.Fatal("65 roles: error = nil, want the oversized list rejected")
+	}
+	if !strings.Contains(err.Error(), "allowed_roles") {
+		t.Errorf("error = %q, want it to name allowed_roles", err)
 	}
 }
 

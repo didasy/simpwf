@@ -35,8 +35,9 @@ func NewStatisticsHandler(svc service.StatisticsService) *StatisticsHandler {
 // @Param created_to query string false "Inclusive window end (RFC3339)"
 // @Param order query string false "Runs-per-day direction: date or -date"
 // @Success 200 {object} StatisticsSummaryResponse
-// @Failure 400,500 {object} Problem
+// @Failure 401,403,400,500 {object} Problem
 // @Security ApiKeyAuth
+// @Security BearerAuth
 // @Router /v1/statistics [get]
 func (h *StatisticsHandler) Summary(c *gin.Context) {
 	q, err := ParseStatisticsSummaryQuery(c)
