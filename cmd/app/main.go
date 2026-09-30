@@ -17,7 +17,7 @@ import (
 	// @securityDefinitions.apikey BearerAuth
 	// @in header
 	// @name Authorization
-	// @description OIDC bearer token, sent as "Authorization: Bearer <jwt>". The engine is a resource server: the frontend completes a code+PKCE flow against the provider and calls the API with the JWT. The authorization URL, client id, and scopes are served by GET /v1/auth/config.
+	// @description OIDC bearer token. In the Swagger Authorize dialog type "Bearer <jwt>" with the Bearer prefix and a space: the value is sent verbatim as the Authorization header. The engine is a resource server: the frontend completes a code+PKCE flow against the provider and calls the API with the JWT. The authorization URL, client id, and scopes are served by GET /v1/auth/config.
 	// @type apiKey
 
 	"context"

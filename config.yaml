@@ -129,6 +129,8 @@ auth:
     # provider-amplification problem the bound exists to prevent.
     cache_ttl: 5m
 
+  # Equivalent env var: SIMPWF_AUTH_ROLE_PERMISSIONS (JSON object). A set
+  # value overrides this file section; blank falls back to it.
   # Role catalog: role name to the resource-actions it grants. At startup it
   # upserts the role and permission rows and prunes the permission rows of
   # these roles that are no longer granted; no role row is ever deleted. A

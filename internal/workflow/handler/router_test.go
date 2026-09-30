@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/auth"
@@ -60,6 +61,39 @@ func TestRouterSwaggerRoutesWhenEnabled(t *testing.T) {
 	}
 	if document["swagger"] != "2.0" {
 		t.Errorf("swagger version = %v, want 2.0", document["swagger"])
+	}
+}
+
+func TestRouterSwaggerBearerAuthDocumentsPrefix(t *testing.T) {
+	// BearerAuth is type apiKey on the Authorization header, so swagger-ui
+	// sends the Authorize input verbatim with no Bearer prefix auto-added.
+	// The description must therefore tell the user to type the prefix.
+	r := NewRouter(Deps{
+		Health:         NewHealth(fakePinger{}),
+		SwaggerEnabled: true,
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/swagger/doc.json", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /swagger/doc.json status = %d, want 200", w.Code)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &document); err != nil {
+		t.Fatalf("decode Swagger document: %v", err)
+	}
+	defs, ok := document["securityDefinitions"].(map[string]any)
+	if !ok {
+		t.Fatal("swagger document has no securityDefinitions")
+	}
+	bearer, ok := defs["BearerAuth"].(map[string]any)
+	if !ok {
+		t.Fatal("swagger document has no BearerAuth securityDefinition")
+	}
+	desc, _ := bearer["description"].(string)
+	if !strings.Contains(desc, "Bearer ") || !strings.Contains(strings.ToLower(desc), "prefix") {
+		t.Errorf("BearerAuth description must tell the user to type the Bearer prefix, got %q", desc)
 	}
 }
 

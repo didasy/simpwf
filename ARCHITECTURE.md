@@ -471,7 +471,7 @@ status dispatcher, and broker consumers). The compose stack ships with
 authentication **disabled** (`SIMPWF_AUTH_ENABLED=false`) and the wildcard
 HTTP allowlist for dev; the `SIMPWF_API_TOKEN` value present in the file is
 inert while auth is off, and is ignored unless `SIMPWF_AUTH_ENABLED=true` is
-set. Turning auth on therefore takes two variables, not one. The app never
+set. Turning auth on therefore takes two variables, not one. The role catalog comes from `config.yaml` unless `SIMPWF_AUTH_ROLE_PERMISSIONS` holds a JSON object, which overrides the file; invalid JSON fails startup. The app never
 migrates. Broker
 DSNs are optional: without them the app runs HTTP-only. Horizontal scaling
 is safe: multiple `app` replicas share the database; leases and SKIP LOCKED

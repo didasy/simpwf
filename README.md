@@ -235,23 +235,28 @@ and defaults, and `on_failure` payload shape.
 `config.yaml` holds infra, worker pool, engine limits, auth, and the
 system audit user. Key settings:
 
-| Key                                            | Default             | Notes                                                                                                   |
-| ---------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `infra.http.host`                                | `localhost:9999`      | Compose overrides to `0.0.0.0:8080`                                                                       |
-| `infra.http.swagger_enabled`                     | `true`                | Serves UI at `/swagger/index.html`                                                                        |
-| `infra.postgresql.dsn`                           | local `gorm` DSN      | pgx/postgres wire format                                                                                |
-| `infra.redis.dsn`                                | `""` (disabled)       | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                         |
-| `infra.rabbitmq.dsn`                             | `""` (disabled)       | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
-| `engine.default_node_timeout` / `max_node_timeout` | `30s` / `5m`            | Caps script, `external_call`, and `output` nodes                                                            |
-| `engine.condition_timeout`                       | `5s`                  | Fixed budget for conditions, input validation, poller predicates                                        |
-| `engine.http_allowlist`                          | loopback + examples | `"*"` allows any target (development only, logs a warning)                                                |
-| `engine.exec_allowlist`                          | `echo`, `ls`            | Direct argv only, never a shell                                                                         |
-| `auth.enabled` / `api_token`                       | `false`               | When enabled, `/v1` requires `X-Api-Token` (the service principal)                                          |
-| `auth.oidc.*`                                    | disabled            | OIDC resource server; needs `issuer` and `client_id`                                                        |
-| `auth.role_permissions`                          | `{}`                  | The role-to-action catalog that grants every permission                                                 |
+| Key                                                  | Default             | Notes                                                                                                   |
+| ---------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `infra.http.host`                                      | `localhost:9999`      | Compose overrides to `0.0.0.0:8080`                                                                       |
+| `infra.http.swagger_enabled`                           | `true`                | Serves UI at `/swagger/index.html`                                                                        |
+| `infra.postgresql.dsn`                                 | local `gorm` DSN      | pgx/postgres wire format                                                                                |
+| `infra.redis.dsn`                                      | `""` (disabled)       | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                         |
+| `infra.rabbitmq.dsn`                                   | `""` (disabled)       | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
+| `engine.default_node_timeout` / `max_node_timeout`       | `30s` / `5m`            | Caps script, `external_call`, and `output` nodes                                                            |
+| `engine.condition_timeout`                             | `5s`                  | Fixed budget for conditions, input validation, poller predicates                                        |
+| `engine.http_allowlist`                                | loopback + examples | `"*"` allows any target (development only, logs a warning)                                                |
+| `engine.exec_allowlist`                                | `echo`, `ls`            | Direct argv only, never a shell                                                                         |
+| `auth.enabled` / `api_token`                             | `false`               | When enabled, `/v1` requires `X-Api-Token` (the service principal)                                          |
+| `auth.oidc.*`                                          | disabled            | OIDC resource server; needs `issuer` and `client_id`                                                        |
+| `auth.role_permissions` / `SIMPWF_AUTH_ROLE_PERMISSIONS` | file / `{}`           | Role-to-action catalog as YAML map or JSON object; env overrides file; invalid JSON fails startup       |
 
 List-valued keys accept comma-separated env values, e.g.
 `SIMPWF_ENGINE_HTTP_ALLOWLIST="api.example.com,jsonplaceholder.typicode.com"`.
+`SIMPWF_AUTH_ROLE_PERMISSIONS` takes a JSON object of role name to action
+list, e.g. `{"admin":["definitions:read","roles:read"]}`. A set value
+overrides the config file; blank falls back to it. Invalid JSON fails
+startup with a `configuration: SIMPWF_AUTH_ROLE_PERMISSIONS: invalid JSON`
+error.
 
 ## Authentication and authorization
 
@@ -304,6 +309,8 @@ auth:
     finance: ["instances:read", "input:deliver"]
     auditor: ["definitions:read", "instances:read", "statistics:read", "roles:read"]
 ```
+
+Same catalog via env: `SIMPWF_AUTH_ROLE_PERMISSIONS='{"admin":["*"],"finance":["instances:read","input:deliver"]}'` (overrides the file).
 
 `"*"` is the wildcard: a role holding it passes every gate, the same bypass
 the service principal gets. The other two lines are the shipped defaults from

@@ -468,3 +468,74 @@ func TestShippedConfigParsesClockSkew(t *testing.T) {
 		t.Errorf("auth.oidc.clock_skew = %v, want 1m", cfg.Auth.OIDC.ClockSkew)
 	}
 }
+
+// The role catalog is a map, which cannot ride Viper's AutomaticEnv, so it
+// is exposed through an explicit post-unmarshal JSON override.
+func TestLoadRolePermissionsFromEnvJSON(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", `{"admin":["definitions:read","roles:read"],"finance":["instances:read"]}`)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Auth.RolePermissions["admin"]; !slices.Equal(got, []string{"definitions:read", "roles:read"}) {
+		t.Errorf("admin = %v, want [definitions:read roles:read]", got)
+	}
+	if got := cfg.Auth.RolePermissions["finance"]; !slices.Equal(got, []string{"instances:read"}) {
+		t.Errorf("finance = %v, want [instances:read]", got)
+	}
+}
+
+func TestLoadRolePermissionsEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+auth:
+  role_permissions:
+    admin: ["definitions:read"]
+`)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", `{"finance":["instances:read"]}`)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Auth.RolePermissions) != 1 || cfg.Auth.RolePermissions["finance"] == nil {
+		t.Errorf("RolePermissions = %v, want only env value {finance:...}", cfg.Auth.RolePermissions)
+	}
+}
+
+func TestLoadRolePermissionsInvalidJSONFails(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", `not-json`)
+
+	_, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err == nil {
+		t.Fatal("Load() error = nil, want fail-fast on invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "SIMPWF_AUTH_ROLE_PERMISSIONS") {
+		t.Errorf("error = %q, want it to name SIMPWF_AUTH_ROLE_PERMISSIONS", err.Error())
+	}
+}
+
+func TestLoadRolePermissionsBlankEnvUsesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+auth:
+  role_permissions:
+    admin: ["definitions:read"]
+`)
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", "   ")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !slices.Equal(cfg.Auth.RolePermissions["admin"], []string{"definitions:read"}) {
+		t.Errorf("admin = %v, want file value [definitions:read]", cfg.Auth.RolePermissions["admin"])
+	}
+}

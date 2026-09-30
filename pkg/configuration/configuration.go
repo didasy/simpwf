@@ -7,6 +7,7 @@
 package configuration
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -231,6 +232,17 @@ func Load(opts ...Option) (*Config, error) {
 	))); err != nil {
 		return nil, fmt.Errorf("configuration: unmarshal: %w", err)
 	}
+	// auth.role_permissions is exposed as SIMPWF_AUTH_ROLE_PERMISSIONS, a JSON
+	// object of role name to action list. Applied as a post-unmarshal override
+	// (not BindEnv): a map cannot ride AutomaticEnv, and an explicit override
+	// gives env-wins precedence plus a fail-fast JSON error.
+	if raw := strings.TrimSpace(os.Getenv("SIMPWF_AUTH_ROLE_PERMISSIONS")); raw != "" {
+		var catalog map[string][]string
+		if err := json.Unmarshal([]byte(raw), &catalog); err != nil {
+			return nil, fmt.Errorf("configuration: SIMPWF_AUTH_ROLE_PERMISSIONS: invalid JSON: %w", err)
+		}
+		cfg.Auth.RolePermissions = catalog
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -242,7 +254,12 @@ func setDefaults(v *viper.Viper) {
 	// default keeps validation meaningful.
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.api_token", "")
-	v.SetDefault("auth.role_permissions", map[string][]string{})
+	// auth.role_permissions has no default: Load reads it from
+	// SIMPWF_AUTH_ROLE_PERMISSIONS as a post-unmarshal override. Registering
+	// it here would put it in AllKeys and let AutomaticEnv hand the raw JSON
+	// string to the map decoder in env-only mode. Omitting it leaves the
+	// catalog nil until the file or the override supplies one, which
+	// validate() already treats as "no catalog".
 	// OIDC stays inert until enabled; the defaults keep every key
 	// env-addressable so validation stays meaningful.
 	v.SetDefault("auth.oidc.enabled", false)
