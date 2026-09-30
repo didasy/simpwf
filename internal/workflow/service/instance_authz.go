@@ -25,9 +25,19 @@ import (
 // per-user identities to bind to and the pre-authentication behavior is
 // preserved.
 //
+// An anonymous delivery reaches this check as the service principal with no
+// instance ownership of its own, so it passes here the same way an
+// unauthenticated deployment does. The public-node gate in authorizeDelivery
+// is what actually decides: a private node still refuses the delivery, so
+// the instance id is not an oracle for anything an anonymous caller cannot
+// already deliver to.
+//
 // The refusal is deliberately indistinguishable from a miss (ErrNotFound):
 // answering 403 would confirm the instance exists to a caller that is not
-// entitled to know it, turning the endpoint into an id oracle.
+// entitled to know it, turning the endpoint into an id oracle. That is also
+// why an input delivery is authorized at the endpoint before it reaches
+// here: a caller who holds no input:deliver permission is refused by the
+// route on its own terms, rather than being told the instance is gone.
 func authorizeInstance(inst *model.WorkflowInstance, p auth.Principal) error {
 	if inst == nil {
 		return fmt.Errorf("%w: instance not found", model.ErrNotFound)

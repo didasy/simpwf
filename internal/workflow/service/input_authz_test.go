@@ -68,6 +68,18 @@ func deliverAs(svc service.InstanceService, instanceID string, key string, paylo
 	})
 }
 
+// deliverAnonymously delivers a payload the way the optional-auth PUT input
+// route does: no credential at all, flagged anonymous so the service cannot
+// confuse it with the broker's trusted bypass.
+func deliverAnonymously(svc service.InstanceService, instanceID string, key string, payload string) (*model.InputDelivery, error) {
+	return svc.DeliverInput(context.Background(), service.DeliverInput{
+		InstanceID:     instanceID,
+		IdempotencyKey: key,
+		Payload:        []byte(payload),
+		Anonymous:      true,
+	})
+}
+
 // svcInsertScriptNode adds a node the engine never executes for this
 // instance, so a row can be made to point at a node that is in the graph
 // but is not an input node. It returns the new node instance id.
@@ -574,6 +586,193 @@ func TestInputReplayFailsClosedOnUnresolvableNode(t *testing.T) {
 				t.Errorf("replay = %+v, want no delivery returned when the target node is unresolvable", replay)
 			}
 		})
+	}
+}
+
+// A public node accepts an anonymous delivery and marks it: the payload
+// lands bare (public forces record_actor off), the audit event carries
+// delivered_by anonymous, and the denial marker carries the anonymous actor
+// type on refusals elsewhere.
+func TestPublicNodeAcceptsAnonymousDelivery(t *testing.T) {
+	db, svc, instanceID := parkedInstance(t, map[string]any{"public": true})
+	delivery, err := deliverAnonymously(svc, instanceID, "anon-1", `{"ok":true}`)
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v, want the anonymous delivery accepted", err)
+	}
+	if !delivery.Accepted {
+		t.Fatalf("delivery = %+v, want accepted", delivery)
+	}
+
+	// The payload is bare: public nodes cannot carry record_actor.
+	got, err := svc.GetContext(context.Background(), instanceID, auth.Principal{})
+	if err != nil {
+		t.Fatalf("GetContext() error = %v", err)
+	}
+	var ctxMap map[string]any
+	if err := json.Unmarshal(got.Context, &ctxMap); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+	value, ok := ctxMap["webhook"].(map[string]any)
+	if !ok || value["ok"] != true {
+		t.Errorf("webhook = %#v, want the bare payload", ctxMap["webhook"])
+	}
+
+	// The audit trail marks the delivery anonymous.
+	events := loadEvents(t, db, instanceID)
+	found := false
+	for _, e := range events {
+		if e.Type != "input_received" {
+			continue
+		}
+		found = true
+		var data map[string]any
+		_ = json.Unmarshal(e.Data, &data)
+		if data["delivered_by"] != "anonymous" {
+			t.Errorf("input_received delivered_by = %v, want anonymous", data["delivered_by"])
+		}
+		if e.CreatedBy != svcSysUserID {
+			t.Errorf("input_received created_by = %q, want the system user %q", e.CreatedBy, svcSysUserID)
+		}
+	}
+	if !found {
+		t.Error("no input_received audit event was recorded")
+	}
+}
+
+// An anonymous delivery to a private node is refused without a delivery
+// row, and the refusal names the anonymous actor type rather than the
+// system user the event is attributed to.
+func TestAnonymousDeliveryToPrivateNodeIsRefused(t *testing.T) {
+	for name, extra := range map[string]map[string]any{
+		"plain":      nil,
+		"open roles": {"allowed_roles": []string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db, svc, instanceID := parkedInstance(t, extra)
+			if _, err := deliverAnonymously(svc, instanceID, "anon-1", `{"ok":true}`); !errors.Is(err, model.ErrForbidden) {
+				t.Fatalf("DeliverInput() error = %v, want ErrForbidden so the handler answers 403", err)
+			}
+			assertNoDelivery(t, db, instanceID)
+			denied := 0
+			for _, e := range loadEvents(t, db, instanceID) {
+				if e.Type != "input_forbidden" {
+					continue
+				}
+				denied++
+				var data map[string]any
+				_ = json.Unmarshal(e.Data, &data)
+				if data["delivered_by"] != "anonymous" {
+					t.Errorf("input_forbidden delivered_by = %v, want anonymous", data["delivered_by"])
+				}
+			}
+			if denied != 1 {
+				t.Errorf("input_forbidden events = %d, want exactly one", denied)
+			}
+		})
+	}
+}
+
+// A present-but-invalid credential never degrades to anonymous: a caller
+// that proved the wrong thing is refused even on a public node, and no
+// delivery row is written.
+func TestPublicNodeRefusesAuthenticatedCallerWithoutPermission(t *testing.T) {
+	_, svc, instanceID := parkedInstance(t, map[string]any{"public": true})
+	// managerOnly holds no endpoint permission in the gate catalog.
+	managerOnly := &auth.Principal{UserID: gateUserID, Roles: []string{"manager"}}
+	if _, err := deliverAs(svc, instanceID, "anon-1", `{"ok":true}`, managerOnly); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("DeliverInput() error = %v, want ErrForbidden", err)
+	}
+}
+
+// An authenticated caller on a public node runs the existing checks: a
+// role holding input:deliver is accepted, and the delivery is attributed
+// to the caller rather than marked anonymous.
+func TestPublicNodeAcceptsPermittedCaller(t *testing.T) {
+	db, svc, instanceID := parkedInstance(t, map[string]any{"public": true})
+	finance := &auth.Principal{UserID: gateUserID, Roles: []string{"finance"}}
+	delivery, err := deliverAs(svc, instanceID, "key-1", `{"ok":true}`, finance)
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v, want accepted", err)
+	}
+	if !delivery.Accepted {
+		t.Fatalf("delivery = %+v, want accepted", delivery)
+	}
+	for _, e := range loadEvents(t, db, instanceID) {
+		if e.Type != "input_received" {
+			continue
+		}
+		var data map[string]any
+		_ = json.Unmarshal(e.Data, &data)
+		if _, marked := data["delivered_by"]; marked {
+			t.Errorf("attributed delivery carries delivered_by = %v, want no anonymous marker", data["delivered_by"])
+		}
+		if e.CreatedBy != gateUserID {
+			t.Errorf("input_received created_by = %q, want the caller %q", e.CreatedBy, gateUserID)
+		}
+	}
+}
+
+// An anonymous replay re-authorizes whoever asks now: it returns the stored
+// delivery only when the target node is public, and a role-less replay of a
+// private delivery stays refused even with the same key and payload.
+func TestAnonymousReplayFollowsTheTargetNode(t *testing.T) {
+	_, pubSvc, pubID := parkedInstance(t, map[string]any{"public": true})
+	finance := &auth.Principal{UserID: gateUserID, Roles: []string{"finance"}}
+	first, err := deliverAs(pubSvc, pubID, "key-1", `{"ok":true}`, finance)
+	if err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	replay, err := deliverAnonymously(pubSvc, pubID, "key-1", `{"ok":true}`)
+	if err != nil {
+		t.Fatalf("anonymous replay: %v, want the stored delivery", err)
+	}
+	if replay.ID != first.ID {
+		t.Errorf("replay = %+v, want the stored delivery %s", replay, first.ID)
+	}
+
+	_, privSvc, privID := parkedInstance(t, nil)
+	if _, err := deliverAs(privSvc, privID, "key-1", `{"ok":true}`, finance); err != nil {
+		t.Fatalf("private first delivery: %v", err)
+	}
+	if _, err := deliverAnonymously(privSvc, privID, "key-1", `{"ok":true}`); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("anonymous replay of a private delivery error = %v, want ErrForbidden", err)
+	}
+}
+
+// The status contract tells the frontend the node is public, so it can show
+// the anonymous path before anyone tries it.
+func TestPendingInputExposesPublic(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceServiceWithCatalog(db, gateCatalog)
+
+	n1 := "11111111-1111-7111-8111-111111111101"
+	wfID := svcCreateWorkflow(t, db, n1,
+		svcNodeJSON(n1, "input", "ask", "", "", map[string]any{
+			"channel": "http",
+			"public":  true,
+		}),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Context: json.RawMessage(`{}`), Actor: gateUserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting {
+		t.Fatalf("instance = %+v, want waiting", cur)
+	}
+	detail, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{UserID: gateUserID})
+	if err != nil {
+		t.Fatalf("GetStatusDetail() error = %v", err)
+	}
+	if detail.PendingInput == nil {
+		t.Fatal("PendingInput = nil, want the waiting-input contract")
+	}
+	if !detail.PendingInput.Public {
+		t.Error("Public = false, want true")
+	}
+	if len(detail.PendingInput.AllowedRoles) != 0 {
+		t.Errorf("AllowedRoles = %v, want empty for a public node", detail.PendingInput.AllowedRoles)
 	}
 }
 

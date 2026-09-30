@@ -125,6 +125,17 @@ nodes:
   # The form schema, the validation script, and the post hook's "output"
   # global still see the raw payload. Leave it off to keep the legacy shape,
   # and migrate the templates by prefixing the key with input_data.
+  #
+  # public is the third gate and the only one that skips authentication: a
+  # caller with no credential at all can PUT this node, which is what an
+  # outside webhook needs. It is input-only and opt-in, and it forces the node
+  # open and unattributed, so it is refused at parse time together with
+  # either gate above ("public input node must have empty allowed_roles and
+  # record_actor=false"). A public node takes the bare payload and audits the
+  # delivery with delivered_by: anonymous, and the other status reads stay
+  # authenticated, so an anonymous caller has to be told the shape
+  # separately. This node keeps its two gates and leaves public off, so the
+  # sample instance behaves exactly as before.
   - type: input
     id: "11111111-1111-7111-8111-111111111103"
     name: "Manager Approval"

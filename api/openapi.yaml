@@ -579,9 +579,10 @@ paths:
     put:
       tags: [Workflow Instances]
       operationId: deliverInput
-      security:
-        - ApiKeyAuth: []
-        - BearerAuth: []
+      # Deliberately empty: this route serves anonymous callers, so the
+      # global requirement does not apply to it. A presented credential is
+      # still verified, which is why 401 remains a documented response.
+      security: []
       summary: Deliver input to a waiting input node
       description: |
         Raw JSON body; requires Idempotency-Key header. Accepted payload is
@@ -593,6 +594,18 @@ paths:
         Idempotency-Key with a different payload returns 409; retries must
         reuse the same key with the identical payload, and a corrected
         payload needs a fresh key.
+
+        This is the only endpoint that serves an anonymous caller, and only
+        when the waiting input node sets public: true. A request with no
+        credential reaches this route unauthenticated and is admitted only on
+        a public node; a private node answers 403. Because the status and
+        form reads stay authenticated, an anonymous caller has to learn the
+        payload contract out-of-band, so share the instance id and the shape
+        deliberately. A credential that is present but invalid is still 401,
+        including on a public node: a caller that proved the wrong thing never
+        degrades to an accepted anonymous delivery. An authenticated caller
+        on a public node is authorized exactly as on a private one, and its
+        delivery is attributed to it rather than marked anonymous.
       parameters:
         - $ref: "#/components/parameters/InstanceID"
         - name: Idempotency-Key
@@ -873,7 +886,12 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
     Unauthorized:
-      description: Missing or invalid credential (no API token, no valid bearer token, or a token naming no subject/issuer)
+      description: >-
+        Missing or invalid credential (no API token, no valid bearer token, or
+        a token naming no subject/issuer). On PUT /input, which also serves
+        anonymous callers, this means a credential was presented and refused;
+        sending no credential at all is anonymous and is answered 403 on a
+        non-public node instead.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -882,6 +900,8 @@ components:
         Authenticated but not allowed: the caller's roles do not carry the
         endpoint permission, or the input node's allowed_roles does not include
         one of them. A valid API token is the service principal and is never refused.
+        On PUT /input an anonymous caller with no credential is also answered
+        here when the waiting input node is not public.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -1241,7 +1261,7 @@ components:
           description: Advisory rollback target hint; the rollback endpoint stays the source of truth
     PendingInput:
       type: object
-      required: [node_id, channel, output_property, allowed_roles, record_actor, form]
+      required: [node_id, channel, output_property, allowed_roles, record_actor, public, form]
       properties:
         node_id: { type: string, format: uuid }
         channel: { type: string }
@@ -1260,7 +1280,17 @@ components:
           description: |
             True when an accepted delivery is written as the attribution
             envelope {user_id, input_data} rather than the bare payload, so
-            a frontend knows which shape the context will hold.
+            a frontend knows which shape the context will hold. Always false
+            on a public node, which cannot attribute an anonymous caller.
+        public:
+          type: boolean
+          description: |
+            True when the node also accepts a delivery carrying no
+            credential at all, so PUT /input admits an anonymous caller even
+            with auth enabled. Always paired with an empty allowed_roles and
+            record_actor=false; the flag only exists on input nodes. An
+            anonymous delivery is written as the bare payload and marked
+            delivered_by anonymous in the delivery history.
         form:
           $ref: "#/components/schemas/InputForm"
           nullable: true

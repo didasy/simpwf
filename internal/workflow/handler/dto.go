@@ -225,6 +225,10 @@ type PendingInputResponse struct {
 	// attribution envelope {user_id, input_data} rather than the bare
 	// payload, so the frontend knows which shape the context will hold.
 	RecordActor bool `json:"record_actor"`
+	// Public reports that the node accepts anonymous deliveries over HTTP
+	// with no credential, even when auth is on. Status and form reads stay
+	// authenticated, so an anonymous caller learns the shape out-of-band.
+	Public bool `json:"public"`
 }
 
 // InputFormDTO carries the raw schema contract plus opaque ui render hints.

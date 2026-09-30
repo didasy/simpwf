@@ -154,6 +154,7 @@ func TestParseCustomNodeRejectsBuiltinKeys(t *testing.T) {
 		// builtin executable field.
 		{"allowed_roles", `{"type":"parsecustom","config":{"city":"x"},"allowed_roles":["finance"]}`, "does not support"},
 		{"record_actor", `{"type":"parsecustom","config":{"city":"x"},"record_actor":true}`, "does not support"},
+		{"public", `{"type":"parsecustom","config":{"city":"x"},"public":true}`, "does not support"},
 	}
 	for _, c := range cases {
 		_, err := model.ParseNodeContent([]byte(c.raw), testLimits)

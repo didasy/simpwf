@@ -190,3 +190,72 @@ func RequirePermission(action string, catalog auth.Catalog) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// TryAuth returns Gin middleware that authenticates when the request
+// carries a credential and lets it through anonymous when it does not. A
+// present credential is checked exactly like RequireAuth: valid resolves
+// and stores the principal, invalid is 401 and never degrades to
+// anonymous. A request with nothing to check carries no principal, so the
+// handler reads it the same way it reads an auth-disabled deployment and
+// the service decides against the pending node's public flag. Only the
+// credential-less path records itself as anonymous, which is what keeps an
+// authenticated delivery on a public node attributed to its caller rather
+// than marked anonymous.
+//
+// It also checks the endpoint permission itself, and only for the callers it
+// actually authenticated. An anonymous caller holds no permission to check,
+// so the flag cannot be answered until the service has loaded the parked
+// node; the service refuses it there. For a credentialed caller the check
+// has to stay here rather than in the service, because a refusal written by
+// the service would run after the object-level ownership check, and that one
+// answers 404 to hide the instance. A caller who cannot act on the instance
+// at all must be refused on its own terms, not told the instance is gone.
+func TryAuth(cfg AuthConfig) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !authPresented(c, cfg) {
+			c.Set(anonymousKey, true)
+			c.Next()
+			return
+		}
+		principal, err := authenticate(c, cfg)
+		if err != nil {
+			WriteProblem(c, http.StatusUnauthorized, err.Error())
+			return
+		}
+		if !principal.HasPermission(auth.ActionInputDeliver, cfg.Catalog) {
+			WriteProblem(c, http.StatusForbidden, "the "+auth.ActionInputDeliver+" permission is required")
+			return
+		}
+		if cfg.IdentityResolver != nil {
+			principal, err = cfg.IdentityResolver.ResolvePrincipal(c.Request.Context(), principal)
+			if err != nil {
+				// A credential that names nobody is a client error about
+				// the token; anything else is the database failing to
+				// persist an identity that is already valid.
+				if errors.Is(err, model.ErrInvalid) {
+					WriteProblem(c, http.StatusUnauthorized, "cannot resolve the authenticated identity")
+					return
+				}
+				WriteProblem(c, http.StatusInternalServerError, "cannot resolve the authenticated identity")
+				return
+			}
+		}
+		c.Request = c.Request.WithContext(auth.ContextWithPrincipal(c.Request.Context(), principal, cfg.Catalog))
+		c.Set(principalKey, principal)
+		c.Next()
+	}
+}
+
+// authPresented reports whether the request carries anything to check: an
+// API-token header value or an Authorization header. The header only needs
+// to be present, not well-formed: a malformed credential is still a
+// credential the verifier must refuse, not an anonymous request.
+func authPresented(c *gin.Context, cfg AuthConfig) bool {
+	if cfg.Enabled && strings.TrimSpace(c.GetHeader(APIKeyHeader)) != "" {
+		return true
+	}
+	if strings.TrimSpace(c.GetHeader(BearerHeader)) != "" {
+		return true
+	}
+	return false
+}

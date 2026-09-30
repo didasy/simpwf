@@ -84,6 +84,16 @@ node_definitions=$(cat <<'JSON'
       }
     }
   },
+  "input_public": {
+    "name": "public-post",
+    "type": "input",
+    "content": {
+      "type": "input",
+      "channel": "http",
+      "output_property": "public_post",
+      "public": true
+    }
+  },
   "external_call": {
     "name": "get-posts",
     "type": "external_call",
@@ -111,7 +121,7 @@ workflow_template=$(cat <<'JSON'
     },
     "keys": {
       "many": "019fea41-3005-758d-a647-ad9a0ca8e21a",
-      "less": ""
+      "less": "01a0f1ea-1d48-7cba-abd0-418bfc6aed2a"
     },
     "nodes": [
       {
@@ -139,6 +149,11 @@ workflow_template=$(cat <<'JSON'
       {
         "id": "019fea42-0000-7016-8814-16cbe5663eff",
         "name": "add-lucky-number"
+      },
+      {
+        "id": "01a0f1ea-1d48-7cba-abd0-418bfc6aed2a",
+        "name": "public-post",
+        "next_node": "019fea40-ddb2-7b4b-98fb-1c01a04d33e8"
       }
     ]
   },

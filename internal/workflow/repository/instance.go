@@ -58,6 +58,12 @@ type InputCompletion struct {
 	Accepted       bool
 	Error          string
 	CreatedBy      string
+	// Anonymous marks a delivery that arrived with no credential on a
+	// public input node. It is written as delivered_by: anonymous on the
+	// input_received event, so the history distinguishes an anonymous
+	// delivery from a service-principal bypass and a user delivery while
+	// created_by keeps the configured system user the foreign key needs.
+	Anonymous bool
 	// PostFailure marks an accepted delivery whose post processing failed:
 	// the delivery is recorded accepted, the node attempt takes NodeStatus
 	// (finished when a structural group hook failed, failed when the input
@@ -123,6 +129,24 @@ func newRepoID() string {
 		panic(err)
 	}
 	return id
+}
+
+// inputReceivedData builds the audit payload of an input_received event: the
+// targeted occurrence, plus delivered_by: anonymous when the payload arrived
+// with no credential on a public node. Attributed deliveries carry no marker
+// and read exactly as before, so existing history keeps its shape.
+func inputReceivedData(nodeInstanceID string, anonymous bool) json.RawMessage {
+	if !anonymous {
+		return json.RawMessage(`{"node_instance_id":"` + nodeInstanceID + `"}`)
+	}
+	raw, err := json.Marshal(map[string]string{
+		"node_instance_id": nodeInstanceID,
+		"delivered_by":     "anonymous",
+	})
+	if err != nil {
+		return json.RawMessage(`{"node_instance_id":"` + nodeInstanceID + `"}`)
+	}
+	return raw
 }
 
 // HistoryRepository persists and replays lean-context history.
@@ -918,7 +942,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		for _, ev := range []model.WorkflowInstanceEvent{
 			{
 				ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
-				Type: "input_received", Data: json.RawMessage(`{"node_instance_id":"` + c.NodeInstanceID + `"}`),
+				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, c.Anonymous),
 				CreatedBy: c.CreatedBy, CreatedAt: now,
 			},
 		} {
@@ -1021,7 +1045,7 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 		for _, ev := range []model.WorkflowInstanceEvent{
 			{
 				ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
-				Type: "input_received", Data: json.RawMessage(`{"node_instance_id":"` + c.NodeInstanceID + `"}`),
+				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, c.Anonymous),
 				CreatedBy: c.CreatedBy, CreatedAt: now,
 			},
 			{

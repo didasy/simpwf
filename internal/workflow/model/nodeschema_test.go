@@ -203,6 +203,33 @@ func TestNodeSchemaOnFailureOnlyWhereParserAllows(t *testing.T) {
 	}
 }
 
+// TestNodeSchemaPublicOnlyOnInput pins the input node's authorization
+// surface to the one type that parses it, mirroring the parser guard.
+func TestNodeSchemaPublicOnlyOnInput(t *testing.T) {
+	authzFields := []string{"allowed_roles", "record_actor", "public"}
+	for _, nodeType := range builtinTypes {
+		raw, _ := model.NodeSchema(nodeType)
+		props := decodeSchema(t, raw)["properties"].(map[string]any)
+		for _, field := range authzFields {
+			_, present := props[field]
+			want := nodeType == "input"
+			if present != want {
+				t.Errorf("%s: %s present = %v, want %v", nodeType, field, present, want)
+			}
+		}
+	}
+	// The served input schema accepts the public content the parser accepts.
+	raw, _ := model.NodeSchema("input")
+	compiled := compileSchema(t, raw)
+	var instance any
+	if err := json.Unmarshal([]byte(`{"type":"input","channel":"http","output_property":"post","public":true}`), &instance); err != nil {
+		t.Fatal(err)
+	}
+	if err := compiled.Validate(instance); err != nil {
+		t.Errorf("input schema rejected public content: %v", err)
+	}
+}
+
 func TestNodeSchemaDurationsAndIDs(t *testing.T) {
 	raw, _ := model.NodeSchema("script")
 	doc := decodeSchema(t, raw)

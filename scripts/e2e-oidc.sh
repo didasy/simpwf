@@ -12,7 +12,11 @@
 #     parked node's allowed_roles is refused 403 (the second gate);
 #   * the same caller on a node that lists the role is accepted, and the
 #     context records who delivered it (the attribution envelope);
-#   * an API token bypasses both gates and is recorded as the system user.
+#   * an API token bypasses both gates and is recorded as the system user;
+#   * a public: true node accepts a delivery carrying no credential at all,
+#     while a private node refuses the same anonymous request with 403, a
+#     refused credential stays 401 even on a public node, and an anonymous
+#     status read stays 401.
 #
 # The app must be started with auth.oidc.enabled, the issuer below, and a role
 # catalog whose "finance" role grants input:deliver (see config.yaml).
@@ -220,5 +224,129 @@ MGR_ID=$(curl -fsS "$APP_BASE_URL/v1/auth/me" -H "Authorization: Bearer $(financ
 [[ "$(printf '%s' "$ctx2" | jq -r '.context.approval.input_data.approved')" == "true" ]] \
   || fail "envelope input_data is not the raw payload: $ctx2"
 pass "accepted delivery records the deliverer and the raw payload"
+
+# --- the public input node: anonymous delivery ---------------------------------------
+# A second definition whose input node is public. The flag forces the node
+# open and unattributed, so it cannot carry allowed_roles or record_actor.
+cat > "$WORK_DIR/public.json" <<'JSON'
+{
+  "name": "e2e-oidc-public",
+  "content": {
+    "start_node_id": "11111111-1111-7111-8111-111111111201",
+    "nodes": [
+      {
+        "type": "input",
+        "id": "11111111-1111-7111-8111-111111111201",
+        "name": "Partner Webhook",
+        "channel": "http",
+        "output_property": "webhook",
+        "public": true
+      }
+    ]
+  }
+}
+JSON
+
+# The definition carries no role gate, so any catalog role may create it.
+pub=$(curl -fsS -X POST "$APP_BASE_URL/v1/workflow/definition" \
+  -H "Authorization: Bearer $(finance_token manager)" \
+  -H 'Content-Type: application/json' \
+  --data-binary "@$WORK_DIR/public.json") || fail "create public workflow definition"
+PUB_WF=$(printf '%s' "$pub" | jq -er '.id')
+pass "created public-input workflow definition $PUB_WF"
+
+pub_inst=$(curl -fsS -X POST "$APP_BASE_URL/v1/workflow/instance" \
+  -H "Authorization: Bearer $(finance_token manager)" -H 'Content-Type: application/json' \
+  -d "{\"workflow_definition_id\":\"$PUB_WF\",\"context\":{}}") || fail "create public instance"
+PUB_INST=$(printf '%s' "$pub_inst" | jq -er '.id')
+for _ in $(seq 1 60); do
+  pub_status=$(curl -fsS "$APP_BASE_URL/v1/workflow/instance/$PUB_INST/status" -H "X-Api-Token: $SIMPWF_API_TOKEN")
+  ps=$(printf '%s' "$pub_status" | jq -r '.status')
+  preason=$(printf '%s' "$pub_status" | jq -r '.waiting_reason // "none"')
+  [[ "$ps" == "waiting" && "$preason" == "input" ]] && break
+  sleep 1
+done
+[[ "$ps" == "waiting" && "$preason" == "input" ]] || fail "public instance did not park on input (status=$ps reason=$preason)"
+pass "public instance waiting on input"
+
+# The pending-input contract tells the frontend the node is public.
+[[ "$(printf '%s' "$pub_status" | jq -r '.pending_input.public')" == "true" ]] \
+  || fail "pending_input does not report public: $pub_status"
+[[ "$(printf '%s' "$pub_status" | jq -r '.pending_input.record_actor')" == "false" ]] \
+  || fail "a public node must not record an actor: $pub_status"
+pass "pending_input reports the node as public and unattributed"
+
+# The whole point: no credential at all is admitted, with auth enabled.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$APP_BASE_URL/v1/workflow/instance/$PUB_INST/input" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: e2e-anon-1' -d '{"approved":true}')
+[[ "$code" == "202" ]] || fail "anonymous delivery to a public node -> $code, want 202"
+pass "anonymous delivery is accepted on a public node"
+
+# The payload lands bare: a public node cannot attribute an anonymous caller,
+# so there is no {user_id, input_data} envelope around it.
+pub_ctx=$(curl -fsS "$APP_BASE_URL/v1/workflow/instance/$PUB_INST/context" -H "X-Api-Token: $SIMPWF_API_TOKEN")
+[[ "$(printf '%s' "$pub_ctx" | jq -r '.context.webhook.approved')" == "true" ]] \
+  || fail "anonymous delivery did not write the bare payload: $pub_ctx"
+[[ "$(printf '%s' "$pub_ctx" | jq -r '.context.webhook.user_id // "none"')" == "none" ]] \
+  || fail "anonymous delivery attributed a user: $pub_ctx"
+pass "anonymous delivery writes the bare payload and attributes nobody"
+
+# A refused credential is still 401 on a public node: a caller that proved
+# the wrong thing never degrades to an accepted anonymous delivery. The
+# instance has already advanced, so this is checked on a fresh one.
+pub_inst2=$(curl -fsS -X POST "$APP_BASE_URL/v1/workflow/instance" \
+  -H "Authorization: Bearer $(finance_token manager)" -H 'Content-Type: application/json' \
+  -d "{\"workflow_definition_id\":\"$PUB_WF\",\"context\":{}}") || fail "create public instance 2"
+PUB_INST2=$(printf '%s' "$pub_inst2" | jq -er '.id')
+for _ in $(seq 1 60); do
+  pub2_status=$(curl -fsS "$APP_BASE_URL/v1/workflow/instance/$PUB_INST2/status" -H "X-Api-Token: $SIMPWF_API_TOKEN")
+  ps2=$(printf '%s' "$pub2_status" | jq -r '.status')
+  preason2=$(printf '%s' "$pub2_status" | jq -r '.waiting_reason // "none"')
+  [[ "$ps2" == "waiting" && "$preason2" == "input" ]] && break
+  sleep 1
+done
+[[ "$ps2" == "waiting" && "$preason2" == "input" ]] || fail "public instance 2 did not park on input"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$APP_BASE_URL/v1/workflow/instance/$PUB_INST2/input" \
+  -H 'X-Api-Token: not-the-token' -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: e2e-anon-2' -d '{"approved":true}')
+[[ "$code" == "401" ]] || fail "invalid credential on a public node -> $code, want 401"
+pass "invalid credential on a public node is 401, never a silent anonymous delivery"
+
+# An authenticated caller on a public node is not treated as anonymous: it
+# passes the endpoint gate, and a role that does not hold it is still 403.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$APP_BASE_URL/v1/workflow/instance/$PUB_INST2/input" \
+  -H "Authorization: Bearer $(finance_token noroles)" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: e2e-anon-3' -d '{"approved":true}')
+[[ "$code" == "403" ]] || fail "role-less caller on a public node -> $code, want 403"
+pass "an authenticated caller on a public node still passes the normal gates"
+
+# Anonymous is refused on a private node. The manager-only definition from
+# earlier is parked on $INST2 no longer, so use a fresh instance of it.
+priv_inst=$(curl -fsS -X POST "$APP_BASE_URL/v1/workflow/instance" \
+  -H "Authorization: Bearer $(finance_token manager)" -H 'Content-Type: application/json' \
+  -d "{\"workflow_definition_id\":\"$WF_ID\",\"context\":{}}") || fail "create private instance"
+PRIV_INST=$(printf '%s' "$priv_inst" | jq -er '.id')
+for _ in $(seq 1 60); do
+  priv_status=$(curl -fsS "$APP_BASE_URL/v1/workflow/instance/$PRIV_INST/status" -H "X-Api-Token: $SIMPWF_API_TOKEN")
+  prs=$(printf '%s' "$priv_status" | jq -r '.status')
+  prreason=$(printf '%s' "$priv_status" | jq -r '.waiting_reason // "none"')
+  [[ "$prs" == "waiting" && "$prreason" == "input" ]] && break
+  sleep 1
+done
+[[ "$prs" == "waiting" && "$prreason" == "input" ]] || fail "private instance did not park on input"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$APP_BASE_URL/v1/workflow/instance/$PRIV_INST/input" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: e2e-anon-4' -d '{"approved":true}')
+[[ "$code" == "403" ]] || fail "anonymous delivery to a private node -> $code, want 403"
+pass "anonymous delivery is refused on a private node"
+
+# Exempting PUT input must not exempt anything else: the reads an anonymous
+# caller would use to discover the shape stay authenticated.
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$APP_BASE_URL/v1/workflow/instance/$PUB_INST/status")
+[[ "$code" == "401" ]] || fail "anonymous status read on a public instance -> $code, want 401"
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$APP_BASE_URL/v1/workflow/instance/$PUB_INST/context")
+[[ "$code" == "401" ]] || fail "anonymous context read on a public instance -> $code, want 401"
+pass "anonymous status and context reads stay 401 even on a public instance"
 
 echo "e2e-oidc: ALL CHECKS PASSED"

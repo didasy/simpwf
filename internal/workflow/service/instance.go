@@ -60,13 +60,22 @@ type DeliverInput struct {
 	Source         string
 	// Principal is the caller. The API-token and broker paths pass the
 	// service principal, which skips both authorization gates but is still
-	// recorded as the deliverer. A nil Principal is treated as the service
-	// principal, so any path that carries no credential keeps working.
+	// recorded as the deliverer. A nil Principal means the request carried
+	// no credential at all: an anonymous caller. It is refused everywhere
+	// except a public input node, which accepts it and marks the delivery
+	// as anonymous in the audit trail.
 	Principal *auth.Principal
 	// Actor is the users.id uuid recorded on the delivery and the audit
 	// event. Empty falls back to the resolved principal's user id and then
 	// to the service default.
 	Actor string
+	// Anonymous is true when the HTTP layer saw no credential on a route
+	// whose auth is optional. It separates "the caller proved nothing" from
+	// "the caller proved the wrong thing": an anonymous request is refused
+	// on a private node, and on a public node it is accepted and audited as
+	// anonymous rather than as the service principal. The broker paths
+	// leave it false so they keep their trusted-internal bypass.
+	Anonymous bool
 }
 
 // StatusDetail is the status view with the current node occurrence resolved.
@@ -99,6 +108,11 @@ type PendingInput struct {
 	// attribution envelope {user_id, input_data}, so the frontend builds
 	// the follow-up form against the right shape.
 	RecordActor bool
+	// Public reports that the node accepts anonymous deliveries over HTTP
+	// with no credential, even when auth is on. The form still stays
+	// behind authentication, so an anonymous caller learns the shape
+	// out-of-band rather than from this contract.
+	Public bool
 }
 
 // NodeOccurrence is the per-node status view: the already-executed
@@ -603,6 +617,7 @@ func (s *instanceService) pendingInput(ctx context.Context, inst *model.Workflow
 		Form:           node.Form,
 		AllowedRoles:   node.AllowedRoles,
 		RecordActor:    node.RecordActor,
+		Public:         node.Public,
 	}
 }
 
@@ -1492,7 +1507,11 @@ func (s *instanceService) replayDelivery(
 	if nc.Type != model.NodeTypeInput {
 		return nil, fmt.Errorf("%w: delivery %s targets node %q, which is not an input node", model.ErrForbidden, existing.ID, occ.NodeID)
 	}
-	if err := s.authorizeDelivery(ctx, inst, nc, p); err != nil {
+	// A replay re-authorizes whoever is asking now, not whoever wrote the
+	// row: an anonymous caller replays only a public node's delivery, and
+	// an authenticated caller on a public node still passes the endpoint
+	// permission like any other delivery.
+	if err := s.authorizeDelivery(ctx, inst, nc, p, isAnonymousDelivery(req, p)); err != nil {
 		return nil, err
 	}
 	return existing, nil
@@ -1512,6 +1531,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 
 	principal := s.deliveryPrincipal(req)
 	actor := s.deliveryActor(req, principal)
+	anonymous := isAnonymousDelivery(req, principal)
 	if err := authorizeInstance(inst, principal); err != nil {
 		return nil, err
 	}
@@ -1561,8 +1581,10 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	// known, and before the channel match, so a source header cannot skip
 	// the gate. The two gates are independent: a caller may hold
 	// input:deliver and still be refused by a node that does not list one
-	// of its roles.
-	if err := s.authorizeDelivery(ctx, inst, inputNode, principal); err != nil {
+	// of its roles. An anonymous caller passes only on a public node and
+	// is marked anonymous in the audit trail; an invalid credential never
+	// degrades to anonymous, because the router authenticates first.
+	if err := s.authorizeDelivery(ctx, inst, inputNode, principal, anonymous); err != nil {
 		return nil, err
 	}
 	source := req.Source
@@ -1591,6 +1613,8 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	// Schema-first enforcement: the form schema rejects bad payloads before
 	// the validation script runs. Rejection persists Accepted=false, same as
 	// a script rejection; the script never runs after a schema failure.
+	// Anonymous deliveries record the anonymous marker alongside any
+	// rejection, so the audit trail still distinguishes them.
 	if inputNode.Form != nil {
 		if err := form.Validate(inputNode, req.Payload); err != nil {
 			return s.instances.DeliverInput(ctx, repository.InputCompletion{
@@ -1601,6 +1625,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 				Accepted:       false,
 				Error:          err.Error(),
 				CreatedBy:      actor,
+				Anonymous:      anonymous,
 			})
 		}
 	}
@@ -1617,6 +1642,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 			Accepted:       false,
 			Error:          vr.Message,
 			CreatedBy:      actor,
+			Anonymous:      anonymous,
 		})
 	}
 
@@ -1684,6 +1710,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		Status:         status,
 		FinishedAt:     finished,
 		CreatedBy:      actor,
+		Anonymous:      anonymous,
 		History:        s.leanInputHistory(inst, ctxMap, newCtx, attempt),
 	})
 }
@@ -1711,12 +1738,26 @@ func inputContextValue(nc *model.NodeContent, p auth.Principal, actor string, pa
 // deliveryPrincipal resolves the caller of a delivery. A request that
 // carries no principal is the service principal: the broker consumers and
 // any internal caller carry no credential, and they are exactly the paths
-// the bypass matrix describes.
+// the bypass matrix describes. An anonymous HTTP delivery (Anonymous with
+// no valid principal) is not the service principal: it skips only the
+// public-node path, and the actor resolution marks it instead of
+// attributing it to the system user.
 func (s *instanceService) deliveryPrincipal(req DeliverInput) auth.Principal {
 	if req.Principal != nil {
 		return *req.Principal
 	}
 	return auth.SystemPrincipal(s.actor)
+}
+
+// isAnonymousDelivery reports whether the request is an unauthenticated
+// HTTP delivery rather than a trusted internal one. The flag travels on
+// the request so a present-but-invalid credential is never confused with
+// no credential: only the router sets it, and only when the route's auth
+// is optional and the request carried nothing to check. A nil principal
+// resolves to the service principal with the configured system user, so
+// the check reads the flag rather than the resolved identity.
+func isAnonymousDelivery(req DeliverInput, p auth.Principal) bool {
+	return req.Anonymous && req.Principal == nil && req.Actor == ""
 }
 
 // deliveryActor picks the users.id uuid recorded on the delivery. An
@@ -1734,15 +1775,29 @@ func (s *instanceService) deliveryActor(req DeliverInput, p auth.Principal) stri
 
 // authorizeDelivery applies the two independent input gates. A service
 // principal passes both: it is a trusted internal caller with the wildcard
-// permission and no roles to intersect. A denial writes no delivery row and
-// records an input_forbidden audit event carrying the instance, the node,
-// and the refused roles, never the payload.
+// permission and no roles to intersect. An anonymous delivery passes only
+// on a public node, which is open and unattributed by construction. A
+// denial writes no delivery row and records an input_forbidden audit event
+// carrying the instance, the node, and the refused roles, never the
+// payload.
 func (s *instanceService) authorizeDelivery(
 	ctx context.Context,
 	inst *model.WorkflowInstance,
 	inputNode *model.NodeContent,
 	p auth.Principal,
+	anonymous bool,
 ) error {
+	// An anonymous delivery is the broker-shaped principal with the
+	// anonymous flag: it passes only on a public node and never touches
+	// the endpoint permission or the role gate, which need a real caller.
+	// A present-but-invalid credential never sets the flag, so it cannot
+	// degrade to anonymous here.
+	if anonymous {
+		if inputNode.Public {
+			return nil
+		}
+		return s.denyAnonymousInput(ctx, inst, inputNode, p, "anonymous delivery requires a public input node")
+	}
 	if p.Service {
 		return nil
 	}
@@ -1758,7 +1813,9 @@ func (s *instanceService) authorizeDelivery(
 
 // denyInput records the refusal and returns the 403-mapped error. The event
 // names the instance, the node, and the roles the caller actually held, so
-// an operator can tell a wrong role from a missing permission. It never
+// an operator can tell a wrong role from a missing permission. An anonymous
+// refusal carries the anonymous marker alongside the empty caller identity,
+// so it reads as "nobody knocked" rather than as the system user. It never
 // carries the payload: a refused delivery is not data the engine stored.
 func (s *instanceService) denyInput(
 	ctx context.Context,
@@ -1766,6 +1823,31 @@ func (s *instanceService) denyInput(
 	inputNode *model.NodeContent,
 	p auth.Principal,
 	reason string,
+) error {
+	return s.denyInputAs(ctx, inst, inputNode, p, reason, false)
+}
+
+// denyAnonymousInput records an anonymous refusal the same way denyInput
+// does, except the marker names the caller anonymous: the resolved
+// principal is the broker-shaped service principal, which would otherwise
+// mislabel the event as a service-principal refusal.
+func (s *instanceService) denyAnonymousInput(
+	ctx context.Context,
+	inst *model.WorkflowInstance,
+	inputNode *model.NodeContent,
+	p auth.Principal,
+	reason string,
+) error {
+	return s.denyInputAs(ctx, inst, inputNode, p, reason, true)
+}
+
+func (s *instanceService) denyInputAs(
+	ctx context.Context,
+	inst *model.WorkflowInstance,
+	inputNode *model.NodeContent,
+	p auth.Principal,
+	reason string,
+	anonymous bool,
 ) error {
 	actor := p.UserID
 	if actor == "" {
@@ -1775,12 +1857,17 @@ func (s *instanceService) denyInput(
 	if roles == nil {
 		roles = []string{}
 	}
+	actorType := deliveryActorType(p)
+	if anonymous {
+		actorType = "anonymous"
+	}
 	data, err := json.Marshal(map[string]any{
-		"node_id": inputNode.ID,
-		"channel": inputNode.Channel,
-		"reason":  reason,
-		"roles":   roles,
-		"subject": p.Subject,
+		"node_id":      inputNode.ID,
+		"channel":      inputNode.Channel,
+		"reason":       reason,
+		"roles":        roles,
+		"subject":      p.Subject,
+		"delivered_by": actorType,
 	})
 	if err != nil {
 		data = json.RawMessage(`{}`)
@@ -1790,6 +1877,22 @@ func (s *instanceService) denyInput(
 		Data: data, CreatedBy: actor, CreatedAt: nowUTC(),
 	})
 	return fmt.Errorf("%w: %s", model.ErrForbidden, reason)
+}
+
+// deliveryActorType names the kind of caller a delivery event records. The
+// audit trail reads "who" from created_by and "what kind of who" from this:
+// the service principal is the operator's machine identity, a user is a
+// resolved human, and anonymous is a caller that proved nothing on a public
+// node. A zero principal only reaches here for an unauthenticated
+// deployment, where the pre-authentication behavior is preserved.
+func deliveryActorType(p auth.Principal) string {
+	if p.Service {
+		return "service"
+	}
+	if p.UserID != "" || p.Subject != "" {
+		return "user"
+	}
+	return "anonymous"
 }
 
 // leanInputHistory computes the delivery diff in the service (DiffMaps of
