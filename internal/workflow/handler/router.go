@@ -79,14 +79,33 @@ func NewRouter(deps Deps) *gin.Engine {
 		if deps.Auth != nil {
 			resolver = deps.Auth
 		}
-		v1.Use(RequireAuth(AuthConfig{
+		authCfg := AuthConfig{
 			Enabled:          deps.AuthSettings.Enabled,
 			APIToken:         deps.AuthSettings.APIToken,
 			Verifier:         deps.OIDC,
 			IdentityResolver: resolver,
 			Catalog:          deps.Catalog,
 			SystemUserID:     deps.SystemUserID,
-		}))
+		}
+		// PUT input is the one route that serves anonymous callers: a
+		// public input node accepts a delivery with no credential at all.
+		// It is registered before the Use below because gin binds a
+		// group's middleware to each route at registration time, so a
+		// route added afterwards would inherit the global gate and answer
+		// 401 to exactly the caller the flag exists to admit. Every other
+		// /v1 route stays behind that gate.
+		//
+		// The route carries TryAuth rather than RequireAuth: a presented
+		// credential is authenticated exactly as usual (invalid is 401 and
+		// never degrades to anonymous), and a credential-less request
+		// passes through anonymous. It also carries no RequirePermission
+		// gate, because an anonymous caller holds no permission to check;
+		// the service decides against the pending node's public flag and
+		// refuses a private node.
+		if deps.Instances != nil {
+			v1.PUT("/workflow/instance/:id/input", TryAuth(authCfg), NewInstanceHandler(deps.Instances).Input)
+		}
+		v1.Use(RequireAuth(authCfg))
 	}
 
 	if authHandler != nil {
@@ -150,7 +169,14 @@ func NewRouter(deps Deps) *gin.Engine {
 		gate(group, auth.ActionInstancesRead, http.MethodGet, "/:id/status/node/:node_id", instances.NodeDebug)
 		gate(group, auth.ActionInstancesRead, http.MethodGet, "/:id/context", instances.Context)
 		gate(group, auth.ActionInstancesUpdateContext, http.MethodPut, "/:id/context", instances.UpdateContext)
-		gate(group, auth.ActionInputDeliver, http.MethodPut, "/:id/input", instances.Input)
+		// PUT /:id/input is registered earlier, in the auth-enabled branch
+		// above, so it can sit outside the global authentication gate. With
+		// authentication off that branch is skipped and this line is the
+		// only registration, which is exactly the open behavior such a
+		// deployment has always had.
+		if !enabled {
+			group.PUT("/:id/input", instances.Input)
+		}
 		gate(group, auth.ActionInstancesControl, http.MethodPost, "/:id/pause", instances.Pause)
 		gate(group, auth.ActionInstancesControl, http.MethodPost, "/:id/resume", instances.Resume)
 		gate(group, auth.ActionInstancesControl, http.MethodPost, "/:id/stop", instances.Stop)

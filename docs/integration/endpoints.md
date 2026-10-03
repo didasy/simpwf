@@ -218,6 +218,26 @@ Validation-script rejection → `422` with the rejection message in the problem 
 `409`. Success → `202 {"accepted":true}`. A post-hook failure after acceptance still returns `202` but fails the
 workflow.
 
+#### Anonymous delivery to a `public` node
+
+This is the only endpoint in `/v1` that serves a caller with no credential, and only when the parked input node sets
+`public: true`:
+
+| Request                               | Result                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------- |
+| No `X-Api-Token`, node has `public: true` | `202` — accepted, written as the bare payload, audited with `delivered_by: anonymous`  |
+| No `X-Api-Token`, node is not `public`    | `403` — decided after the parked node is loaded, before any delivery row is written  |
+| Wrong `X-Api-Token` sent, any node      | `401` — a refused credential never degrades to an accepted anonymous delivery        |
+| Valid `X-Api-Token`, any node           | Normal path: the two input gates run, and the delivery is attributed to the caller |
+
+A blank or whitespace-only header counts as no credential, since no client means anything by it; a header with any
+content in it is a credential and is checked.
+
+The other instance routes are unaffected: `GET .../status` and every other read still require a credential, so an
+anonymous caller cannot fetch the form schema or the context to discover what to send. Share the instance id and the
+expected shape out-of-band, the way a webhook URL is shared. The authenticated status response reports
+`pending_input.public` so a frontend can tell in advance.
+
 ## Controls
 
 No request bodies. Path ids are never format-validated on instance routes: unknown shape → `404`, with the same

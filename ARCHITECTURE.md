@@ -391,6 +391,56 @@ gate written there would be dropped without a word. Every occurrence of one
 definition therefore shares one gate, and a different gate means a different
 definition.
 
+### Public input nodes and the optional-auth route
+
+`public: true` is the third gate and the only one that skips
+*authentication* rather than just authorization. The node is open and
+unattributed by construction, so the parser refuses the combination outright:
+`public: true` with a non-empty `allowed_roles` or `record_actor: true` is a
+parse error. The role list would never be consulted and the attribution
+envelope would have no `user_id` to write, so accepting the combination would
+be promising an authorization the engine cannot honor.
+
+Authentication is enforced by one `v1.Use(RequireAuth)` on the whole group,
+so admitting anonymous callers is a routing decision, not a per-handler
+`if`. `PUT /v1/workflow/instance/:id/input` is therefore registered *before*
+that `Use`, carrying `TryAuth` instead. Gin binds a group's middleware to
+each route at registration time, so a route added afterwards would inherit
+the global gate and answer 401 to exactly the caller the flag exists to
+admit. The asymmetry is the point: one route out of `/v1` is unauthenticated,
+and the code makes that visible as a single registration that sits apart from
+the gated block.
+
+`TryAuth` is `RequireAuth` minus the requirement. A request carrying a
+credential is authenticated exactly as usual — invalid is 401 and never
+degrades to anonymous — and a request carrying none passes with no principal
+on the context. The middleware marks that case in the Gin context, because
+"no principal" is otherwise ambiguous: it is also what an auth-disabled
+deployment produces, and that deployment must keep the trusted
+service-principal meaning it has always had.
+
+`authorizeDelivery` then branches on that marker before either gate, and
+against the node flag rather than the credential:
+
+- anonymous + `public` → admitted, bypassing the endpoint permission and the
+  role check, which both need a real caller;
+- anonymous + private → 403, decided after loading the parked node and
+  before any delivery row exists;
+- authenticated → the two gates run unchanged, on a public node too, so an
+  authenticated caller is never treated as anonymous.
+
+The audit trail keeps the three cases apart. `input_received` carries
+`delivered_by` (`anonymous`, `service`, or `user`) and `input_forbidden` does
+too, so an anonymous delivery is distinguishable from a broker bypass and
+from a user delivery. The payload of an anonymous delivery lands bare,
+because a public node cannot set `record_actor`.
+
+`authorizeInstance` is unchanged: an anonymous delivery arrives carrying the
+service principal, so it passes the ownership check exactly as an
+unauthenticated deployment does. That is not a hole, because the public-node
+gate has already refused a private node — the instance id never confirms
+anything an anonymous caller could not already deliver to.
+
 ### Attribution
 
 `record_actor` is opt-in and changes only what lands in the context. The

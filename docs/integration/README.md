@@ -16,6 +16,10 @@ code). Where this guide and `openapi.yaml` disagree, this guide follows code.
 - Auth: header `X-Api-Token: <token>`, required on all `/v1/*` routes only when server runs with `auth.enabled=true`.
   Header name is case-insensitive (standard HTTP semantics); comparison is constant-time, so send the token exactly.
 - Missing/invalid token → `401` with `application/problem+json` body.
+- `PUT /v1/workflow/instance/{id}/input` is the one exception: it is reachable with **no** token, and decides against
+  the parked input node. No token on a node with `public: true` → accepted. No token on any other node → `403`. A
+  token that is sent and is wrong stays `401` even on a public node. Sending one anyway is the normal case; sending
+  none is only useful for a public node.
 - Health (`GET /health/live`, `GET /health/ready`) never requires auth.
 - Interactive explorer: `GET /swagger/*any` (e.g. `/swagger/index.html`, `/swagger/doc.json`, Swagger 2.0) when server
   runs with swagger enabled (disabled → `404`).
@@ -50,19 +54,20 @@ Error content type is `application/problem+json`:
 
 Status mapping:
 
-| Status | Meaning here                                                                                                                     |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| 200    | OK (includes pause-immediate, resume, stop, rollback, node debug, statistics)                                                    |
-| 201    | Definition created                                                                                                               |
-| 202    | Accepted: instance created, input accepted, pause deferred (node still running)                                                  |
-| 204    | Deleted, empty body                                                                                                              |
-| 400    | Malformed JSON, malformed query param, invalid path uuid on definition routes (`GET`/`DELETE .../definition/{id}`)                   |
-| 401    | Missing/invalid `X-Api-Token` (auth enabled)                                                                                       |
-| 404    | Unknown id (definition, instance, occurrence, attempt beyond latest)                                                             |
-| 409    | State conflict: delete while referenced, control on terminal instance, context/input/rollback guard failed, duplicate secret key |
-| 422    | Semantic validation failure (bad enum, bad content, bad payload, missing required field)                                         |
-| 500    | Server error (includes malformed instance path ids the database rejects instead of returning zero rows)                          |
-| 503    | `GET /health/ready` only: database unreachable                                                                                     |
+| Status | Meaning here                                                                                                                                                                                  |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | OK (includes pause-immediate, resume, stop, rollback, node debug, statistics)                                                                                                                 |
+| 201    | Definition created                                                                                                                                                                            |
+| 202    | Accepted: instance created, input accepted, pause deferred (node still running)                                                                                                               |
+| 204    | Deleted, empty body                                                                                                                                                                           |
+| 400    | Malformed JSON, malformed query param, invalid path uuid on definition routes (`GET`/`DELETE .../definition/{id}`)                                                                                |
+| 401    | Missing/invalid `X-Api-Token` (auth enabled); on `PUT .../input`, a credential that was sent and is wrong                                                                                         |
+| 403    | Authenticated but not allowed: missing route permission, or refused by an input node's `allowed_roles`. On `PUT .../input`, also an anonymous caller (no credential) on a node that is not `public` |
+| 404    | Unknown id (definition, instance, occurrence, attempt beyond latest)                                                                                                                          |
+| 409    | State conflict: delete while referenced, control on terminal instance, context/input/rollback guard failed, duplicate secret key                                                              |
+| 422    | Semantic validation failure (bad enum, bad content, bad payload, missing required field)                                                                                                      |
+| 500    | Server error (includes malformed instance path ids the database rejects instead of returning zero rows)                                                                                       |
+| 503    | `GET /health/ready` only: database unreachable                                                                                                                                                  |
 
 Rule of thumb for FE: `400` = fix the request shape, `422` = fix the values, `409` = refresh state first (instance moved
 on), `404` on a just-created id = treat as gone and refresh the list.

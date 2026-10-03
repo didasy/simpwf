@@ -1540,14 +1540,7 @@
         },
         "/v1/workflow/instance/{id}/input": {
             "put": {
-                "security": [
-                    {
-                        "ApiKeyAuth": []
-                    },
-                    {
-                        "BearerAuth": []
-                    }
-                ],
+                "description": "This is the only endpoint that serves an anonymous caller, and only when the waiting input node sets public: true. No credential at all is admitted on a public node; a private node answers 403. A credential that is present but invalid is still 401, including on a public node, and never degrades to an accepted anonymous delivery. Status and form reads stay authenticated, so share the payload contract with an anonymous caller out-of-band.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2651,6 +2644,10 @@
                 },
                 "output_property": {
                     "type": "string"
+                },
+                "public": {
+                    "description": "Public reports that the node accepts anonymous deliveries over HTTP\nwith no credential, even when auth is on. Status and form reads stay\nauthenticated, so an anonymous caller learns the shape out-of-band.",
+                    "type": "boolean"
                 },
                 "record_actor": {
                     "description": "RecordActor reports that an accepted delivery is written as the\nattribution envelope {user_id, input_data} rather than the bare\npayload, so the frontend knows which shape the context will hold.",

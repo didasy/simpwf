@@ -75,7 +75,8 @@ status notifications. Both stay fully disabled when their DSN is absent.
 - Status notifications: per-definition `status_update` webhooks and broker
   messages, delivered from a PostgreSQL transactional outbox, ordered per
   instance and per transport, at-least-once with shared idempotency keys.
-- Auth: two independent credentials on `/v1` (`/health/*` stays public).
+- Auth: two independent credentials on `/v1` (`/health/*` stays public, and
+  an input node with `public: true` accepts an anonymous delivery).
   An OIDC bearer token authenticates a human; the engine is a stateless
   resource server with no callback, so the frontend runs code+PKCE against
   the provider and calls the API with the JWT. An `X-Api-Token` authenticates
@@ -205,11 +206,13 @@ provider (real RSA key, real JWKS) and drives the app the way a frontend
 would: a public login contract, a 401 with no credential, a token resolving
 to a stable user, the role catalog refusing a role without `roles:read`, a
 caller holding `input:deliver` still refused by a node that lists a
-different role, the same caller accepted once the role matches, and the
-`record_actor` envelope recording the deliverer. Set `SIMPWF_API_TOKEN` to
-also exercise the service-principal bypass. The app must be started with a
-catalog that grants the roles the script uses;
-`config.e2e-oidc.yaml` is a working example.
+different role, the same caller accepted once the role matches, the
+`record_actor` envelope recording the deliverer, and the `public: true`
+path: anonymous delivery accepted on a public node, refused on a private one,
+an invalid credential refused on both, and an anonymous status read still
+401. Set `SIMPWF_API_TOKEN` to also exercise the service-principal bypass.
+The app must be started with a catalog that grants the roles the script
+uses; `config.e2e-oidc.yaml` is a working example.
 
 ## Node types
 
@@ -375,6 +378,59 @@ there would be silently dropped. Every occurrence of a definition therefore
 shares one gate. To park the same input node under a different gate, create a
 second node definition.
 
+### Public input nodes accept anonymous delivery
+
+`public: true` on an input node is the third option, and the only gate that
+skips authentication entirely. It exists for webhooks: an outside service
+posts a payload it cannot hold a credential for.
+
+```yaml
+- type: input
+  id: "…"
+  name: Partner webhook
+  channel: http
+  output_property: webhook
+  public: true
+```
+
+A public node accepts a `PUT` carrying **no credential at all**, even with
+authentication switched on, and `PUT /v1/workflow/instance/{id}/input` is
+the only endpoint exempted from the global auth gate to allow it. Everything
+else, including the status and form reads, still requires a credential.
+
+The flag is opt-in and per node, and it forces the node open and
+unattributed: `public: true` combined with a non-empty `allowed_roles` or
+`record_actor: true` is rejected at parse time with
+`public input node must have empty allowed_roles and record_actor=false`. A
+public node cannot promise an authorization it cannot honor, since the role
+list would never be consulted and the envelope would have no `user_id` to
+write. It only exists on input nodes, and, like `allowed_roles`, it belongs
+to the node definition rather than the occurrence.
+
+Three rules are worth stating plainly:
+
+- **Anonymous is refused on a private node.** A credential-less `PUT` to a
+  node without `public` answers **403**; the service loads the parked node
+  first and refuses before any delivery row is written.
+- **A bad credential is still 401, even on a public node.** A caller that
+  presented something wrong is never quietly downgraded to an accepted
+  anonymous delivery.
+- **An authenticated caller on a public node is unchanged.** It still passes
+  the two gates normally and its delivery is attributed to it, so the flag
+  widens who may knock, not who gets recorded.
+
+An anonymous delivery is written as the bare payload (a public node cannot set
+`record_actor`) and marked `delivered_by: anonymous` on its `input_received`
+event, so the history tells an anonymous delivery apart from a
+service-principal bypass and from a user delivery. Refusals carry the same
+marker on their `input_forbidden` event.
+
+Because the status reads stay authenticated, an anonymous caller cannot
+discover the payload shape for itself: share the instance id and the expected
+form out-of-band, the way you would share a webhook URL. The pending-input
+contract reports `public`, so an authenticated frontend can tell before anyone
+tries.
+
 ### Attribution
 
 `record_actor: true` wraps the accepted payload in an envelope before it
@@ -398,37 +454,40 @@ The authoritative contract is [api/openapi.yaml](api/openapi.yaml)
 (Swagger UI served from the app; regenerate committed `docs/` with
 `task swagger` after annotation changes).
 
-| Method     | Path                                             | Purpose                                                                  |
-| ---------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
-| GET        | `/health/live`, `/health/ready`                      | Liveness / readiness (always public)                                     |
-| GET        | `/v1/auth/config`                                  | Public OIDC login contract                                               |
-| GET        | `/v1/auth/me`                                      | The authenticated caller (identity, roles, effective permissions)        |
-| GET        | `/v1/roles`                                        | Role catalog (needs `roles:read`)                                          |
-| GET        | `/v1/roles/{name}`                                 | One role and its permissions                                             |
-| POST       | `/v1/node/definition`                              | Create immutable node definition (201)                                   |
-| GET        | `/v1/node/definition`                              | List (paged, `latest_only`, `type`, ...)                                     |
-| GET/DELETE | `/v1/node/definition/{id}`                         | Get / delete (fails if referenced)                                       |
-| POST       | `/v1/workflow/definition`                          | Create immutable workflow definition (201)                               |
-| GET        | `/v1/workflow/definition`                          | List (paged, `latest_only`, ...)                                           |
-| GET/DELETE | `/v1/workflow/definition/{id}`                     | Get / delete (fails if referenced)                                       |
-| POST       | `/v1/secrets`                                      | Create secret (201; plaintext omitted)                                   |
-| GET        | `/v1/secrets`                                      | List masked secrets (paged, ordered by key)                              |
-| GET/DELETE | `/v1/secrets/{key}`                                | Get masked secret / delete; duplicate create returns 409                 |
-| POST       | `/v1/workflow/instance`                            | Start instance (202)                                                     |
-| GET        | `/v1/workflow/instance`                            | List compact summaries (paged, `id`/`workflow_definition_id`/`status` filters) |
-| GET        | `/v1/workflow/instance/{id}/status`                | Status, counters, cursor, per-node `nodes` map, audit actors               |
-| GET/PUT    | `/v1/workflow/instance/{id}/context`               | Get full context / replace it (paused only, 409 on race)                 |
-| GET        | `/v1/workflow/instance/{id}/status/node/{node_id}` | Node debug (`?attempt=N`; `not_started` for never-run nodes)                 |
-| PUT        | `/v1/workflow/instance/{id}/input`                 | Deliver input (`Idempotency-Key` required, 202; 403 by either input gate)  |
-| POST       | `/v1/workflow/instance/{id}/pause`                 | Pause (200 immediate / 202 deferred)                                     |
-| POST       | `/v1/workflow/instance/{id}/resume`                | Resume                                                                   |
-| POST       | `/v1/workflow/instance/{id}/stop`                  | Terminal stop (fences workers, cancels in-flight execution)              |
-| POST       | `/v1/workflow/instance/{id}/rollback`              | Roll back paused/failed instance to a prior occurrence (lands paused)    |
+| Method     | Path                                             | Purpose                                                                                                    |
+| ---------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| GET        | `/health/live`, `/health/ready`                      | Liveness / readiness (always public)                                                                       |
+| GET        | `/v1/auth/config`                                  | Public OIDC login contract                                                                                 |
+| GET        | `/v1/auth/me`                                      | The authenticated caller (identity, roles, effective permissions)                                          |
+| GET        | `/v1/roles`                                        | Role catalog (needs `roles:read`)                                                                            |
+| GET        | `/v1/roles/{name}`                                 | One role and its permissions                                                                               |
+| POST       | `/v1/node/definition`                              | Create immutable node definition (201)                                                                     |
+| GET        | `/v1/node/definition`                              | List (paged, `latest_only`, `type`, ...)                                                                       |
+| GET/DELETE | `/v1/node/definition/{id}`                         | Get / delete (fails if referenced)                                                                         |
+| POST       | `/v1/workflow/definition`                          | Create immutable workflow definition (201)                                                                 |
+| GET        | `/v1/workflow/definition`                          | List (paged, `latest_only`, ...)                                                                             |
+| GET/DELETE | `/v1/workflow/definition/{id}`                     | Get / delete (fails if referenced)                                                                         |
+| POST       | `/v1/secrets`                                      | Create secret (201; plaintext omitted)                                                                     |
+| GET        | `/v1/secrets`                                      | List masked secrets (paged, ordered by key)                                                                |
+| GET/DELETE | `/v1/secrets/{key}`                                | Get masked secret / delete; duplicate create returns 409                                                   |
+| POST       | `/v1/workflow/instance`                            | Start instance (202)                                                                                       |
+| GET        | `/v1/workflow/instance`                            | List compact summaries (paged, `id`/`workflow_definition_id`/`status` filters)                                   |
+| GET        | `/v1/workflow/instance/{id}/status`                | Status, counters, cursor, per-node `nodes` map, audit actors                                                 |
+| GET/PUT    | `/v1/workflow/instance/{id}/context`               | Get full context / replace it (paused only, 409 on race)                                                   |
+| GET        | `/v1/workflow/instance/{id}/status/node/{node_id}` | Node debug (`?attempt=N`; `not_started` for never-run nodes)                                                   |
+| PUT        | `/v1/workflow/instance/{id}/input`                 | Deliver input (`Idempotency-Key` required, 202; 403 by either input gate, or anonymous on a non-public node) |
+| POST       | `/v1/workflow/instance/{id}/pause`                 | Pause (200 immediate / 202 deferred)                                                                       |
+| POST       | `/v1/workflow/instance/{id}/resume`                | Resume                                                                                                     |
+| POST       | `/v1/workflow/instance/{id}/stop`                  | Terminal stop (fences workers, cancels in-flight execution)                                                |
+| POST       | `/v1/workflow/instance/{id}/rollback`              | Roll back paused/failed instance to a prior occurrence (lands paused)                                      |
 
 Instance statuses: `waiting`, `running`, `paused`, `finished`, `failed`,
 `stopped`. Errors follow RFC 7807 `problem+json`. A missing or invalid
 credential is **401**; a valid caller without the route's permission, or one
-refused by an input node's `allowed_roles`, is **403**.
+refused by an input node's `allowed_roles`, is **403**. The one exception is
+`PUT …/input` on a node with `public: true`, which is reachable with no
+credential at all; see
+[Public input nodes](#public-input-nodes-accept-anonymous-delivery).
 
 ### Secrets and templates
 
@@ -572,6 +631,14 @@ is clean, and `task test` passes.
 - `GET /v1/auth/config` is intentionally public and returns no secret: it
   carries only the issuer, client id, endpoints, and roles claim, which the
   provider publishes anyway.
+- `public: true` on an input node is the one place the API serves an
+  unauthenticated **write**, so treat it as a public endpoint you own. Anyone
+  holding the instance id can deliver to it, the payload is stored as-is, and
+  the run continues. Set it only where an outside party must post to you, and
+  pair it with a form schema plus a validation script: the flag is open by
+  construction, so the input contract is the only thing constraining what a
+  stranger can write into your context. Prefer an authenticated route and a
+  signature check when you control both ends.
 - Roles are taken from the verified token, never from the request body, so a
   caller cannot escalate by claiming a role in a parameter. A role absent
   from `auth.role_permissions` grants nothing.

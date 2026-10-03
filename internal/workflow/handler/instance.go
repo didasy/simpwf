@@ -236,8 +236,7 @@ func (h *InstanceHandler) NodeDebug(c *gin.Context) {
 // @Param request body object true "Input payload"
 // @Success 202 {object} InputDeliveryResponse
 // @Failure 401,403,400,404,409,422,500 {object} Problem
-// @Security ApiKeyAuth
-// @Security BearerAuth
+// @Description This is the only endpoint that serves an anonymous caller, and only when the waiting input node sets public: true. No credential at all is admitted on a public node; a private node answers 403. A credential that is present but invalid is still 401, including on a public node, and never degrades to an accepted anonymous delivery. Status and form reads stay authenticated, so share the payload contract with an anonymous caller out-of-band.
 // @Router /v1/workflow/instance/{id}/input [put]
 func (h *InstanceHandler) Input(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
@@ -250,6 +249,14 @@ func (h *InstanceHandler) Input(c *gin.Context) {
 	// there is no principal, and a nil one is what the service reads as
 	// the service principal: an unauthenticated deployment keeps accepting
 	// deliveries on nodes that list allowed_roles.
+	//
+	// A request that reached this handler with no principal while the route
+	// serves anonymous callers is the public input node's case, and it is
+	// flagged as such: the service admits it only on a public node and marks
+	// the delivery anonymous. The flag comes from the middleware rather than
+	// from the absence of a principal, because a missing principal also means
+	// "authentication is off", and that deployment must keep the trusted
+	// service-principal behavior it has always had.
 	principal, authenticated := PrincipalFrom(c)
 	req := service.DeliverInput{
 		InstanceID:     c.Param("id"),
@@ -260,6 +267,8 @@ func (h *InstanceHandler) Input(c *gin.Context) {
 	if authenticated {
 		req.Principal = &principal
 		req.Actor = principalActor(c)
+	} else {
+		req.Anonymous = AnonymousFrom(c)
 	}
 	delivery, err := h.svc.DeliverInput(c.Request.Context(), req)
 	if err != nil {
@@ -419,6 +428,7 @@ func toPendingInputResponse(p *service.PendingInput) *PendingInputResponse {
 		OutputProperty: p.OutputProperty,
 		AllowedRoles:   allowed,
 		RecordActor:    p.RecordActor,
+		Public:         p.Public,
 	}
 	if p.Form != nil {
 		resp.Form = &InputFormDTO{Schema: p.Form.Schema, UI: p.Form.UI}

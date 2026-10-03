@@ -86,7 +86,15 @@ type NodeContent struct {
 	// {user_id, input_data} instead of writing the bare payload under
 	// output_property. It is opt-in per node so a definition that predates
 	// the flag keeps producing the shape its templates already read.
-	RecordActor    bool             `json:"record_actor,omitempty"`
+	RecordActor bool `json:"record_actor,omitempty"`
+	// Public lets an anonymous caller deliver to this input node over HTTP
+	// with no credential at all, even when auth is enabled. It is the
+	// strongest gate the engine has and the only one that skips
+	// authentication, so it is opt-in per node and forces the node open and
+	// unattributed: a public node cannot carry allowed_roles or
+	// record_actor, and its anonymous deliveries are marked as such in the
+	// delivery history.
+	Public         bool             `json:"public,omitempty"`
 	HTTP           *HTTPConfig      // external_call
 	Execution      *ExecutionConfig // external_call
 	OutputProperty string
@@ -237,6 +245,7 @@ type rawNode struct {
 	Form             *rawForm                 `json:"form"`
 	AllowedRoles     []string                 `json:"allowed_roles"`
 	RecordActor      *bool                    `json:"record_actor"`
+	Public           *bool                    `json:"public"`
 	HTTPConfig       *rawHTTPConfig           `json:"http_config"`
 	ExecutionConfig  *rawExecutionConfig      `json:"execution_config"`
 	PollerHTTP       *rawPollerHTTPConfig     `json:"http"`
@@ -402,11 +411,11 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		}
 		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
 			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil || len(r.Config) > 0 ||
-			// allowed_roles and record_actor are the input node's
+			// allowed_roles, record_actor, and public are the input node's
 			// authorization surface. A reference resolves its type from the
 			// definition, so the occurrence cannot be judged here and
 			// materializing it would drop the fields silently.
-			len(r.AllowedRoles) > 0 || r.RecordActor != nil {
+			len(r.AllowedRoles) > 0 || r.RecordActor != nil || r.Public != nil {
 			return nil, errors.New("node referencing a node_definition_id cannot carry inline executable fields")
 		}
 		nc.NodeDefinitionID = *r.NodeDefinitionID
@@ -521,6 +530,12 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		}
 		if r.RecordActor != nil {
 			nc.RecordActor = *r.RecordActor
+		}
+		if r.Public != nil {
+			nc.Public = *r.Public
+		}
+		if nc.Public && (len(nc.AllowedRoles) > 0 || nc.RecordActor) {
+			return nil, errors.New("public input node must have empty allowed_roles and record_actor=false")
 		}
 		nc.Timeout = limits.ConditionTimeout
 
@@ -759,12 +774,12 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 	if _, ok := LookupCustomType(string(nc.Type)); !ok && nc.Type != NodeTypeInput && r.Form != nil {
 		return nil, fmt.Errorf("node type %q does not support form", nc.Type)
 	}
-	// allowed_roles and record_actor are the input node's authorization
-	// surface, so no other builtin type may carry them. The guard sits
-	// after the type switch because a referenced node definition resolves
-	// its type from the definition, not from the occurrence.
-	if nc.Type != NodeTypeInput && (len(r.AllowedRoles) > 0 || r.RecordActor != nil) {
-		return nil, fmt.Errorf("node type %q does not support allowed_roles or record_actor", nc.Type)
+	// allowed_roles, record_actor, and public are the input node's
+	// authorization surface, so no other builtin type may carry them. The
+	// guard sits after the type switch because a referenced node definition
+	// resolves its type from the definition, not from the occurrence.
+	if nc.Type != NodeTypeInput && (len(r.AllowedRoles) > 0 || r.RecordActor != nil || r.Public != nil) {
+		return nil, fmt.Errorf("node type %q does not support allowed_roles, record_actor, or public", nc.Type)
 	}
 	if _, ok := LookupCustomType(string(nc.Type)); !ok && len(r.Config) > 0 {
 		return nil, fmt.Errorf("node type %q does not support config", nc.Type)
@@ -822,7 +837,7 @@ func parseCustomNode(nc *NodeContent, r *rawNode, limits NodeLimits) (*NodeConte
 		r.Nodes != nil || r.StartNodeID != nil || r.ContextPath != nil ||
 		// A custom type is never an input node, so the input node's
 		// authorization surface is refused like any other builtin field.
-		len(r.AllowedRoles) > 0 || r.RecordActor != nil {
+		len(r.AllowedRoles) > 0 || r.RecordActor != nil || r.Public != nil {
 		return nil, fmt.Errorf("node type %q does not support that field; custom nodes carry only type and config", nc.Type)
 	}
 	if len(r.Config) == 0 || strings.TrimSpace(string(r.Config)) == "null" {

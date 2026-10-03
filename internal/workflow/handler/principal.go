@@ -13,6 +13,23 @@ const PrincipalContextKey = "principal"
 // principalKey is the short internal alias used by the middleware.
 const principalKey = PrincipalContextKey
 
+// anonymousKey is the Gin context key under which optional auth records that
+// it admitted a request with no credential. It is the difference between "no
+// principal because authentication is off" and "no principal because this
+// route deliberately serves anonymous callers", which a handler otherwise
+// cannot tell: both present exactly no principal.
+const anonymousKey = "anonymous"
+
+// AnonymousFrom reports whether optional auth let this request through with
+// no credential. A request that never saw authentication reports false, so
+// the pre-authentication deployment keeps its existing meaning of a missing
+// principal.
+func AnonymousFrom(c *gin.Context) bool {
+	anonymous, _ := c.Get(anonymousKey)
+	flag, _ := anonymous.(bool)
+	return flag
+}
+
 // PrincipalFrom returns the authenticated principal of the request and
 // whether authentication ran. A request that reached a handler without
 // authentication (auth disabled) has neither.
