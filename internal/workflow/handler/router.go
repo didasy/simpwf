@@ -167,6 +167,7 @@ func NewRouter(deps Deps) *gin.Engine {
 		gate(group, auth.ActionInstancesRead, http.MethodGet, "", instances.List)
 		gate(group, auth.ActionInstancesRead, http.MethodGet, "/:id/status", instances.Status)
 		gate(group, auth.ActionInstancesRead, http.MethodGet, "/:id/status/node/:node_id", instances.NodeDebug)
+		gate(group, auth.ActionInstancesRead, http.MethodGet, "/:id/debug/context", instances.DebugContext)
 		gate(group, auth.ActionInstancesRead, http.MethodGet, "/:id/context", instances.Context)
 		gate(group, auth.ActionInstancesUpdateContext, http.MethodPut, "/:id/context", instances.UpdateContext)
 		// PUT /:id/input is registered earlier, in the auth-enabled branch

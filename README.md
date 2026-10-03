@@ -324,18 +324,18 @@ Every role in the catalog is seeded into the `roles` / `role_permissions`
 tables at startup so a frontend can read the catalog back. Each route declares
 the one action it needs:
 
-| Action                       | Covers                            |
-| ---------------------------- | --------------------------------- |
-| `definitions:read`             | node/workflow definition reads    |
-| `definitions:write`            | definition writes and deletes     |
-| `secrets:read` / `secrets:write` | secret reads / writes             |
-| `instances:create`             | instance creation                 |
-| `instances:read`               | status, context, node-debug reads |
-| `instances:update-context`     | context replacement               |
-| `input:deliver`                | the input endpoint gate           |
-| `instances:control`            | pause, resume, stop, rollback     |
-| `statistics:read`              | the statistics summary            |
-| `roles:read`                   | the role catalog                  |
+| Action                           | Covers                                           |
+| -------------------------------- | ------------------------------------------------ |
+| `definitions:read`               | node/workflow definition reads                   |
+| `definitions:write`              | definition writes and deletes                    |
+| `secrets:read` / `secrets:write` | secret reads / writes                            |
+| `instances:create`               | instance creation                                |
+| `instances:read`                 | status, context, node-debug, debug-context reads |
+| `instances:update-context`       | context replacement                              |
+| `input:deliver`                  | the input endpoint gate                          |
+| `instances:control`              | pause, resume, stop, rollback                    |
+| `statistics:read`                | the statistics summary                           |
+| `roles:read`                     | the role catalog                                 |
 
 A role the token carries that is absent from the catalog grants nothing, so
 unknown roles deny by default. Seeding upserts the configured roles, prunes
@@ -475,6 +475,7 @@ The authoritative contract is [api/openapi.yaml](api/openapi.yaml)
 | GET        | `/v1/workflow/instance/{id}/status`                | Status, counters, cursor, per-node `nodes` map, audit actors                                                 |
 | GET/PUT    | `/v1/workflow/instance/{id}/context`               | Get full context / replace it (paused only, 409 on race)                                                   |
 | GET        | `/v1/workflow/instance/{id}/status/node/{node_id}` | Node debug (`?attempt=N`; `not_started` for never-run nodes)                                                   |
+| GET        | `/v1/workflow/instance/{id}/debug/context`         | Debug context as TypeScript (debug runs only, `?node_id=`/`?attempt=N`)                                            |
 | PUT        | `/v1/workflow/instance/{id}/input`                 | Deliver input (`Idempotency-Key` required, 202; 403 by either input gate, or anonymous on a non-public node) |
 | POST       | `/v1/workflow/instance/{id}/pause`                 | Pause (200 immediate / 202 deferred)                                                                       |
 | POST       | `/v1/workflow/instance/{id}/resume`                | Resume                                                                                                     |

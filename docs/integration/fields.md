@@ -209,6 +209,9 @@ guard; authoring is trusted, same as scripts that can already read full context)
   not a group, the occurrence is `finished`/`failed`/`stopped`, and its `context_before` parses as a JSON object.
 - Node debug `duration_ms`: set only when both `started_at` and `finished_at` exist.
   `recovery_policy`/`recovery_result`: `null` unless a recovery happened.
+- Debug-context `typescript`: rendered from the secret-redacted snapshot at the debug position (never
+  literal values, never `any`). Rendering caps: max depth 8 (deeper collapses to `unknown`), max 50 keys per object,
+  `typescript` ≤ 32KB (deepest levels collapse first). `attempt` reuses the node-debug rule (omitted → latest).
 - Statistics summary: `success_rate` = finished / terminal (finished+failed+stopped), `null` when terminal is 0.
   `average_duration_ms` = mean `finished_at - started_at` in ms over terminal runs with both timestamps set, `null`
   when none qualify. `active_runs` = waiting+running+paused in the window, always present, never `null`.

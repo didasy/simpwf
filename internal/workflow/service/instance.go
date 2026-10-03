@@ -154,6 +154,19 @@ type NodeDebugDetail struct {
 	UpdatedAt              time.Time
 }
 
+// DebugContextDetail is the resolved debug-position context view: the
+// redacted snapshot rendered as a TypeScript declaration. OccurrenceID
+// and Attempt are nil when the position has no occurrence (the live
+// instance context is the source).
+type DebugContextDetail struct {
+	InstanceID    string
+	NodeID        string
+	OccurrenceID  *string
+	Attempt       *int
+	IsDebugPaused bool
+	TypeScript    string
+}
+
 // ControlResult reports the post-transition state of a pause/resume/stop
 // control call.
 type ControlResult struct {
@@ -252,6 +265,13 @@ type InstanceService interface {
 	// occurrence id; attempt <= 0 selects the latest attempt, a positive
 	// attempt selects an exact loop execution.
 	NodeDebug(ctx context.Context, instanceID, nodeID string, attempt int, p auth.Principal) (*NodeDebugDetail, error)
+	// DebugContext resolves the debug-position context of a debug instance
+	// as a redacted TypeScript declaration plus inferred JSON Schema.
+	// nodeID is either the workflow graph node id or the occurrence id;
+	// empty selects the debug cursor (falling back to the live instance
+	// context when the cursor is empty or terminal). attempt <= 0 selects
+	// the latest attempt, a positive attempt selects an exact execution.
+	DebugContext(ctx context.Context, instanceID, nodeID string, attempt int, p auth.Principal) (*DebugContextDetail, error)
 	// Pause pauses a waiting instance immediately and requests a deferred
 	// pause for a running instance. Idempotent while paused.
 	Pause(ctx context.Context, req ControlRequest) (*ControlResult, error)
