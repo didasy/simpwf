@@ -318,6 +318,19 @@ type NodeDebugResponse struct {
 	UpdatedAt              time.Time       `json:"updated_at"`
 }
 
+// DebugContextResponse mirrors api/openapi.yaml. OccurrenceID and Attempt
+// are null when the debug position has no occurrence (the live redacted
+// instance context is the source). TypeScript is an inline structural
+// declaration for Monaco autocomplete; it never carries literal values.
+type DebugContextResponse struct {
+	InstanceID    string  `json:"instance_id"`
+	NodeID        string  `json:"node_id"`
+	OccurrenceID  *string `json:"occurrence_id"`
+	Attempt       *int    `json:"attempt"`
+	IsDebugPaused bool    `json:"is_debug_paused"`
+	TypeScript    string  `json:"typescript"`
+}
+
 // -- statistics ---------------------------------------------------------------
 
 // StatisticsSummaryResponse is the GET /v1/statistics body.

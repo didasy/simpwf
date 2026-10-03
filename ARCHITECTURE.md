@@ -191,7 +191,8 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
   terminal). Each debug pause appends a `paused` audit event carrying
   `{"debug":true,"node_id":...}`; `pause_requested` stays false. Status-update
   outbox transitions (`running -> paused`) flow through the normal `paused`
-  notification path.
+  notification path. `GET .../debug/context` serves the debug position as a
+  redacted TypeScript declaration for autocomplete.
 
 - **Rollback**: `POST /v1/workflow/instance/{id}/rollback` moves a paused or
   failed instance's cursor back to an already-executed node occurrence so the

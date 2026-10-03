@@ -10,6 +10,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/service"
+	"github.com/simpwf/workflow-engine/pkg/ids"
 )
 
 // InstanceHandler serves workflow instance routes.
@@ -223,6 +224,42 @@ func (h *InstanceHandler) NodeDebug(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, toNodeDebugResponse(d))
+}
+
+// DebugContext handles GET /v1/workflow/instance/{id}/debug/context.
+//
+// @Summary Get debug-position context as TypeScript
+// @Tags workflow-instances
+// @Produce json
+// @Param id path string true "Instance ID"
+// @Param node_id query string false "Graph node or occurrence ID (omitted selects the debug cursor)"
+// @Param attempt query int false "Attempt number"
+// @Success 200 {object} DebugContextResponse
+// @Failure 401,403,400,404,409,500 {object} Problem
+// @Security ApiKeyAuth
+// @Security BearerAuth
+// @Router /v1/workflow/instance/{id}/debug/context [get]
+func (h *InstanceHandler) DebugContext(c *gin.Context) {
+	nodeID := c.Query("node_id")
+	if nodeID != "" && !ids.Valid(nodeID) {
+		WriteProblem(c, http.StatusBadRequest, "query: node_id must be a valid uuid")
+		return
+	}
+	attempt := 0
+	if v := c.Query("attempt"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			WriteProblem(c, http.StatusBadRequest, "query: attempt must be a positive integer")
+			return
+		}
+		attempt = n
+	}
+	d, err := h.svc.DebugContext(c.Request.Context(), c.Param("id"), nodeID, attempt, requestPrincipalValue(c))
+	if err != nil {
+		WriteError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toDebugContextResponse(d))
 }
 
 // Input handles PUT /v1/workflow/instance/{id}/input.
@@ -509,5 +546,18 @@ func toNodeDebugResponse(d *service.NodeDebugDetail) NodeDebugResponse {
 		DurationMS:             d.DurationMS,
 		CreatedAt:              d.CreatedAt,
 		UpdatedAt:              d.UpdatedAt,
+	}
+}
+
+// toDebugContextResponse maps the service detail onto the openapi
+// DebugContext schema.
+func toDebugContextResponse(d *service.DebugContextDetail) DebugContextResponse {
+	return DebugContextResponse{
+		InstanceID:    d.InstanceID,
+		NodeID:        d.NodeID,
+		OccurrenceID:  d.OccurrenceID,
+		Attempt:       d.Attempt,
+		IsDebugPaused: d.IsDebugPaused,
+		TypeScript:    d.TypeScript,
 	}
 }

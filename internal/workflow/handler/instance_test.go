@@ -25,34 +25,36 @@ const (
 
 // fakeInstanceSvc is an in-memory InstanceService for handler tests.
 type fakeInstanceSvc struct {
-	createReq    *service.CreateInstance
-	createInst   model.WorkflowInstance
-	createErr    error
-	statusInst   *model.WorkflowInstance
-	statusErr    error
-	detail       *service.StatusDetail
-	contextInst  *model.WorkflowInstance
-	updateCtxReq *service.UpdateContext
-	updateCtxRes *model.WorkflowInstance
-	updateCtxErr error
-	delivery     *model.InputDelivery
-	deliveryErr  error
-	deliverReq   *service.DeliverInput
-	nodeDebug    *service.NodeDebugDetail
-	nodeDebugErr error
-	pauseRes     *service.ControlResult
-	pauseErr     error
-	resumeRes    *service.ControlResult
-	resumeErr    error
-	stopRes      *service.ControlResult
-	stopErr      error
-	rollbackRes  *service.RollbackResult
-	rollbackErr  error
-	rollbackReq  *service.RollbackRequest
-	listQuery    repository.InstanceListQuery
-	listItems    []model.WorkflowInstance
-	listTotal    int64
-	listErr      error
+	createReq       *service.CreateInstance
+	createInst      model.WorkflowInstance
+	createErr       error
+	statusInst      *model.WorkflowInstance
+	statusErr       error
+	detail          *service.StatusDetail
+	contextInst     *model.WorkflowInstance
+	updateCtxReq    *service.UpdateContext
+	updateCtxRes    *model.WorkflowInstance
+	updateCtxErr    error
+	delivery        *model.InputDelivery
+	deliveryErr     error
+	deliverReq      *service.DeliverInput
+	nodeDebug       *service.NodeDebugDetail
+	nodeDebugErr    error
+	debugContext    *service.DebugContextDetail
+	debugContextErr error
+	pauseRes        *service.ControlResult
+	pauseErr        error
+	resumeRes       *service.ControlResult
+	resumeErr       error
+	stopRes         *service.ControlResult
+	stopErr         error
+	rollbackRes     *service.RollbackResult
+	rollbackErr     error
+	rollbackReq     *service.RollbackRequest
+	listQuery       repository.InstanceListQuery
+	listItems       []model.WorkflowInstance
+	listTotal       int64
+	listErr         error
 	// controls records each control call as verb:instanceID:actor, so a
 	// test can assert the authenticated caller was threaded through.
 	controls []string
@@ -81,6 +83,9 @@ func (f *fakeInstanceSvc) DeliverInput(_ context.Context, req service.DeliverInp
 }
 func (f *fakeInstanceSvc) NodeDebug(_ context.Context, _, _ string, _ int, _ auth.Principal) (*service.NodeDebugDetail, error) {
 	return f.nodeDebug, f.nodeDebugErr
+}
+func (f *fakeInstanceSvc) DebugContext(_ context.Context, _, _ string, _ int, _ auth.Principal) (*service.DebugContextDetail, error) {
+	return f.debugContext, f.debugContextErr
 }
 func (f *fakeInstanceSvc) Pause(_ context.Context, req service.ControlRequest) (*service.ControlResult, error) {
 	f.controls = append(f.controls, "pause:"+req.InstanceID+":"+req.Actor)
@@ -591,6 +596,110 @@ func TestNodeDebugNotFound(t *testing.T) {
 		nodeDebugErr: model.ErrNotFound,
 	}})
 	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status/node/"+occurrenceID, "", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestDebugContextDetail(t *testing.T) {
+	occ := occurrenceID
+	attempt := 3
+	svc := &fakeInstanceSvc{debugContext: &service.DebugContextDetail{
+		InstanceID:    instanceID,
+		NodeID:        wfDefID,
+		OccurrenceID:  &occ,
+		Attempt:       &attempt,
+		IsDebugPaused: true,
+		TypeScript:    "declare const context: { order: { total: number; }; };",
+	}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/debug/context?node_id="+wfDefID+"&attempt=3", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"instance_id", "node_id", "occurrence_id", "attempt", "is_debug_paused", "typescript"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("envelope missing %q: %s", key, w.Body.String())
+		}
+	}
+	if _, ok := raw["json_schema"]; ok {
+		t.Errorf("envelope must not contain %q: %s", "json_schema", w.Body.String())
+	}
+	var resp DebugContextResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.InstanceID != instanceID || resp.NodeID != wfDefID {
+		t.Errorf("resp = %+v", resp)
+	}
+	if resp.OccurrenceID == nil || *resp.OccurrenceID != occurrenceID || resp.Attempt == nil || *resp.Attempt != 3 {
+		t.Errorf("resp = %+v, want occurrence %s attempt 3", resp, occurrenceID)
+	}
+	if !resp.IsDebugPaused || !strings.Contains(resp.TypeScript, "declare const context:") {
+		t.Errorf("resp = %+v", resp)
+	}
+}
+
+func TestDebugContextDefaultCursor(t *testing.T) {
+	svc := &fakeInstanceSvc{debugContext: &service.DebugContextDetail{
+		InstanceID:    instanceID,
+		NodeID:        wfDefID,
+		IsDebugPaused: true,
+		TypeScript:    "declare const context: { seed: number; };",
+	}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: svc})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/debug/context", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp DebugContextResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OccurrenceID != nil || resp.Attempt != nil {
+		t.Errorf("resp = %+v, want nil occurrence/attempt for live context", resp)
+	}
+}
+
+func TestDebugContextAttemptParamInvalid(t *testing.T) {
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{}})
+	for _, q := range []string{"?attempt=0", "?attempt=-1", "?attempt=abc"} {
+		w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/debug/context"+q, "", nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("attempt=%q status = %d, want 400", q, w.Code)
+		}
+	}
+}
+
+func TestDebugContextNodeIDParamInvalid(t *testing.T) {
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{}})
+	for _, q := range []string{"?node_id=not-a-uuid", "?node_id=123"} {
+		w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/debug/context"+q, "", nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("node_id=%q status = %d, want 400", q, w.Code)
+		}
+	}
+}
+
+func TestDebugContextNonDebugConflict(t *testing.T) {
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{
+		debugContextErr: model.ErrConflict,
+	}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/debug/context", "", nil)
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", w.Code)
+	}
+}
+
+func TestDebugContextNotFound(t *testing.T) {
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{
+		debugContextErr: model.ErrNotFound,
+	}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/debug/context?node_id="+wfDefID, "", nil)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}

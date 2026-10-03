@@ -575,6 +575,44 @@ paths:
               schema: { $ref: "#/components/schemas/NodeDebug" }
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/instance/{id}/debug/context:
+    get:
+      tags: [Node Debug]
+      operationId: getDebugContext
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Get debug-position context as TypeScript (autocomplete)
+      description: |
+        Debug instances only (`debug: false` answers 409). node_id omitted
+        selects the debug cursor (falling back to the live redacted instance
+        context when the cursor is empty or the node never ran); an explicit
+        node_id accepts a graph node id or an occurrence id. attempt omitted
+        returns the latest execution; a positive attempt selects an exact
+        execution. occurrence_id/attempt are null when the position has no
+        occurrence. The snapshot is secret-redacted before rendering, so
+        typescript carries types but never literal values.
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+        - name: node_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: attempt
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: Debug context detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DebugContext" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/workflow/instance/{id}/input:
     put:
       tags: [Workflow Instances]
@@ -1388,3 +1426,23 @@ components:
         duration_ms: { type: integer, nullable: true }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    DebugContext:
+      type: object
+      required:
+        - instance_id
+        - node_id
+        - occurrence_id
+        - attempt
+        - is_debug_paused
+        - typescript
+      properties:
+        instance_id: { type: string, format: uuid }
+        node_id:
+          type: string
+          description: Resolved graph node id (empty when the debug cursor is empty)
+        occurrence_id: { type: string, format: uuid, nullable: true }
+        attempt: { type: integer, nullable: true }
+        is_debug_paused: { type: boolean }
+        typescript:
+          type: string
+          description: Inline structural `declare const context` declaration for Monaco autocomplete; never carries literal values

@@ -55,6 +55,9 @@ func (f *fakeInstanceService) DeliverInput(_ context.Context, req service.Delive
 func (f *fakeInstanceService) NodeDebug(context.Context, string, string, int, auth.Principal) (*service.NodeDebugDetail, error) {
 	return nil, nil
 }
+func (f *fakeInstanceService) DebugContext(context.Context, string, string, int, auth.Principal) (*service.DebugContextDetail, error) {
+	return nil, nil
+}
 func (f *fakeInstanceService) Pause(context.Context, service.ControlRequest) (*service.ControlResult, error) {
 	return nil, nil
 }

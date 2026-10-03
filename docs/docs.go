@@ -1542,6 +1542,90 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/workflow/instance/{id}/debug/context": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workflow-instances"
+                ],
+                "summary": "Get debug-position context as TypeScript",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Instance ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Graph node or occurrence ID (omitted selects the debug cursor)",
+                        "name": "node_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Attempt number",
+                        "name": "attempt",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.DebugContextResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/internal_workflow_handler.Problem"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/workflow/instance/{id}/input": {
             "put": {
                 "description": "This is the only endpoint that serves an anonymous caller, and only when the waiting input node sets public: true. No credential at all is admitted on a public node; a private node answers 403. A credential that is present but invalid is still 401, including on a public node, and never degrades to an accepted anonymous delivery. Status and form reads stay authenticated, so share the payload contract with an anonymous caller out-of-band.",
@@ -2218,6 +2302,29 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "previous_version_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.DebugContextResponse": {
+            "type": "object",
+            "properties": {
+                "attempt": {
+                    "type": "integer"
+                },
+                "instance_id": {
+                    "type": "string"
+                },
+                "is_debug_paused": {
+                    "type": "boolean"
+                },
+                "node_id": {
+                    "type": "string"
+                },
+                "occurrence_id": {
+                    "type": "string"
+                },
+                "typescript": {
                     "type": "string"
                 }
             }

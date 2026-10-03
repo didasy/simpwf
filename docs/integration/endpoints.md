@@ -202,6 +202,18 @@ positive integer → exact attempt; `0`/negative/garbage → `400`; beyond lates
   `cancelled`, `started_at`, `finished_at`, `stopped_at`, `duration_ms`, audit timestamps. Per-type `output` shapes
   are listed under "Node outputs" in `fields.md`.
 
+### `GET /v1/workflow/instance/{id}/debug/context` → `200`
+
+Debug instances only: `debug: false` → `409`. `node_id` query omitted selects the debug cursor (falling back to the
+live redacted instance context when the cursor is empty or the node never ran); an explicit `node_id` accepts a graph
+node id or an occurrence id. `attempt` follows the node-debug rule: omitted → latest; `0`/negative/garbage → `400`;
+beyond latest → `404`. Malformed `node_id` → `400`; unknown instance/node → `404`.
+
+Response `{instance_id, node_id, occurrence_id, attempt, is_debug_paused, typescript}`.
+`occurrence_id`/`attempt` are `null` when the position has no occurrence. `is_debug_paused` is `true` when the status
+is `paused`. `typescript` is an inline structural `declare const context` declaration for Monaco `addExtraLib()`,
+rendered from the secret-redacted snapshot and never carrying literal values.
+
 ### `PUT /v1/workflow/instance/{id}/input` → `202`
 
 Delivers a payload to the parked input node. Only works when the instance is `waiting` with `waiting_reason == "input"`

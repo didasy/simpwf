@@ -122,7 +122,8 @@ Every `GET` list returns the same envelope:
 7. Failed/paused instance that must redo work: pick `occurrence_id` from the `nodes` map or node debug API,
    `POST .../rollback`, then `POST .../resume`.
 8. Inspect any step: `GET .../status/node/{node_id}` (`context_before`, `context_after`, `input`, `output`, `error`,
-   attempts).
+   attempts). On debug runs, `GET .../debug/context` returns the same position as a TypeScript declaration
+   for editor autocomplete.
 9. Dashboard: `GET /v1/statistics` for KPI cards (`active_runs` for live load) and `runs_per_day` charts over the `created_from`/`created_to` window.
 
 ## Instance lifecycle (for button state)
