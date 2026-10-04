@@ -422,6 +422,13 @@ func (e *PollerExecutor) pollRabbit(ctx context.Context, req Request) (*Result, 
 	go func() { consumeDone <- e.rabbit.ConsumeQueue(waitCtx, queue, "poller-"+req.IdempotencyKey, handler) }()
 	select {
 	case r := <-results:
+		// The match (or predicate error) is signaled from inside the
+		// consume handler, but the delivery is settled by ConsumeQueue
+		// only after the handler returns. Cancel and wait for the
+		// consumer to exit so the Ack completes before Execute returns;
+		// otherwise the caller can observe a missing settlement.
+		cancel()
+		<-consumeDone
 		if r.err != nil {
 			return nil, &NodeError{Node: req.Node, Reason: "poller-until", Err: r.err}
 		}
