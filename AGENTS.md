@@ -74,9 +74,6 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 6. Tooling (mandatory)
 
-### Skills
-- Before any response or action, invoke Skill tool twice with exact names `caveman`, then `using-superpowers`. Never Read skill files.
-
 ### jcodemunch (code search first)
 - Session start: call `jcodemunch_guide` once, then `resolve_repo` with the absolute folder path to confirm the index is present (`list_repos` as fallback).
 - This repo index: `local/simpwf-3c83eba5`, source root `/home/didasy/project/simpwf`.

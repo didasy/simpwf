@@ -301,6 +301,7 @@ func NodeInstanceToModel(n model.NodeInstance) NodeInstanceModel {
 	return NodeInstanceModel{
 		ID:                 n.ID,
 		WorkflowInstanceID: n.WorkflowInstanceID,
+		BranchID:           uuidPtr(n.BranchID),
 		NodeID:             n.NodeID,
 		NodeDefinitionID:   uuidPtr(n.NodeDefinitionID),
 		Name:               n.Name,
@@ -328,6 +329,7 @@ func NodeInstanceFromModel(m NodeInstanceModel) model.NodeInstance {
 	return model.NodeInstance{
 		ID:                 m.ID,
 		WorkflowInstanceID: m.WorkflowInstanceID,
+		BranchID:           strVal(m.BranchID),
 		NodeID:             m.NodeID,
 		NodeDefinitionID:   strVal(m.NodeDefinitionID),
 		Name:               m.Name,
@@ -399,5 +401,85 @@ func InputDeliveryFromModel(m InputDeliveryModel) model.InputDelivery {
 		Accepted:           m.Accepted,
 		Error:              m.Error,
 		CreatedAt:          m.CreatedAt,
+	}
+}
+
+// ParallelExecutionToModel maps a domain parallel execution to persistence.
+func ParallelExecutionToModel(e model.ParallelExecution) ParallelExecutionModel {
+	return ParallelExecutionModel{
+		ID:             e.ID,
+		InstanceID:     e.InstanceID,
+		ParentBranchID: e.ParentBranchID,
+		Depth:          e.Depth,
+		StartNodeID:    e.StartNodeID,
+		EndNodeID:      e.EndNodeID,
+		Status:         string(e.Status),
+		BranchCount:    e.BranchCount,
+		CompletedCount: e.CompletedCount,
+		CreatedAt:      e.CreatedAt,
+		UpdatedAt:      e.UpdatedAt,
+	}
+}
+
+// ParallelExecutionFromModel maps a persistence execution back to the domain.
+func ParallelExecutionFromModel(m ParallelExecutionModel) model.ParallelExecution {
+	return model.ParallelExecution{
+		ID:             m.ID,
+		InstanceID:     m.InstanceID,
+		ParentBranchID: m.ParentBranchID,
+		Depth:          m.Depth,
+		StartNodeID:    m.StartNodeID,
+		EndNodeID:      m.EndNodeID,
+		Status:         model.ParallelExecutionStatus(m.Status),
+		BranchCount:    m.BranchCount,
+		CompletedCount: m.CompletedCount,
+		CreatedAt:      m.CreatedAt,
+		UpdatedAt:      m.UpdatedAt,
+	}
+}
+
+// ParallelBranchToModel maps a domain parallel branch to persistence.
+func ParallelBranchToModel(b model.ParallelBranch) ParallelBranchModel {
+	return ParallelBranchModel{
+		ID:                  b.ID,
+		ParallelExecutionID: b.ParallelExecutionID,
+		InstanceID:          b.InstanceID,
+		Name:                b.Name,
+		BranchIndex:         b.BranchIndex,
+		StartNodeID:         b.StartNodeID,
+		Frame:               jsonCol(b.Frame, "{}"),
+		Context:             jsonCol(b.Context, "{}"),
+		Counters:            jsonCol(b.Counters, "{}"),
+		Status:              string(b.Status),
+		WaitingReason:       string(b.WaitingReason),
+		Revision:            b.Revision,
+		LeasedBy:            b.LeasedBy,
+		LeaseExpiry:         timePtr(b.LeaseExpiry),
+		Error:               b.Error,
+		CreatedAt:           b.CreatedAt,
+		UpdatedAt:           b.UpdatedAt,
+	}
+}
+
+// ParallelBranchFromModel maps a persistence branch back to the domain.
+func ParallelBranchFromModel(m ParallelBranchModel) model.ParallelBranch {
+	return model.ParallelBranch{
+		ID:                  m.ID,
+		ParallelExecutionID: m.ParallelExecutionID,
+		InstanceID:          m.InstanceID,
+		Name:                m.Name,
+		BranchIndex:         m.BranchIndex,
+		StartNodeID:         m.StartNodeID,
+		Frame:               json.RawMessage(m.Frame),
+		Context:             json.RawMessage(m.Context),
+		Counters:            json.RawMessage(m.Counters),
+		Status:              model.ParallelBranchStatus(m.Status),
+		WaitingReason:       model.WaitingReason(m.WaitingReason),
+		Revision:            m.Revision,
+		LeasedBy:            m.LeasedBy,
+		LeaseExpiry:         timeVal(m.LeaseExpiry),
+		Error:               m.Error,
+		CreatedAt:           m.CreatedAt,
+		UpdatedAt:           m.UpdatedAt,
 	}
 }

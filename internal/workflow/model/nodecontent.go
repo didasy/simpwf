@@ -17,13 +17,15 @@ import (
 type NodeType string
 
 const (
-	NodeTypeScript       NodeType = "script"
-	NodeTypeConditions   NodeType = "conditions"
-	NodeTypeInput        NodeType = "input"
-	NodeTypeGroup        NodeType = "group"
-	NodeTypeExternalCall NodeType = "external_call"
-	NodeTypeOutput       NodeType = "output"
-	NodeTypePoller       NodeType = "poller"
+	NodeTypeScript        NodeType = "script"
+	NodeTypeConditions    NodeType = "conditions"
+	NodeTypeInput         NodeType = "input"
+	NodeTypeGroup         NodeType = "group"
+	NodeTypeExternalCall  NodeType = "external_call"
+	NodeTypeOutput        NodeType = "output"
+	NodeTypePoller        NodeType = "poller"
+	NodeTypeParallelStart NodeType = "parallel_start"
+	NodeTypeParallelEnd   NodeType = "parallel_end"
 )
 
 // maxAllowedRoles bounds an input node's role gate. See parseAllowedRoles.
@@ -42,7 +44,8 @@ const (
 // registered custom types.
 func ValidNodeType(t string) bool {
 	switch NodeType(t) {
-	case NodeTypeScript, NodeTypeConditions, NodeTypeInput, NodeTypeGroup, NodeTypeExternalCall, NodeTypeOutput, NodeTypePoller:
+	case NodeTypeScript, NodeTypeConditions, NodeTypeInput, NodeTypeGroup, NodeTypeExternalCall, NodeTypeOutput, NodeTypePoller,
+		NodeTypeParallelStart, NodeTypeParallelEnd:
 		return true
 	default:
 		_, ok := LookupCustomType(t)
@@ -59,6 +62,35 @@ type NodeLimits struct {
 	// ConditionTimeout is the fixed timeout for condition evaluation and
 	// input validation scripts.
 	ConditionTimeout time.Duration
+	// Parallel bounds parallel_start fan-out and nesting. The zero value
+	// substitutes DefaultParallelLimits so historical callers keep working.
+	Parallel ParallelLimits
+}
+
+// ParallelLimits bounds parallel blocks at parse/validation time.
+type ParallelLimits struct {
+	// MaxDepth caps structural parallel nesting (1 = one parallel block).
+	MaxDepth int
+	// MaxBranchesPerParallel caps the branch count of one parallel_start.
+	MaxBranchesPerParallel int
+}
+
+// DefaultParallelLimits returns the parse-time parallel defaults.
+func DefaultParallelLimits() ParallelLimits {
+	return ParallelLimits{MaxDepth: 4, MaxBranchesPerParallel: 32}
+}
+
+// effectiveParallelLimits substitutes defaults for unset fields.
+func (l NodeLimits) effectiveParallelLimits() ParallelLimits {
+	out := l.Parallel
+	def := DefaultParallelLimits()
+	if out.MaxDepth <= 0 {
+		out.MaxDepth = def.MaxDepth
+	}
+	if out.MaxBranchesPerParallel <= 0 {
+		out.MaxBranchesPerParallel = def.MaxBranchesPerParallel
+	}
+	return out
 }
 
 // NodeContent is the validated, typed content of a node (definition or
@@ -122,6 +154,12 @@ type NodeContent struct {
 	PollerHTTP      *PollerHTTPConfig     // poller
 	PollerRedis     *PollerRedisConfig    // poller
 	PollerRabbitMQ  *PollerRabbitMQConfig // poller
+	// ParallelBranches maps branch name to target node id (parallel_start).
+	ParallelBranches map[string]string
+	// ParallelEndNodeID is the join node id (parallel_start).
+	ParallelEndNodeID string
+	// CombiningScript merges branch contexts into the parent (parallel_end).
+	CombiningScript string
 	// CustomConfig holds the raw config object of a custom node type; Custom
 	// holds the validated form returned by the node's validator. The core
 	// never inspects either; executors type-assert Custom.
@@ -229,28 +267,30 @@ type GroupContent struct {
 
 // rawNode mirrors the JSON shape of a node for lenient parsing.
 type rawNode struct {
-	Type             string                   `json:"type"`
-	ID               string                   `json:"id"`
-	NodeDefinitionID *string                  `json:"node_definition_id"`
-	Name             string                   `json:"name"`
-	Timeout          json.RawMessage          `json:"timeout"`
-	InputData        *string                  `json:"input_data"`
-	Script           *string                  `json:"script"`
-	Conditions       []rawCondition           `json:"conditions"`
-	Branches         json.RawMessage          `json:"branches"`
-	Keys             json.RawMessage          `json:"keys"`
-	Channel          *string                  `json:"channel"`
-	ContextPath      *string                  `json:"context_path"`
-	Validation       *rawValidation           `json:"validation"`
-	Form             *rawForm                 `json:"form"`
-	AllowedRoles     []string                 `json:"allowed_roles"`
-	RecordActor      *bool                    `json:"record_actor"`
-	Public           *bool                    `json:"public"`
-	HTTPConfig       *rawHTTPConfig           `json:"http_config"`
-	ExecutionConfig  *rawExecutionConfig      `json:"execution_config"`
-	PollerHTTP       *rawPollerHTTPConfig     `json:"http"`
-	PollerRedis      *rawPollerRedisConfig    `json:"redis"`
-	PollerRabbitMQ   *rawPollerRabbitMQConfig `json:"rabbitmq"`
+	Type              string                   `json:"type"`
+	ID                string                   `json:"id"`
+	NodeDefinitionID  *string                  `json:"node_definition_id"`
+	Name              string                   `json:"name"`
+	Timeout           json.RawMessage          `json:"timeout"`
+	InputData         *string                  `json:"input_data"`
+	Script            *string                  `json:"script"`
+	Conditions        []rawCondition           `json:"conditions"`
+	Branches          json.RawMessage          `json:"branches"`
+	ParallelEndNodeID *string                  `json:"parallel_end_node_id"`
+	CombiningScript   *string                  `json:"combining_script"`
+	Keys              json.RawMessage          `json:"keys"`
+	Channel           *string                  `json:"channel"`
+	ContextPath       *string                  `json:"context_path"`
+	Validation        *rawValidation           `json:"validation"`
+	Form              *rawForm                 `json:"form"`
+	AllowedRoles      []string                 `json:"allowed_roles"`
+	RecordActor       *bool                    `json:"record_actor"`
+	Public            *bool                    `json:"public"`
+	HTTPConfig        *rawHTTPConfig           `json:"http_config"`
+	ExecutionConfig   *rawExecutionConfig      `json:"execution_config"`
+	PollerHTTP        *rawPollerHTTPConfig     `json:"http"`
+	PollerRedis       *rawPollerRedisConfig    `json:"redis"`
+	PollerRabbitMQ    *rawPollerRabbitMQConfig `json:"rabbitmq"`
 	// Config is the raw config object of a custom node type. It is the
 	// only executable field custom nodes may carry.
 	Config          json.RawMessage   `json:"config"`
@@ -380,9 +420,9 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 	if r.RetryOnRecovery != nil {
 		nc.RetryOnRecovery = *r.RetryOnRecovery
 	}
-	if len(r.Branches) > 0 {
-		return nil, errors.New("branches is not supported; define keys on the workflow or group")
-	}
+	// branches/parallel_end_node_id/combining_script are parallel-only
+	// fields; they are validated per type below so parallel_start and
+	// parallel_end can carry them while every other type rejects them.
 
 	// onFailureAllowed reports whether a node type supports on_failure
 	// routing: external_call, poller, and any registered custom type.
@@ -411,6 +451,7 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		}
 		if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil || r.Nodes != nil ||
 			r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil || len(r.Config) > 0 ||
+			len(r.Branches) > 0 || r.ParallelEndNodeID != nil || r.CombiningScript != nil ||
 			// allowed_roles, record_actor, and public are the input node's
 			// authorization surface. A reference resolves its type from the
 			// definition, so the occurrence cannot be judged here and
@@ -434,7 +475,7 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 		return nil, errors.New("node type is required")
 	}
 	if !ValidNodeType(r.Type) {
-		return nil, fmt.Errorf("node type %q is not supported (allowed: script, conditions, input, group, external_call, output, poller)", r.Type)
+		return nil, fmt.Errorf("node type %q is not supported (allowed: script, conditions, input, group, external_call, output, poller, parallel_start, parallel_end)", r.Type)
 	}
 	nc.Type = NodeType(r.Type)
 	if nc.OnFailure != nil && !onFailureAllowed(nc.Type) {
@@ -770,6 +811,58 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 			return nil, fmt.Errorf("group start_node_id %q does not match any node in the group", g.StartNodeID)
 		}
 		nc.Group = g
+
+	case NodeTypeParallelStart:
+		if r.CombiningScript != nil {
+			return nil, errors.New("parallel_start node does not support combining_script")
+		}
+		if r.NextNode != nil {
+			return nil, errors.New("parallel_start node cannot have next_node")
+		}
+		if r.OutputProperty != nil {
+			return nil, errors.New("parallel_start node cannot have output_property")
+		}
+		var rawBranches map[string]string
+		if len(r.Branches) > 0 {
+			if err := json.Unmarshal(r.Branches, &rawBranches); err != nil {
+				return nil, fmt.Errorf("parallel_start branches must be an object of branch name to node id: %w", err)
+			}
+		}
+		if len(rawBranches) < 2 {
+			return nil, errors.New("parallel_start node requires at least two branches")
+		}
+		if max := limits.effectiveParallelLimits().MaxBranchesPerParallel; len(rawBranches) > max {
+			return nil, fmt.Errorf("parallel_start node has %d branches, at most %d are allowed", len(rawBranches), max)
+		}
+		branches := make(map[string]string, len(rawBranches))
+		for name, target := range rawBranches {
+			if strings.TrimSpace(name) == "" {
+				return nil, errors.New("parallel_start branch names must be non-empty")
+			}
+			if !ids.Valid(target) {
+				return nil, fmt.Errorf("parallel_start branch %q target %q is not a valid uuid", name, target)
+			}
+			branches[name] = target
+		}
+		if r.ParallelEndNodeID == nil || !ids.Valid(*r.ParallelEndNodeID) {
+			return nil, errors.New("parallel_start node requires a valid parallel_end_node_id")
+		}
+		nc.ParallelBranches = branches
+		nc.ParallelEndNodeID = *r.ParallelEndNodeID
+		nc.Timeout = limits.ConditionTimeout
+
+	case NodeTypeParallelEnd:
+		if len(r.Branches) > 0 {
+			return nil, errors.New("parallel_end node does not support branches")
+		}
+		if r.ParallelEndNodeID != nil {
+			return nil, errors.New("parallel_end node does not support parallel_end_node_id")
+		}
+		if r.CombiningScript == nil || strings.TrimSpace(*r.CombiningScript) == "" {
+			return nil, errors.New("parallel_end node requires a non-empty combining_script")
+		}
+		nc.CombiningScript = *r.CombiningScript
+		nc.Timeout = limits.ConditionTimeout
 	}
 	if _, ok := LookupCustomType(string(nc.Type)); !ok && nc.Type != NodeTypeInput && r.Form != nil {
 		return nil, fmt.Errorf("node type %q does not support form", nc.Type)
@@ -783,6 +876,21 @@ func parseRawNode(r *rawNode, limits NodeLimits) (*NodeContent, error) {
 	}
 	if _, ok := LookupCustomType(string(nc.Type)); !ok && len(r.Config) > 0 {
 		return nil, fmt.Errorf("node type %q does not support config", nc.Type)
+	}
+	// branches/parallel_end_node_id/combining_script are parallel-only:
+	// the parallel cases above accept their own fields and reject the
+	// sibling's, so anything reaching here on another builtin type is
+	// foreign.
+	if nc.Type != NodeTypeParallelStart && nc.Type != NodeTypeParallelEnd {
+		if len(r.Branches) > 0 {
+			return nil, fmt.Errorf("node type %q does not support branches", nc.Type)
+		}
+		if r.ParallelEndNodeID != nil {
+			return nil, fmt.Errorf("node type %q does not support parallel_end_node_id", nc.Type)
+		}
+		if r.CombiningScript != nil {
+			return nil, fmt.Errorf("node type %q does not support combining_script", nc.Type)
+		}
 	}
 	return nc, nil
 }
@@ -834,6 +942,7 @@ func parseCustomNode(nc *NodeContent, r *rawNode, limits NodeLimits) (*NodeConte
 	if r.Script != nil || r.Conditions != nil || r.Channel != nil || r.Validation != nil ||
 		r.Form != nil || r.HTTPConfig != nil || r.ExecutionConfig != nil ||
 		r.PollerHTTP != nil || r.PollerRedis != nil || r.PollerRabbitMQ != nil ||
+		len(r.Branches) > 0 || r.ParallelEndNodeID != nil || r.CombiningScript != nil ||
 		r.Nodes != nil || r.StartNodeID != nil || r.ContextPath != nil ||
 		// A custom type is never an input node, so the input node's
 		// authorization surface is refused like any other builtin field.

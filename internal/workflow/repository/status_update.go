@@ -244,6 +244,12 @@ func redactStatusUpdateError(contextRaw []byte, errMsg string) string {
 // skips silently; a definition with an invalid status_update block fails
 // the transaction.
 func (r *instanceRepo) enqueueStatusUpdate(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, contextRaw []byte, at time.Time) error {
+	return enqueueStatusUpdateTx(ctx, tx, instanceID, definitionID, revision, from, to, events, errMsg, contextRaw, at)
+}
+
+// enqueueStatusUpdateTx is the receiver-free enqueue used by repositories
+// other than instanceRepo inside their own transactions.
+func enqueueStatusUpdateTx(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, contextRaw []byte, at time.Time) error {
 	if len(events) == 0 || definitionID == "" {
 		return nil
 	}

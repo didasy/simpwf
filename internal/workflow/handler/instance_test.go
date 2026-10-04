@@ -396,6 +396,90 @@ func TestInstanceStatusNodesMap(t *testing.T) {
 	}
 }
 
+func TestInstanceStatusParallelTree(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status: model.WorkflowWaiting, WaitingReason: model.WaitingReasonParallel,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	detail := &service.StatusDetail{
+		Instance: inst,
+		Parallel: []service.ParallelExecutionView{
+			{
+				ID: "ex-1", Depth: 1, StartNodeID: "start-1", EndNodeID: "end-1",
+				Status: "waiting_for_branches", BranchCount: 2, CompletedCount: 1,
+				Branches: []service.ParallelBranchView{
+					{ID: "br-1", Name: "a", BranchIndex: 0, StartNodeID: "a-1", Status: "completed", UpdatedAt: now},
+					{ID: "br-2", Name: "b", BranchIndex: 1, StartNodeID: "b-1", Status: "waiting", WaitingReason: "input", UpdatedAt: now},
+				},
+			},
+		},
+	}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{detail: detail}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp InstanceStatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Parallel) != 1 {
+		t.Fatalf("parallel = %d, want 1", len(resp.Parallel))
+	}
+	ex := resp.Parallel[0]
+	if ex.ID != "ex-1" || ex.Depth != 1 || ex.Status != "waiting_for_branches" {
+		t.Fatalf("execution = %+v", ex)
+	}
+	if ex.ParentBranchID != nil {
+		t.Fatalf("parent_branch_id = %v, want null", ex.ParentBranchID)
+	}
+	if len(ex.Branches) != 2 || ex.Branches[0].Name != "a" || ex.Branches[1].WaitingReason != "input" {
+		t.Fatalf("branches = %+v", ex.Branches)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	parallel, ok := raw["parallel"].([]any)
+	if !ok || len(parallel) != 1 {
+		t.Fatalf("parallel missing in raw body: %v", raw)
+	}
+	first, _ := parallel[0].(map[string]any)
+	if first["parent_branch_id"] != nil {
+		t.Fatalf("parent_branch_id = %v, want null", first["parent_branch_id"])
+	}
+	if _, leaked := first["leased_by"]; leaked {
+		t.Fatalf("lease internals leaked: %v", first)
+	}
+}
+
+func TestInstanceStatusOmitsParallelWhenNil(t *testing.T) {
+	now := time.Now().UTC()
+	inst := model.WorkflowInstance{
+		ID: instanceID, WorkflowDefinitionID: wfDefID,
+		Status:    model.WorkflowFinished,
+		CreatedBy: instanceID, UpdatedBy: instanceID,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{
+		detail: &service.StatusDetail{Instance: inst},
+	}})
+	w := performJSON(r, http.MethodGet, "/v1/workflow/instance/"+instanceID+"/status", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["parallel"]; ok {
+		t.Fatalf("parallel present without executions: %v", raw["parallel"])
+	}
+}
+
 func TestInstanceContext(t *testing.T) {
 	inst := model.WorkflowInstance{ID: instanceID, Context: json.RawMessage(`{"x":1}`)}
 	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: &fakeInstanceSvc{contextInst: &inst}})
@@ -512,6 +596,19 @@ func TestInstanceInputInvalidKey(t *testing.T) {
 		`{}`, nil)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("status = %d, want 422", w.Code)
+	}
+}
+
+func TestInstanceInputBranchParam(t *testing.T) {
+	fake := &fakeInstanceSvc{delivery: &model.InputDelivery{Accepted: true}}
+	r := NewRouter(Deps{Health: NewHealth(fakePinger{}), Instances: fake})
+	w := performJSON(r, http.MethodPut, "/v1/workflow/instance/"+instanceID+"/input?branch_id=branch-1",
+		`{"ok":true}`, map[string]string{"Idempotency-Key": "key-1"})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	if fake.deliverReq == nil || fake.deliverReq.BranchID != "branch-1" {
+		t.Fatalf("branch_id = %+v, want branch-1", fake.deliverReq)
 	}
 }
 

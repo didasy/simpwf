@@ -61,11 +61,14 @@ func setupEngineDB(t *testing.T) *gorm.DB {
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
 		&repository.StatusUpdateOutboxModel{},
+		&repository.ParallelExecutionModel{},
+		&repository.ParallelBranchModel{},
 	); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 	if err := db.Exec(`TRUNCATE TABLE
 		node_context_history, status_update_outbox, input_deliveries, workflow_instance_events, node_instances,
+		parallel_branches, parallel_executions,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users RESTART IDENTITY`).Error; err != nil {
 		t.Fatalf("truncate tables: %v", err)
@@ -86,14 +89,14 @@ func testEngine(t *testing.T, db *gorm.DB, limits model.Limits) (*engine.Engine,
 func testEngineWithExec(t *testing.T, db *gorm.DB, limits model.Limits, execLimits executor.Limits) (*engine.Engine, repository.InstanceRepository) {
 	t.Helper()
 	instances := repository.NewInstanceRepository(db)
-	e := engine.NewEngine(instances, executor.NewExecutors(execLimits, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID, model.LeanOptions{})
+	e := engine.NewEngine(instances, repository.NewParallelRepository(db), executor.NewExecutors(execLimits, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID, model.LeanOptions{})
 	return e, instances
 }
 
 func testEngineWithOptions(t *testing.T, db *gorm.DB, limits model.Limits, opts model.LeanOptions) (*engine.Engine, repository.InstanceRepository) {
 	t.Helper()
 	instances := repository.NewInstanceRepositoryWithOptions(db, opts)
-	e := engine.NewEngine(instances, executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID, opts)
+	e := engine.NewEngine(instances, repository.NewParallelRepository(db), executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), limits, testLoader(db), sysUserID, opts)
 	return e, instances
 }
 

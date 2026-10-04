@@ -12,6 +12,7 @@ const draft2020 = "https://json-schema.org/draft/2020-12/schema"
 
 var builtinTypes = []string{
 	"script", "conditions", "input", "group", "external_call", "output", "poller",
+	"parallel_start", "parallel_end",
 }
 
 // decodeSchema unmarshals a node schema into a generic document.
@@ -93,13 +94,15 @@ func TestNodeSchemaBuiltinShape(t *testing.T) {
 
 func TestNodeSchemaRequiredPerType(t *testing.T) {
 	cases := map[string][]string{
-		"script":        {"type", "script"},
-		"conditions":    {"type", "conditions"},
-		"input":         {"type", "channel"},
-		"group":         {"type", "start_node_id", "nodes"},
-		"external_call": {"type"},
-		"output":        {"type", "channel", "context_path"},
-		"poller":        {"type"},
+		"script":         {"type", "script"},
+		"conditions":     {"type", "conditions"},
+		"input":          {"type", "channel"},
+		"group":          {"type", "start_node_id", "nodes"},
+		"external_call":  {"type"},
+		"output":         {"type", "channel", "context_path"},
+		"poller":         {"type"},
+		"parallel_start": {"type", "branches", "parallel_end_node_id"},
+		"parallel_end":   {"type", "combining_script"},
 	}
 	for nodeType, want := range cases {
 		raw, ok := model.NodeSchema(nodeType)
@@ -287,13 +290,15 @@ func TestNodeSchemaGroupChildren(t *testing.T) {
 // contract: content the Go parser accepts also satisfies the schema.
 func TestNodeSchemaAcceptsValidContent(t *testing.T) {
 	cases := map[string]string{
-		"script":        `{"type":"script","script":"return 1;","id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","output_property":"total"}`,
-		"conditions":    `{"type":"conditions","conditions":[{"condition":"return true;"},{"condition":"return false;"}]}`,
-		"input":         `{"type":"input","channel":"http","output_property":"post"}`,
-		"output":        `{"type":"output","channel":"redis","context_path":"post"}`,
-		"external_call": `{"type":"external_call","http_config":{"url":"https://example.com","method":"GET"}}`,
-		"poller":        `{"type":"poller","http":{"url":"https://example.com","until":"return response.status == 200;"}}`,
-		"group":         `{"type":"group","start_node_id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","nodes":[{"type":"script","script":"return 1;","id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}]}`,
+		"script":         `{"type":"script","script":"return 1;","id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","output_property":"total"}`,
+		"conditions":     `{"type":"conditions","conditions":[{"condition":"return true;"},{"condition":"return false;"}]}`,
+		"input":          `{"type":"input","channel":"http","output_property":"post"}`,
+		"output":         `{"type":"output","channel":"redis","context_path":"post"}`,
+		"external_call":  `{"type":"external_call","http_config":{"url":"https://example.com","method":"GET"}}`,
+		"poller":         `{"type":"poller","http":{"url":"https://example.com","until":"return response.status == 200;"}}`,
+		"group":          `{"type":"group","start_node_id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","nodes":[{"type":"script","script":"return 1;","id":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"}]}`,
+		"parallel_start": `{"type":"parallel_start","branches":{"a":"aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa","b":"bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"},"parallel_end_node_id":"cccccccc-cccc-7ccc-8ccc-cccccccccccc"}`,
+		"parallel_end":   `{"type":"parallel_end","combining_script":"context.x = 1;"}`,
 	}
 	for nodeType, content := range cases {
 		raw, _ := model.NodeSchema(nodeType)

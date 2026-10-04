@@ -158,9 +158,11 @@ type LeanOptions struct {
 
 // NodeInstance is a single occurrence of a node within a workflow instance.
 // Each attempt of a looped node shares the occurrence and increments Attempt.
+// BranchID names the owning parallel branch, or "" for the parent scope.
 type NodeInstance struct {
 	ID                 string
 	WorkflowInstanceID string
+	BranchID           string
 	NodeID             string // workflow graph node id the occurrence belongs to
 	NodeDefinitionID   string
 	Name               string

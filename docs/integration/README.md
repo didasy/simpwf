@@ -112,12 +112,14 @@ Every `GET` list returns the same envelope:
    Normal runs start `waiting`. Pass `"debug": true` for a step-through run: it starts `paused` (runnable,
    `waiting_reason: null`) and re-pauses after every node until termination, so each `POST .../resume` advances
    exactly one step. Input parks still surface as `waiting` / `"input"` on debug runs, so the input flow below is
-   unchanged.
-4. Poll `GET .../status` until `status` is `paused` (`waiting_reason == "input"` = input wait, `null` = operator
-   pause or debug step pause), `finished`, `failed`, or `stopped`. `nodes` map shows
-   per-graph-node progress.
+   unchanged. On debug runs with parallel blocks each resume steps exactly one branch (shallowest execution first,
+   then alphabetically) while the parent stays paused; the parent wakes once no paused branch remains.
+4. Poll `GET .../status` until `status` is `paused` (`waiting_reason == "input"` = input wait, `"parallel"` = join
+   wait, `null` = operator pause or debug step pause), `finished`, `failed`, or `stopped`. `nodes` map shows
+   per-graph-node progress; the `parallel` list shows fork/join executions with their branches.
 5. If `waiting_reason == "input"`, find the parked input node (status entry with occurrence in `waiting`), then
-   `PUT .../input` with the payload and a fresh `Idempotency-Key`.
+   `PUT .../input` with the payload and a fresh `Idempotency-Key`. If a branch (not the parent) is parked on input,
+   visible as `waiting`/`"input"` in the status `parallel` tree, pass its id as `PUT .../input?branch_id=<branch id>`.
 6. Paused instance with wrong data: `PUT .../context` (full replacement), then `POST .../resume`.
 7. Failed/paused instance that must redo work: pick `occurrence_id` from the `nodes` map or node debug API,
    `POST .../rollback`, then `POST .../resume`.
@@ -140,6 +142,8 @@ failed --rollback--> paused (only exception to terminal immutability)
 
 Enable controls by status: pause on `waiting`/`running`; resume on `paused`; stop on `waiting`/`running`/`paused`;
 context replace and rollback on `paused` only (rollback also on `failed`); input delivery only when `waiting` with
-`waiting_reason == "input"`. `finished`/`failed`/`stopped` accept no controls except rollback on `failed`.
-`termination_pending == true` blocks rollback. Debug runs start `paused` and re-pause after every resume-driven
+`waiting_reason == "input"`, or to a branch parked on input (parent `waiting`/`paused` with reason `"parallel"`) via
+`?branch_id=`. `finished`/`failed`/`stopped` accept no controls except rollback on `failed`.
+`termination_pending == true` blocks rollback, as do live parallel branches; branch-owned occurrences are never
+rollback targets. Debug runs start `paused` and re-pause after every resume-driven
 step, so resume stays the primary control until termination.

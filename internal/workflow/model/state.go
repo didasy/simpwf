@@ -99,6 +99,13 @@ type Limits struct {
 	ConditionTimeout     time.Duration
 	LeaseDuration        time.Duration
 	ClaimBatchSize       int
+	// MaxActiveBranchesPerInstance caps concurrently active parallel
+	// branches of one instance. Zero disables the cap.
+	MaxActiveBranchesPerInstance int
+	// MaxParallelDepth caps runtime parallel nesting (1 = one parallel
+	// block). Zero disables the cap; definition validation enforces the
+	// structural depth regardless.
+	MaxParallelDepth int
 }
 
 // DefaultLimits returns the engine defaults.

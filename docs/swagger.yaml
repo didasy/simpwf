@@ -186,6 +186,10 @@ definitions:
         additionalProperties:
           $ref: '#/definitions/internal_workflow_handler.NodeOccurrenceResponse'
         type: object
+      parallel:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.ParallelExecutionResponse'
+        type: array
       pause_requested:
         type: boolean
       pending_input:
@@ -391,6 +395,48 @@ definitions:
         type: string
       rollbackable:
         type: boolean
+      status:
+        type: string
+    type: object
+  internal_workflow_handler.ParallelBranchResponse:
+    properties:
+      branch_index:
+        type: integer
+      error:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      start_node_id:
+        type: string
+      status:
+        type: string
+      updated_at:
+        type: string
+      waiting_reason:
+        type: string
+    type: object
+  internal_workflow_handler.ParallelExecutionResponse:
+    properties:
+      branch_count:
+        type: integer
+      branches:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.ParallelBranchResponse'
+        type: array
+      completed_count:
+        type: integer
+      depth:
+        type: integer
+      end_node_id:
+        type: string
+      id:
+        type: string
+      parent_branch_id:
+        type: string
+      start_node_id:
+        type: string
       status:
         type: string
     type: object
@@ -1614,6 +1660,11 @@ paths:
         in: header
         name: Idempotency-Key
         required: true
+        type: string
+      - description: Parallel branch ID holding the parked input node (omit for the
+          instance cursor)
+        in: query
+        name: branch_id
         type: string
       - description: Input payload
         in: body

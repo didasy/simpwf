@@ -200,6 +200,7 @@ type InstanceStatusResponse struct {
 	Counters              json.RawMessage                   `json:"counters"`
 	Nodes                 map[string]NodeOccurrenceResponse `json:"nodes,omitempty"`
 	PendingInput          *PendingInputResponse             `json:"pending_input,omitempty"`
+	Parallel              []ParallelExecutionResponse       `json:"parallel,omitempty"`
 	Error                 *string                           `json:"error"`
 	StartedAt             *time.Time                        `json:"started_at"`
 	FinishedAt            *time.Time                        `json:"finished_at"`
@@ -246,6 +247,34 @@ type NodeOccurrenceResponse struct {
 	Status       string  `json:"status"`
 	Attempt      *int    `json:"attempt"`
 	Rollbackable bool    `json:"rollbackable"`
+}
+
+// ParallelExecutionResponse is one parallel fork/join scope on status with
+// its branches. Omitted unless the instance forked.
+type ParallelExecutionResponse struct {
+	ID             string                   `json:"id"`
+	ParentBranchID *string                  `json:"parent_branch_id"`
+	Depth          int                      `json:"depth"`
+	StartNodeID    string                   `json:"start_node_id"`
+	EndNodeID      string                   `json:"end_node_id"`
+	Status         string                   `json:"status"`
+	BranchCount    int                      `json:"branch_count"`
+	CompletedCount int                      `json:"completed_count"`
+	Branches       []ParallelBranchResponse `json:"branches"`
+}
+
+// ParallelBranchResponse is one branch on status: identity, lifecycle
+// state, and the last error. Lease internals and branch contexts are
+// never exposed here.
+type ParallelBranchResponse struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	BranchIndex   int       `json:"branch_index"`
+	StartNodeID   string    `json:"start_node_id"`
+	Status        string    `json:"status"`
+	WaitingReason string    `json:"waiting_reason"`
+	Error         string    `json:"error"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // InstanceContextResponse is the GET .../context body.

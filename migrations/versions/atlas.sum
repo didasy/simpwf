@@ -1,4 +1,4 @@
-h1:8TehCtXGxwsqWmMIOti8xp8gQluq05aXETPWmBG0uG8=
+h1:RZvPGhwrCzVUguZRnh7OlsHSTBtmTmWk9ni6Ie0ag74=
 20260805024728.sql h1:ZxeSqFuGsHjUG5MjmjTMpZVyBjyQ4D+hOawuglmpnWY=
 20260805035830_add_node_id.sql h1:9+YSyAmpyKdjnTYAwJz5w+/OIPrdTg5exaN4qHytWIw=
 20260810091127_add_workflow_instance_audit_actors.sql h1:LYvdHYd3oI9Jd1isln3DuZamc50xaj0iKXxkR1uDQRg=
@@ -9,3 +9,5 @@ h1:8TehCtXGxwsqWmMIOti8xp8gQluq05aXETPWmBG0uG8=
 20260925142000_add_secrets.sql h1:xIx9Trae8NhX03sU4Ixw2SSMTSJ9y8f9mTxy3SMyLaQ=
 20260926090000_add_oidc_identity_and_roles.sql h1:Ev2FF6HPjZUDUvGdZgdGtBSkAMt4tXURetbp7QkIRks=
 20260927120000_input_deliveries_instance_key_unique.sql h1:W9KRpKC34vvE/jG6CZM/zYQ9pWJr2y0l7Fs02gq3JT8=
+20261003185802_add_parallel_execution.sql h1:SBZp/lAjQthc122cpB/4hxBkQqfDMspkZynhLJqG7RU=
+20261003190849_add_parallel_branch_scope.sql h1:DCPE5ew32fBhV35jAXu1tENaDUAppM8mMPeegTG5jn0=

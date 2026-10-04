@@ -64,7 +64,8 @@ status notifications. Both stay fully disabled when their DSN is absent.
   `output` (publish a context value to Redis or RabbitMQ, returns a
   receipt), nested `group`, `external_call` (outbound HTTP or allowlisted
   command), and `poller` (active wait over HTTP, Redis, or RabbitMQ until
-  an `until` predicate matches).
+  an `until` predicate matches), plus `parallel_start`/`parallel_end` for
+  fork/join branches with snapshot isolation and a scripted merge.
 - Lifecycle hooks: optional `pre_script`/`post_script` context transforms
   on every node type, run in the same sandbox.
 - Failure routing: `external_call` and `poller` nodes can route failures
@@ -216,15 +217,17 @@ uses; `config.e2e-oidc.yaml` is a working example.
 
 ## Node types
 
-| Type          | Does                                                                             | Details                           |
-| ------------- | -------------------------------------------------------------------------------- | --------------------------------- |
-| `script`        | Goja ES5.1 transform, return value written to `output_property`                    | [workflow.yaml](workflow.yaml)     |
-| `conditions`    | Evaluates all conditions, routes on the single match (0 or 2+ fail)              | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| `input`         | Parks with `waiting_reason: input` until a payload arrives                         | [API reference](#api-reference)    |
-| `output`        | Publishes `context_path` JSON to Redis or RabbitMQ, returns receipt                | [workflow.yaml](workflow.yaml)     |
-| `group`         | Nested sub-graph with its own key routing and hooks                              | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| `external_call` | Outbound HTTP (allowlisted) or allowlisted command, optional `on_failure` fallback | [Configuration](#configuration)    |
-| `poller`        | Repeats HTTP/Redis/RabbitMQ reads until `until` returns `true`                       | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Type             | Does                                                                               | Details                            |
+| ---------------- | ---------------------------------------------------------------------------------- | ---------------------------------- |
+| `script`         | Goja ES5.1 transform, return value written to `output_property`                    | [workflow.yaml](workflow.yaml)     |
+| `conditions`     | Evaluates all conditions, routes on the single match (0 or 2+ fail)                | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| `input`          | Parks with `waiting_reason: input` until a payload arrives                         | [API reference](#api-reference)    |
+| `output`         | Publishes `context_path` JSON to Redis or RabbitMQ, returns receipt                | [workflow.yaml](workflow.yaml)     |
+| `group`          | Nested sub-graph with its own key routing and hooks                                | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| `external_call`  | Outbound HTTP (allowlisted) or allowlisted command, optional `on_failure` fallback | [Configuration](#configuration)    |
+| `poller`         | Repeats HTTP/Redis/RabbitMQ reads until `until` returns `true`                     | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| `parallel_start` | Forks named branches from a frozen parent snapshot, parks on the join              | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| `parallel_end`   | Barrier join: runs `combining_script` over branch contexts, continues past         | [ARCHITECTURE.md](ARCHITECTURE.md) |
 
 Every node type accepts `pre_script`/`post_script` hooks. Hook return
 values are ignored; only context mutations persist. Custom node types can
@@ -238,20 +241,23 @@ and defaults, and `on_failure` payload shape.
 `config.yaml` holds infra, worker pool, engine limits, auth, and the
 system audit user. Key settings:
 
-| Key                                                  | Default             | Notes                                                                                                   |
-| ---------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `infra.http.host`                                      | `localhost:9999`      | Compose overrides to `0.0.0.0:8080`                                                                       |
-| `infra.http.swagger_enabled`                           | `true`                | Serves UI at `/swagger/index.html`                                                                        |
-| `infra.postgresql.dsn`                                 | local `gorm` DSN      | pgx/postgres wire format                                                                                |
-| `infra.redis.dsn`                                      | `""` (disabled)       | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                         |
-| `infra.rabbitmq.dsn`                                   | `""` (disabled)       | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
-| `engine.default_node_timeout` / `max_node_timeout`       | `30s` / `5m`            | Caps script, `external_call`, and `output` nodes                                                            |
-| `engine.condition_timeout`                             | `5s`                  | Fixed budget for conditions, input validation, poller predicates                                        |
-| `engine.http_allowlist`                                | loopback + examples | `"*"` allows any target (development only, logs a warning)                                                |
-| `engine.exec_allowlist`                                | `echo`, `ls`            | Direct argv only, never a shell                                                                         |
-| `auth.enabled` / `api_token`                             | `false`               | When enabled, `/v1` requires `X-Api-Token` (the service principal)                                          |
-| `auth.oidc.*`                                          | disabled            | OIDC resource server; needs `issuer` and `client_id`                                                        |
-| `auth.role_permissions` / `SIMPWF_AUTH_ROLE_PERMISSIONS` | file / `{}`           | Role-to-action catalog as YAML map or JSON object; env overrides file; invalid JSON fails startup       |
+| Key                                                      | Default             | Notes                                                                                                           |
+| -------------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `infra.http.host`                                        | `localhost:9999`    | Compose overrides to `0.0.0.0:8080`                                                                             |
+| `infra.http.swagger_enabled`                             | `true`              | Serves UI at `/swagger/index.html`                                                                              |
+| `infra.postgresql.dsn`                                   | local `gorm` DSN    | pgx/postgres wire format                                                                                        |
+| `infra.redis.dsn`                                        | `""` (disabled)     | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                               |
+| `infra.rabbitmq.dsn`                                     | `""` (disabled)     | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
+| `engine.default_node_timeout` / `max_node_timeout`       | `30s` / `5m`        | Caps script, `external_call`, and `output` nodes                                                                |
+| `engine.condition_timeout`                               | `5s`                | Fixed budget for conditions, input validation, poller predicates, join scripts                                  |
+| `engine.parallel.max_depth`                              | `4`                 | Max parallel nesting depth (groups add no depth)                                                                |
+| `engine.parallel.max_branches_per_parallel`              | `32`                | Max branches on one `parallel_start` (min 2)                                                                    |
+| `engine.parallel.max_active_branches_per_instance`       | `128`               | Max live branches per instance across all executions                                                            |
+| `engine.http_allowlist`                                  | loopback + examples | `"*"` allows any target (development only, logs a warning)                                                      |
+| `engine.exec_allowlist`                                  | `echo`, `ls`        | Direct argv only, never a shell                                                                                 |
+| `auth.enabled` / `api_token`                             | `false`             | When enabled, `/v1` requires `X-Api-Token` (the service principal)                                              |
+| `auth.oidc.*`                                            | disabled            | OIDC resource server; needs `issuer` and `client_id`                                                            |
+| `auth.role_permissions` / `SIMPWF_AUTH_ROLE_PERMISSIONS` | file / `{}`         | Role-to-action catalog as YAML map or JSON object; env overrides file; invalid JSON fails startup               |
 
 List-valued keys accept comma-separated env values, e.g.
 `SIMPWF_ENGINE_HTTP_ALLOWLIST="api.example.com,jsonplaceholder.typicode.com"`.

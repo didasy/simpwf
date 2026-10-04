@@ -130,6 +130,7 @@ func (h *InstanceHandler) Status(c *gin.Context) {
 		Counters:              inst.Counters,
 		Nodes:                 toNodeOccurrenceResponses(d.Nodes),
 		PendingInput:          toPendingInputResponse(d.PendingInput),
+		Parallel:              toParallelResponses(d.Parallel),
 		Error:                 errorMsg,
 		StartedAt:             inst.StartedAt,
 		FinishedAt:            inst.FinishedAt,
@@ -270,6 +271,7 @@ func (h *InstanceHandler) DebugContext(c *gin.Context) {
 // @Produce json
 // @Param id path string true "Instance ID"
 // @Param Idempotency-Key header string true "Idempotency key"
+// @Param branch_id query string false "Parallel branch ID holding the parked input node (omit for the instance cursor)"
 // @Param request body object true "Input payload"
 // @Success 202 {object} InputDeliveryResponse
 // @Failure 401,403,400,404,409,422,500 {object} Problem
@@ -297,6 +299,7 @@ func (h *InstanceHandler) Input(c *gin.Context) {
 	principal, authenticated := PrincipalFrom(c)
 	req := service.DeliverInput{
 		InstanceID:     c.Param("id"),
+		BranchID:       c.Query("branch_id"),
 		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 		Payload:        body,
 		Source:         model.InputChannelHTTP,
@@ -471,6 +474,42 @@ func toPendingInputResponse(p *service.PendingInput) *PendingInputResponse {
 		resp.Form = &InputFormDTO{Schema: p.Form.Schema, UI: p.Form.UI}
 	}
 	return resp
+}
+
+// toParallelResponses maps the service parallel tree onto the openapi
+// ParallelExecution schema. Nil stays nil so the field is omitted.
+func toParallelResponses(exs []service.ParallelExecutionView) []ParallelExecutionResponse {
+	if exs == nil {
+		return nil
+	}
+	out := make([]ParallelExecutionResponse, 0, len(exs))
+	for _, ex := range exs {
+		v := ParallelExecutionResponse{
+			ID:             ex.ID,
+			ParentBranchID: ex.ParentBranchID,
+			Depth:          ex.Depth,
+			StartNodeID:    ex.StartNodeID,
+			EndNodeID:      ex.EndNodeID,
+			Status:         ex.Status,
+			BranchCount:    ex.BranchCount,
+			CompletedCount: ex.CompletedCount,
+			Branches:       make([]ParallelBranchResponse, 0, len(ex.Branches)),
+		}
+		for _, b := range ex.Branches {
+			v.Branches = append(v.Branches, ParallelBranchResponse{
+				ID:            b.ID,
+				Name:          b.Name,
+				BranchIndex:   b.BranchIndex,
+				StartNodeID:   b.StartNodeID,
+				Status:        b.Status,
+				WaitingReason: b.WaitingReason,
+				Error:         b.Error,
+				UpdatedAt:     b.UpdatedAt,
+			})
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // toInstanceListQuery converts a parsed list query into the repository query.

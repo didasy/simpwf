@@ -13,6 +13,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/engine"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
+	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 )
 
 func TestEngineDeferredPauseParksPaused(t *testing.T) {
@@ -127,7 +128,7 @@ func TestDispatcherHeartbeatCancelsStoppedInstance(t *testing.T) {
 	e, instances := testEngine(t, db, model.DefaultLimits())
 	ctx := context.Background()
 
-	d, err := engine.NewDispatcher(ctx, e, instances, "dispatcher-1", engine.DispatcherOptions{
+	d, err := engine.NewDispatcher(ctx, e, instances, repository.NewParallelRepository(db), "dispatcher-1", engine.DispatcherOptions{
 		PollInterval: 20 * time.Millisecond,
 		Lease:        time.Minute,
 		BatchSize:    10,
@@ -178,7 +179,7 @@ func TestDispatcherHeartbeatCancelsStoppedInstance(t *testing.T) {
 }
 
 func TestCancellationRegistryConcurrent(t *testing.T) {
-	e := engine.NewEngine(nil, nil, executor.NewHookRunner(nil), model.Limits{}, nil, "test", model.LeanOptions{})
+	e := engine.NewEngine(nil, nil, nil, executor.NewHookRunner(nil), model.Limits{}, nil, "test", model.LeanOptions{})
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
 		wg.Add(1)

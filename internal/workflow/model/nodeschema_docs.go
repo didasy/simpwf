@@ -264,3 +264,36 @@ const pollerNodeSchemaJSON = `{
   "oneOf": [{ "required": ["http"] }, { "required": ["redis"] }, { "required": ["rabbitmq"] }],
   "additionalProperties": false
 }`
+
+const parallelStartNodeSchemaJSON = `{
+  "title": "simpwf parallel_start node",
+  "description": "Forks execution into named branches that each run with an isolated context; the parent resumes at parallel_end_node_id after every branch reaches the join. Go parsers stay authoritative.",
+  "type": "object",
+  "properties": {
+    "type": { "const": "parallel_start" },
+    "branches": {
+      "type": "object",
+      "minProperties": 2,
+      "description": "Branch name to same-scope target node id; at least two branches are required.",
+      "additionalProperties": { "$ref": "#/$defs/nodeId" }
+    },
+    "parallel_end_node_id": { "$ref": "#/$defs/nodeId" },
+    ` + commonNodeSchemaFields + `
+  },
+  "required": ["type", "branches", "parallel_end_node_id"],
+  "additionalProperties": false
+}`
+
+const parallelEndNodeSchemaJSON = `{
+  "title": "simpwf parallel_end node",
+  "description": "Barrier join: runs once after every branch of the matching parallel_start arrives, merging branch contexts into the parent via combining_script. Go parsers stay authoritative.",
+  "type": "object",
+  "properties": {
+    "type": { "const": "parallel_end" },
+    "combining_script": { "type": "string", "minLength": 1, "description": "Non-blank script; reads branch contexts through the read-only branch global and writes the parent context." },
+    "next_node": { "$ref": "#/$defs/nodeId" },
+    ` + commonNodeSchemaFields + `
+  },
+  "required": ["type", "combining_script"],
+  "additionalProperties": false
+}`

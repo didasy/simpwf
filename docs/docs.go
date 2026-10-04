@@ -1655,6 +1655,12 @@ const docTemplate = `{
                         "required": true
                     },
                     {
+                        "type": "string",
+                        "description": "Parallel branch ID holding the parked input node (omit for the instance cursor)",
+                        "name": "branch_id",
+                        "in": "query"
+                    },
+                    {
                         "description": "Input payload",
                         "name": "request",
                         "in": "body",
@@ -2413,6 +2419,12 @@ const docTemplate = `{
                         "$ref": "#/definitions/internal_workflow_handler.NodeOccurrenceResponse"
                     }
                 },
+                "parallel": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_workflow_handler.ParallelExecutionResponse"
+                    }
+                },
                 "pause_requested": {
                     "type": "boolean"
                 },
@@ -2717,6 +2729,70 @@ const docTemplate = `{
                 },
                 "rollbackable": {
                     "type": "boolean"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.ParallelBranchResponse": {
+            "type": "object",
+            "properties": {
+                "branch_index": {
+                    "type": "integer"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "start_node_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "waiting_reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_workflow_handler.ParallelExecutionResponse": {
+            "type": "object",
+            "properties": {
+                "branch_count": {
+                    "type": "integer"
+                },
+                "branches": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/internal_workflow_handler.ParallelBranchResponse"
+                    }
+                },
+                "completed_count": {
+                    "type": "integer"
+                },
+                "depth": {
+                    "type": "integer"
+                },
+                "end_node_id": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "parent_branch_id": {
+                    "type": "string"
+                },
+                "start_node_id": {
+                    "type": "string"
                 },
                 "status": {
                     "type": "string"

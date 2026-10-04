@@ -104,13 +104,15 @@ func sharedNodeDefs() map[string]any {
 // panics at startup instead of serving bad documentation.
 func mustBuildBuiltinNodeSchemas() map[string]json.RawMessage {
 	authored := map[string]string{
-		string(NodeTypeScript):       scriptNodeSchemaJSON,
-		string(NodeTypeConditions):   conditionsNodeSchemaJSON,
-		string(NodeTypeInput):        inputNodeSchemaJSON,
-		string(NodeTypeGroup):        groupNodeSchemaJSON,
-		string(NodeTypeExternalCall): externalCallNodeSchemaJSON,
-		string(NodeTypeOutput):       outputNodeSchemaJSON,
-		string(NodeTypePoller):       pollerNodeSchemaJSON,
+		string(NodeTypeScript):        scriptNodeSchemaJSON,
+		string(NodeTypeConditions):    conditionsNodeSchemaJSON,
+		string(NodeTypeInput):         inputNodeSchemaJSON,
+		string(NodeTypeGroup):         groupNodeSchemaJSON,
+		string(NodeTypeExternalCall):  externalCallNodeSchemaJSON,
+		string(NodeTypeOutput):        outputNodeSchemaJSON,
+		string(NodeTypePoller):        pollerNodeSchemaJSON,
+		string(NodeTypeParallelStart): parallelStartNodeSchemaJSON,
+		string(NodeTypeParallelEnd):   parallelEndNodeSchemaJSON,
 	}
 	docs := make(map[string]map[string]any, len(authored))
 	for nodeType, raw := range authored {
@@ -208,6 +210,8 @@ func groupChildRefs() []any {
 		map[string]any{"$ref": "#/$defs/" + string(NodeTypeExternalCall) + "Node"},
 		map[string]any{"$ref": "#/$defs/" + string(NodeTypeOutput) + "Node"},
 		map[string]any{"$ref": "#/$defs/" + string(NodeTypePoller) + "Node"},
+		map[string]any{"$ref": "#/$defs/" + string(NodeTypeParallelStart) + "Node"},
+		map[string]any{"$ref": "#/$defs/" + string(NodeTypeParallelEnd) + "Node"},
 		map[string]any{"$ref": "#/$defs/customNode"},
 	}
 }
@@ -217,7 +221,7 @@ func builtinTypeNames() []string {
 	return []string{
 		string(NodeTypeScript), string(NodeTypeConditions), string(NodeTypeInput),
 		string(NodeTypeGroup), string(NodeTypeExternalCall), string(NodeTypeOutput),
-		string(NodeTypePoller),
+		string(NodeTypePoller), string(NodeTypeParallelStart), string(NodeTypeParallelEnd),
 	}
 }
 

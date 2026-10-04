@@ -159,6 +159,29 @@ flowchart LR
   delay, Redis subscription, RabbitMQ consumption). Interrupted attempts
   become `stopped` + `cancelled` when a stop committed; otherwise they are
   left running for another worker to recover.
+- **Parallel execution**: `parallel_start` forks named branches and parks
+  the forking scope (instance cursor or parent branch) on the paired
+  `parallel_end`; each branch starts from a deep snapshot of the frozen
+  parent context and runs as an independent leased unit claimed with the
+  same `FOR UPDATE SKIP LOCKED` + revision fencing as instances. The last
+  branch to arrive arms the barrier exactly once (transactional completion
+  counting, retry-idempotent) and wakes the owner runnable; the join runs
+  `combining_script` over a frozen read-only `branch` view and commits the
+  merged advance with the execution completion atomically (spurious wakes
+  re-park). Branch index is alphabetical branch-name order. Blocks nest
+  (`parent_branch_id`, depth limit): a nested fork parks only the owner
+  branch row (instance row untouched, no outbox event), and a nested join
+  wakes the owner branch. A branch failure fails its execution, cancels
+  live siblings and nested subtrees, climbs through nested owners, and
+  fails a parked top-level parent (waiting or paused) with the leaf error;
+  stop cancels the whole tree in one transaction. Expired branch leases
+  reclaim into the shared recovery (scripts requeue, input nodes re-park).
+  Lifecycle audit events (`parallel_started`,
+  `parallel_branch_finished/failed/cancelled`, `parallel_completed/failed`,
+  plus `parallel_branch_resumed` on debug steps) carry stable
+  `parallel_execution_id`/`branch_id` identities. Status embeds the
+  `parallel` execution tree, and input delivery targets branch parks via
+  `?branch_id=`.
 
 ## State machines
 
@@ -192,7 +215,15 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
   `{"debug":true,"node_id":...}`; `pause_requested` stays false. Status-update
   outbox transitions (`running -> paused`) flow through the normal `paused`
   notification path. `GET .../debug/context` serves the debug position as a
-  redacted TypeScript declaration for autocomplete.
+  redacted TypeScript declaration for autocomplete. On debug runs with
+  parallel blocks, the fork parks the parent `paused`/`parallel` with
+  branches born `waiting`/`paused`, and each branch step re-parks paused;
+  every `resume` wakes exactly one paused branch (shallowest execution,
+  then alphabetical branch index) while the parent stays parked, and the
+  parent wakes once no paused branch remains (a step already in flight
+  conflicts). The barrier flips even a paused parent runnable so the later
+  resume lands claimable; nested owners stay barrier-parked (never paused)
+  so the barrier can wake them.
 
 - **Rollback**: `POST /v1/workflow/instance/{id}/rollback` moves a paused or
   failed instance's cursor back to an already-executed node occurrence so the
@@ -218,7 +249,10 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
   (emitting a `cursor_reconciled` audit event) before re-parking, as a
   safety net for rows predating the supersede close. Re-execution duplicates side effects: rolling back past an `input`
   node re-parks it and consumes a fresh input delivery on resume, and pollers
-  restart with a fresh wait budget.
+  restart with a fresh wait budget. Rollback rejects parallel-overlapping targets: occurrences that ran inside a
+  branch (`422`, with the nodes-map hint mirroring it) and any target while an execution is still waiting for
+  branches or for its join (`409`, checked before target validation). Targets before or after a completed block are
+  accepted; re-execution forks a fresh execution and old rows stay as history.
 
 - **Status `nodes` map**: `GET /v1/workflow/instance/{id}/status` embeds
   `nodes`, keyed by materialized graph node id (groups included, nested
@@ -227,7 +261,11 @@ Node statuses: `waiting -> running -> finished | failed | stopped`.
   advisory `rollbackable` hint (false unless the instance is paused/failed
   without termination pending; the rollback endpoint stays authoritative).
   The map degrades to omitted when the definition cannot load, so the status
-  call never fails for graph reasons.
+  call never fails for graph reasons. Status also embeds the `parallel`
+  execution/branch tree (omitted when the instance never forked; re-forks
+  append, old rows stay). `rollbackable` is additionally false for
+  branch-owned occurrences and for every node while parallel branches are
+  live.
 
 - **Input `form` contract**: an `input` node may carry optional
   `form: {schema, ui}`. `schema` is a JSON Schema (draft 2020-12) payload

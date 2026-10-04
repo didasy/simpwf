@@ -59,6 +59,8 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
 		&repository.StatusUpdateOutboxModel{},
+		&repository.ParallelExecutionModel{},
+		&repository.ParallelBranchModel{},
 	); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}

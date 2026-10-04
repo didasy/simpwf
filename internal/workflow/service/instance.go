@@ -54,7 +54,10 @@ type UpdateContext struct {
 // transport the payload arrived on ("http", "redis", or "rabbitmq"); an
 // empty Source defaults to "http".
 type DeliverInput struct {
-	InstanceID     string
+	InstanceID string
+	// BranchID targets a branch-parked input node instead of the instance
+	// cursor. Empty selects the instance cursor (the parent scope).
+	BranchID       string
 	IdempotencyKey string
 	Payload        []byte
 	Source         string
@@ -91,6 +94,39 @@ type StatusDetail struct {
 	// when the instance waits on an input node; Form is nil when that node
 	// carries no form contract.
 	PendingInput *PendingInput
+	// Parallel lists every parallel execution of the instance in creation
+	// order with its branches. Nil when the instance never forked. Loops
+	// fork repeatedly, so this is a list rather than the single object an
+	// early sketch showed; nested executions link to their owner branch
+	// via ParentBranchID.
+	Parallel []ParallelExecutionView
+}
+
+// ParallelExecutionView is one parallel fork/join scope on status: cursors
+// and counters without lease internals or branch contexts.
+type ParallelExecutionView struct {
+	ID             string
+	ParentBranchID *string
+	Depth          int
+	StartNodeID    string
+	EndNodeID      string
+	Status         string
+	BranchCount    int
+	CompletedCount int
+	Branches       []ParallelBranchView
+}
+
+// ParallelBranchView is one branch on status: identity, lifecycle state,
+// and the last error. WaitingReason is "" unless the branch waits.
+type ParallelBranchView struct {
+	ID            string
+	Name          string
+	BranchIndex   int
+	StartNodeID   string
+	Status        string
+	WaitingReason string
+	Error         string
+	UpdatedAt     time.Time
 }
 
 // PendingInput is the waiting-input contract served on status: the frontend
@@ -295,6 +331,7 @@ type InstanceService interface {
 
 type instanceService struct {
 	instances    repository.InstanceRepository
+	parallel     repository.ParallelRepository
 	wfDefs       repository.WorkflowDefinitionRepository
 	secrets      SecretSnapshotter
 	materializer WorkflowMaterializer
@@ -314,6 +351,7 @@ type instanceService struct {
 // catalog is consulted only by the input authorization gate.
 func NewInstanceService(
 	instances repository.InstanceRepository,
+	parallel repository.ParallelRepository,
 	wfDefs repository.WorkflowDefinitionRepository,
 	secrets SecretSnapshotter,
 	materializer WorkflowMaterializer,
@@ -325,7 +363,7 @@ func NewInstanceService(
 	leanOptions model.LeanOptions,
 ) InstanceService {
 	return newInstanceService(
-		instances, wfDefs, secrets, materializer, validator, hooks,
+		instances, parallel, wfDefs, secrets, materializer, validator, hooks,
 		actor, limits, cancels, leanOptions, auth.Catalog{},
 	)
 }
@@ -336,6 +374,7 @@ func NewInstanceService(
 // configured roles.
 func NewInstanceServiceWithCatalog(
 	instances repository.InstanceRepository,
+	parallel repository.ParallelRepository,
 	wfDefs repository.WorkflowDefinitionRepository,
 	secrets SecretSnapshotter,
 	materializer WorkflowMaterializer,
@@ -348,13 +387,14 @@ func NewInstanceServiceWithCatalog(
 	catalog auth.Catalog,
 ) InstanceService {
 	return newInstanceService(
-		instances, wfDefs, secrets, materializer, validator, hooks,
+		instances, parallel, wfDefs, secrets, materializer, validator, hooks,
 		actor, limits, cancels, leanOptions, catalog,
 	)
 }
 
 func newInstanceService(
 	instances repository.InstanceRepository,
+	parallel repository.ParallelRepository,
 	wfDefs repository.WorkflowDefinitionRepository,
 	secrets SecretSnapshotter,
 	materializer WorkflowMaterializer,
@@ -368,6 +408,7 @@ func newInstanceService(
 ) InstanceService {
 	return &instanceService{
 		instances:    instances,
+		parallel:     parallel,
 		wfDefs:       wfDefs,
 		secrets:      secrets,
 		materializer: materializer,
@@ -581,6 +622,7 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string, p auth
 	}
 	d := &StatusDetail{Instance: *redactInstanceView(inst)}
 	d.Nodes = s.statusNodes(ctx, inst)
+	d.Parallel = s.statusParallel(ctx, inst.ID)
 	frame, err := model.ParseFrame(inst.Frame)
 	if err != nil {
 		return d, nil
@@ -777,6 +819,14 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 	}
 	instanceGate := inst.Status == model.WorkflowPaused || inst.Status == model.WorkflowFailed
 	instanceGate = instanceGate && !inst.TerminationPending
+	if instanceGate {
+		// Mirror the rollback endpoint: live parallel branches block
+		// every target. A load failure leaves the gate to the
+		// endpoint, which rechecks authoritatively.
+		if live, err := s.hasLiveParallel(ctx, inst.ID); err == nil && live {
+			instanceGate = false
+		}
+	}
 	// Lean mode gates rollbackability on history presence, not on
 	// ContextBefore parsing (lean occurrence rows store null). The history
 	// occurrence-id set loads once per call: no per-node query fan-out.
@@ -812,6 +862,49 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 	return out
 }
 
+// statusParallel builds the parallel execution tree for the status
+// response. It returns nil when the instance never forked or when the rows
+// cannot be loaded, so the status view degrades to omitting the section
+// instead of failing the whole call.
+func (s *instanceService) statusParallel(ctx context.Context, instanceID string) []ParallelExecutionView {
+	exs, err := s.parallel.ListExecutions(ctx, instanceID)
+	if err != nil || len(exs) == 0 {
+		return nil
+	}
+	out := make([]ParallelExecutionView, 0, len(exs))
+	for _, ex := range exs {
+		branches, err := s.parallel.ListBranches(ctx, ex.ID)
+		if err != nil {
+			return nil
+		}
+		v := ParallelExecutionView{
+			ID:             ex.ID,
+			ParentBranchID: ex.ParentBranchID,
+			Depth:          ex.Depth,
+			StartNodeID:    ex.StartNodeID,
+			EndNodeID:      ex.EndNodeID,
+			Status:         string(ex.Status),
+			BranchCount:    ex.BranchCount,
+			CompletedCount: ex.CompletedCount,
+			Branches:       make([]ParallelBranchView, 0, len(branches)),
+		}
+		for _, b := range branches {
+			v.Branches = append(v.Branches, ParallelBranchView{
+				ID:            b.ID,
+				Name:          b.Name,
+				BranchIndex:   b.BranchIndex,
+				StartNodeID:   b.StartNodeID,
+				Status:        string(b.Status),
+				WaitingReason: string(b.WaitingReason),
+				Error:         b.Error,
+				UpdatedAt:     b.UpdatedAt,
+			})
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // flattenNodeIDs lists every graph node id in the materialized tree,
 // including group nodes themselves and their nested children.
 func flattenNodeIDs(nodes []*model.NodeContent) []string {
@@ -836,6 +929,9 @@ func leanRollbackableOccurrence(typ model.NodeType, occ *model.NodeInstance, set
 	if typ == model.NodeTypeGroup {
 		return false
 	}
+	if occ.BranchID != "" {
+		return false
+	}
 	switch occ.Status {
 	case model.NodeFinished, model.NodeFailed, model.NodeStopped:
 	default:
@@ -851,9 +947,13 @@ func leanRollbackableOccurrence(typ model.NodeType, occ *model.NodeInstance, set
 // rollbackableOccurrence mirrors the rollback endpoint's target validation:
 // group nodes never qualify (they have no occurrence), only terminal
 // occurrence states qualify, and the ContextBefore snapshot must parse as
-// a JSON object. The caller gates on instance status.
+// a JSON object. Branch-owned occurrences never qualify: rollback moves
+// the parent cursor only. The caller gates on instance status.
 func rollbackableOccurrence(typ model.NodeType, occ *model.NodeInstance) bool {
 	if typ == model.NodeTypeGroup {
+		return false
+	}
+	if occ.BranchID != "" {
 		return false
 	}
 	switch occ.Status {
@@ -1165,6 +1265,17 @@ func (s *instanceService) Resume(ctx context.Context, req ControlRequest) (*Cont
 	if err := authorizeInstance(inst, principal); err != nil {
 		return nil, err
 	}
+	if inst.Debug && (inst.Status == model.WorkflowPaused ||
+		(inst.Status == model.WorkflowWaiting && inst.WaitingReason == model.WaitingReasonParallel)) {
+		// Step-through: each resume advances exactly one paused
+		// branch while the parent stays parked. A branch input
+		// delivery can leave paused branches behind a waiting
+		// parent, so waiting parents step branches too; a generic
+		// parent wake here would join-spin against paused branches.
+		if stepped, err := s.resumeDebugStep(ctx, inst, actor); err != nil || stepped != nil {
+			return stepped, err
+		}
+	}
 	switch inst.Status {
 	case model.WorkflowWaiting:
 		return &ControlResult{Status: model.WorkflowWaiting}, nil
@@ -1186,6 +1297,82 @@ func (s *instanceService) Resume(ctx context.Context, req ControlRequest) (*Cont
 		Data: json.RawMessage(`{}`), CreatedBy: actor, CreatedAt: nowUTC(),
 	})
 	return &ControlResult{Status: model.WorkflowWaiting}, nil
+}
+
+// resumeDebugStep wakes one paused branch for a debug step-through
+// resume: the shallowest execution wins, then the alphabetically first
+// branch, so stepping order is deterministic. It returns nil when no
+// branch needs stepping so the caller wakes the parent instead. A branch
+// with a step already in flight (running or claimed-runnable) conflicts:
+// two steps at once would break the one-step-per-resume contract.
+func (s *instanceService) resumeDebugStep(ctx context.Context, inst *model.WorkflowInstance, actor string) (*ControlResult, error) {
+	exs, err := s.parallel.ListExecutions(ctx, inst.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(exs) == 0 {
+		return nil, nil
+	}
+	depth := make(map[string]int, len(exs))
+	for _, ex := range exs {
+		depth[ex.ID] = ex.Depth
+	}
+	var pick *model.ParallelBranch
+	for _, ex := range exs {
+		branches, err := s.parallel.ListBranches(ctx, ex.ID)
+		if err != nil {
+			return nil, err
+		}
+		for i := range branches {
+			b := &branches[i]
+			switch {
+			case b.Status == model.ParallelBranchRunning ||
+				(b.Status == model.ParallelBranchWaiting && b.WaitingReason == model.WaitingReasonRunnable):
+				return nil, fmt.Errorf("%w: branch %q has a step in flight", model.ErrConflict, b.Name)
+			case b.Status == model.ParallelBranchWaiting && b.WaitingReason == model.WaitingReasonPaused:
+				if pick == nil || debugPickBefore(depth, b, pick) {
+					c := *b
+					pick = &c
+				}
+			}
+		}
+	}
+	if pick == nil {
+		return nil, nil
+	}
+	if err := s.parallel.WakePausedBranch(ctx, pick.ID); err != nil {
+		if errors.Is(err, repository.ErrStatusConflict) || errors.Is(err, repository.ErrParallelBranchNotFound) {
+			return nil, fmt.Errorf("%w: branch %q is no longer paused", model.ErrConflict, pick.Name)
+		}
+		return nil, err
+	}
+	_ = s.instances.AppendEvent(ctx, model.WorkflowInstanceEvent{
+		ID: mustNewID(), WorkflowInstanceID: inst.ID, Type: "parallel_branch_resumed",
+		Data: mustMarshal(map[string]any{
+			"branch_id":             pick.ID,
+			"parallel_execution_id": pick.ParallelExecutionID,
+			"branch_name":           pick.Name,
+			"branch_index":          pick.BranchIndex,
+			"start_node_id":         pick.StartNodeID,
+		}),
+		CreatedBy: actor, CreatedAt: nowUTC(),
+	})
+	return &ControlResult{Status: inst.Status}, nil
+}
+
+// debugPickBefore orders paused branches for step-through: shallowest
+// execution first, then branch index (alphabetical), then oldest, then id.
+func debugPickBefore(depth map[string]int, b, pick *model.ParallelBranch) bool {
+	if depth[b.ParallelExecutionID] != depth[pick.ParallelExecutionID] {
+		return depth[b.ParallelExecutionID] < depth[pick.ParallelExecutionID]
+	}
+	if b.BranchIndex != pick.BranchIndex {
+		return b.BranchIndex < pick.BranchIndex
+	}
+	if !b.CreatedAt.Equal(pick.CreatedAt) {
+		return b.CreatedAt.Before(pick.CreatedAt)
+	}
+	return b.ID < pick.ID
 }
 
 func (s *instanceService) Stop(ctx context.Context, req ControlRequest) (*ControlResult, error) {
@@ -1262,6 +1449,11 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	if inst.TerminationPending {
 		return nil, fmt.Errorf("%w: instance %s has termination pending", model.ErrConflict, req.InstanceID)
 	}
+	if live, err := s.hasLiveParallel(ctx, inst.ID); err != nil {
+		return nil, err
+	} else if live {
+		return nil, fmt.Errorf("%w: instance %s has live parallel branches; rollback is supported only before a parallel block or after it completes", model.ErrConflict, req.InstanceID)
+	}
 
 	// The target is an already-executed node occurrence: its row carries
 	// the graph node id and the ContextBefore snapshot to restore. Nodes
@@ -1275,6 +1467,9 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	}
 	if occ.WorkflowInstanceID != inst.ID {
 		return nil, fmt.Errorf("%w: occurrence %q of instance %s", model.ErrNotFound, req.TargetOccurrenceID, req.InstanceID)
+	}
+	if occ.BranchID != "" {
+		return nil, fmt.Errorf("%w: occurrence %q ran inside a parallel branch; roll back to a node before or after the parallel block", model.ErrInvalid, req.TargetOccurrenceID)
 	}
 
 	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
@@ -1402,6 +1597,24 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 	return &RollbackResult{Status: rolled.Status, CurrentNodeID: newFrame.CurrentNodeID, GroupStack: newFrame.GroupStack}, nil
 }
 
+// hasLiveParallel reports whether an instance has a parallel execution
+// still waiting for branches or for its join. Completed, failed, and
+// cancelled executions are history and never block rollback.
+func (s *instanceService) hasLiveParallel(ctx context.Context, instanceID string) (bool, error) {
+	exs, err := s.parallel.ListExecutions(ctx, instanceID)
+	if err != nil {
+		return false, err
+	}
+	for _, ex := range exs {
+		switch ex.Status {
+		case model.ParallelExecutionCompleted, model.ParallelExecutionFailed, model.ParallelExecutionCancelled:
+		default:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // resolveRollbackContext restores the full context for a rollback target.
 // Full mode restores the occurrence ContextBefore snapshot; lean mode
 // resolves the target occurrence cursor over non-superseded history and
@@ -1520,6 +1733,9 @@ func (s *instanceService) replayDelivery(
 	if err != nil {
 		return nil, fmt.Errorf("%w: delivery %s targets an unresolvable node instance", model.ErrForbidden, existing.ID)
 	}
+	if occ.BranchID != req.BranchID {
+		return nil, fmt.Errorf("%w: Idempotency-Key %q was already used for a different branch", model.ErrConflict, req.IdempotencyKey)
+	}
 	nc, err := graph.Node(occ.NodeID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: delivery %s targets an unknown node %q", model.ErrForbidden, existing.ID, occ.NodeID)
@@ -1535,6 +1751,108 @@ func (s *instanceService) replayDelivery(
 		return nil, err
 	}
 	return existing, nil
+}
+
+// inputTarget is the resolved cursor of an input delivery: the instance
+// cursor for parent deliveries, a branch cursor for branch deliveries.
+// Resolution loads the cursor and node ahead of authorization (the gate
+// needs the node); parked-state assertions stay behind the channel match,
+// where they were, so error precedence is unchanged.
+type inputTarget struct {
+	frame  model.Frame
+	node   *model.NodeContent
+	branch *model.ParallelBranch
+	// branchID is "" for the parent scope.
+	branchID string
+	attempt  *model.NodeInstance
+	// startCtx is the pre-delivery context the lean history diff starts
+	// from on post failures.
+	startCtx map[string]any
+}
+
+func (s *instanceService) resolveInputTarget(ctx context.Context, inst *model.WorkflowInstance, graph *contentGraph, req DeliverInput) (*inputTarget, error) {
+	if req.BranchID == "" {
+		frame, err := model.ParseFrame(inst.Frame)
+		if err != nil {
+			return nil, err
+		}
+		node, err := graph.Node(frame.CurrentNodeID)
+		if err != nil {
+			return nil, err
+		}
+		if node.Type != model.NodeTypeInput {
+			return nil, fmt.Errorf("%w: current node is not an input node", model.ErrConflict)
+		}
+		return &inputTarget{frame: frame, node: node}, nil
+	}
+	branch, err := s.parallel.GetBranch(ctx, req.BranchID)
+	if err != nil {
+		if errors.Is(err, repository.ErrParallelBranchNotFound) {
+			return nil, fmt.Errorf("%w: branch %s not found", model.ErrNotFound, req.BranchID)
+		}
+		return nil, err
+	}
+	if branch.InstanceID != inst.ID {
+		return nil, fmt.Errorf("%w: branch %s does not belong to instance %s", model.ErrConflict, req.BranchID, req.InstanceID)
+	}
+	frame, err := model.ParseFrame(branch.Frame)
+	if err != nil {
+		return nil, err
+	}
+	node, err := graph.Node(frame.CurrentNodeID)
+	if err != nil {
+		return nil, err
+	}
+	if node.Type != model.NodeTypeInput {
+		return nil, fmt.Errorf("%w: current node is not an input node", model.ErrConflict)
+	}
+	return &inputTarget{frame: frame, node: node, branch: branch, branchID: branch.ID}, nil
+}
+
+// assertInputParked verifies the target is parked on its input node and
+// returns the live attempt with the target context. The repository
+// re-validates under lock; these checks only shape the error.
+func (s *instanceService) assertInputParked(ctx context.Context, inst *model.WorkflowInstance, tgt *inputTarget, req DeliverInput) (*model.NodeInstance, map[string]any, error) {
+	if tgt.branchID == "" {
+		attempt, err := s.instances.GetLiveNodeInstanceByNode(ctx, inst.ID, tgt.node.ID)
+		if err != nil {
+			if errors.Is(err, repository.ErrNodeInstanceNotFound) {
+				return nil, nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
+			}
+			return nil, nil, err
+		}
+		if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
+			return nil, nil, fmt.Errorf("%w: instance %s is not waiting for input", model.ErrConflict, req.InstanceID)
+		}
+		ctxMap, err := unmarshalJSON(inst.Context)
+		if err != nil {
+			return nil, nil, err
+		}
+		return attempt, ctxMap, nil
+	}
+	// Branch deliveries require the parent parked on its join, waiting
+	// or paused (debug step-through and manual pauses hold the parent
+	// paused while its branches run). A running parent must not have its
+	// branches advanced underneath it.
+	if inst.WaitingReason != model.WaitingReasonParallel ||
+		(inst.Status != model.WorkflowWaiting && inst.Status != model.WorkflowPaused) {
+		return nil, nil, fmt.Errorf("%w: instance %s is not parked on a parallel join", model.ErrConflict, req.InstanceID)
+	}
+	if tgt.branch.Status != model.ParallelBranchWaiting || tgt.branch.WaitingReason != model.WaitingReasonInput {
+		return nil, nil, fmt.Errorf("%w: branch %s is not waiting for input", model.ErrConflict, tgt.branchID)
+	}
+	attempt, err := s.instances.GetLiveBranchNodeInstanceByNode(ctx, tgt.branchID, tgt.node.ID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNodeInstanceNotFound) {
+			return nil, nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
+		}
+		return nil, nil, err
+	}
+	ctxMap, err := unmarshalJSON(tgt.branch.Context)
+	if err != nil {
+		return nil, nil, err
+	}
+	return attempt, ctxMap, nil
 }
 
 func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*model.InputDelivery, error) {
@@ -1586,17 +1904,11 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if err != nil {
 		return nil, err
 	}
-	frame, err := model.ParseFrame(inst.Frame)
+	tgt, err := s.resolveInputTarget(ctx, inst, graph, req)
 	if err != nil {
 		return nil, err
 	}
-	inputNode, err := graph.Node(frame.CurrentNodeID)
-	if err != nil {
-		return nil, err
-	}
-	if inputNode.Type != model.NodeTypeInput {
-		return nil, fmt.Errorf("%w: current node is not an input node", model.ErrConflict)
-	}
+	frame, inputNode := tgt.frame, tgt.node
 	// Authorization is decided here, once the node the delivery targets is
 	// known, and before the channel match, so a source header cannot skip
 	// the gate. The two gates are independent: a caller may hold
@@ -1614,22 +1926,12 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	if inputNode.Channel != source {
 		return nil, fmt.Errorf("%w: input source %q does not match input node channel %q", model.ErrConflict, source, inputNode.Channel)
 	}
-	attempt, err := s.instances.GetLiveNodeInstanceByNode(ctx, inst.ID, inputNode.ID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNodeInstanceNotFound) {
-			return nil, fmt.Errorf("%w: input node is not waiting for input", model.ErrConflict)
-		}
-		return nil, err
-	}
-
-	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
-		return nil, fmt.Errorf("%w: instance %s is not waiting for input", model.ErrConflict, req.InstanceID)
-	}
-
-	ctxMap, err := unmarshalJSON(inst.Context)
+	attempt, ctxMap, err := s.assertInputParked(ctx, inst, tgt, req)
 	if err != nil {
 		return nil, err
 	}
+	tgt.attempt = attempt
+	tgt.startCtx = ctxMap
 	// Schema-first enforcement: the form schema rejects bad payloads before
 	// the validation script runs. Rejection persists Accepted=false, same as
 	// a script rejection; the script never runs after a schema failure.
@@ -1688,7 +1990,7 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	// may transform the context after the payload was written.
 	postCtx, err := s.hooks.RunPost(ctx, inputNode, newCtx, payload)
 	if err != nil {
-		return s.failAcceptedInput(ctx, inst, attempt, req, ctxMap, model.NodeFailed, newCtx, err)
+		return s.failAcceptedInput(ctx, inst, tgt, req, model.NodeFailed, newCtx, err)
 	}
 	newCtx = postCtx
 
@@ -1701,10 +2003,31 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		finalCtx, herr := engine.RunExitedGroupPosts(ctx, s.hooks, graph, exited, newCtx)
 		if herr != nil {
 			// The input attempt finished; the structural group hook failure
-			// fails the workflow with the latest completed context.
-			return s.failAcceptedInput(ctx, inst, attempt, req, ctxMap, model.NodeFinished, finalCtx, herr)
+			// fails the scope with the latest completed context.
+			return s.failAcceptedInput(ctx, inst, tgt, req, model.NodeFinished, finalCtx, herr)
 		}
 		newCtx = finalCtx
+	}
+	c := repository.InputCompletion{
+		InstanceID:     inst.ID,
+		BranchID:       tgt.branchID,
+		NodeInstanceID: attempt.ID,
+		IdempotencyKey: req.IdempotencyKey,
+		Payload:        req.Payload,
+		Accepted:       true,
+		NewFrame:       frame,
+		NewContext:     mustMarshal(newCtx),
+		CreatedBy:      actor,
+		Anonymous:      anonymous,
+	}
+	if tgt.branchID != "" {
+		if done {
+			// Unreachable on validated graphs: every branch path
+			// reaches the join. Fail the branch loudly instead of
+			// dropping it.
+			return s.failAcceptedInput(ctx, inst, tgt, req, model.NodeFinished, newCtx, errors.New("branch terminated without reaching its parallel_end"))
+		}
+		return s.instances.DeliverInput(ctx, c)
 	}
 	status := model.WorkflowWaiting
 	var finished *time.Time
@@ -1718,21 +2041,10 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 		// A delivery that finishes the workflow stays terminal.
 		status = model.WorkflowPaused
 	}
-
-	return s.instances.DeliverInput(ctx, repository.InputCompletion{
-		InstanceID:     inst.ID,
-		NodeInstanceID: attempt.ID,
-		IdempotencyKey: req.IdempotencyKey,
-		Payload:        req.Payload,
-		Accepted:       true,
-		NewFrame:       frame,
-		NewContext:     mustMarshal(newCtx),
-		Status:         status,
-		FinishedAt:     finished,
-		CreatedBy:      actor,
-		Anonymous:      anonymous,
-		History:        s.leanInputHistory(inst, ctxMap, newCtx, attempt),
-	})
+	c.Status = status
+	c.FinishedAt = finished
+	c.History = s.leanInputHistory(inst, ctxMap, newCtx, attempt)
+	return s.instances.DeliverInput(ctx, c)
 }
 
 // inputContextValue is what an accepted delivery writes under the node's
@@ -1944,10 +2256,11 @@ func (s *instanceService) leanInputHistory(inst *model.WorkflowInstance, before,
 // failAcceptedInput records an accepted input delivery whose post processing
 // failed: the delivery stays accepted (the API returns 202), the node
 // attempt takes nodeStatus, and the workflow fails with the merged context.
-func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.WorkflowInstance, attempt *model.NodeInstance, req DeliverInput, reqCtx map[string]any, nodeStatus model.NodeStatus, ctxMap map[string]any, cause error) (*model.InputDelivery, error) {
-	return s.instances.DeliverInput(ctx, repository.InputCompletion{
+func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.WorkflowInstance, tgt *inputTarget, req DeliverInput, nodeStatus model.NodeStatus, ctxMap map[string]any, cause error) (*model.InputDelivery, error) {
+	c := repository.InputCompletion{
 		InstanceID:     inst.ID,
-		NodeInstanceID: attempt.ID,
+		BranchID:       tgt.branchID,
+		NodeInstanceID: tgt.attempt.ID,
 		IdempotencyKey: req.IdempotencyKey,
 		Payload:        req.Payload,
 		Accepted:       true,
@@ -1956,8 +2269,13 @@ func (s *instanceService) failAcceptedInput(ctx context.Context, inst *model.Wor
 		NewContext:     mustMarshal(ctxMap),
 		Error:          cause.Error(),
 		CreatedBy:      s.deliveryActor(req, s.deliveryPrincipal(req)),
-		History:        s.leanInputHistory(inst, reqCtx, ctxMap, attempt),
-	})
+	}
+	if tgt.branchID == "" {
+		// Branches run full-context snapshots; their diffs never join
+		// the instance history the parent replays.
+		c.History = s.leanInputHistory(inst, tgt.startCtx, ctxMap, tgt.attempt)
+	}
+	return s.instances.DeliverInput(ctx, c)
 }
 
 // contentGraph adapts a parsed workflow content to the engine cursor graph.

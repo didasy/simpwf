@@ -23,7 +23,7 @@ func allowAll() executor.Limits {
 func dispatcherFor(t *testing.T, db *gorm.DB, limits model.Limits, worker string, opts engine.DispatcherOptions, execLimits executor.Limits) *engine.Dispatcher {
 	t.Helper()
 	e, _ := testEngineWithExec(t, db, limits, execLimits)
-	d, err := engine.NewDispatcher(context.Background(), e, repository.NewInstanceRepository(db), worker, opts)
+	d, err := engine.NewDispatcher(context.Background(), e, repository.NewInstanceRepository(db), repository.NewParallelRepository(db), worker, opts)
 	if err != nil {
 		t.Fatalf("NewDispatcher() error = %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
@@ -51,7 +52,13 @@ type Checkpoint struct {
 // InputCompletion is an atomic input delivery: the delivery row plus, when
 // accepted, the completed node attempt and the advanced instance cursor.
 type InputCompletion struct {
-	InstanceID     string
+	InstanceID string
+	// BranchID targets a branch-parked input node instead of the instance
+	// cursor. The delivery finishes a branch attempt, advances the branch
+	// cursor, and leaves the instance row untouched; post failures fail
+	// the branch and climb like any branch failure. Empty selects the
+	// instance cursor (the parent scope).
+	BranchID       string
 	NodeInstanceID string
 	IdempotencyKey string
 	Payload        json.RawMessage
@@ -133,16 +140,22 @@ func newRepoID() string {
 
 // inputReceivedData builds the audit payload of an input_received event: the
 // targeted occurrence, plus delivered_by: anonymous when the payload arrived
-// with no credential on a public node. Attributed deliveries carry no marker
-// and read exactly as before, so existing history keeps its shape.
-func inputReceivedData(nodeInstanceID string, anonymous bool) json.RawMessage {
-	if !anonymous {
+// with no credential on a public node, plus branch_id when the delivery
+// targeted a branch-parked input node. Attributed parent-scope deliveries
+// carry no marker and read exactly as before, so existing history keeps its
+// shape.
+func inputReceivedData(nodeInstanceID, branchID string, anonymous bool) json.RawMessage {
+	if !anonymous && branchID == "" {
 		return json.RawMessage(`{"node_instance_id":"` + nodeInstanceID + `"}`)
 	}
-	raw, err := json.Marshal(map[string]string{
-		"node_instance_id": nodeInstanceID,
-		"delivered_by":     "anonymous",
-	})
+	data := map[string]string{"node_instance_id": nodeInstanceID}
+	if branchID != "" {
+		data["branch_id"] = branchID
+	}
+	if anonymous {
+		data["delivered_by"] = "anonymous"
+	}
+	raw, err := json.Marshal(data)
 	if err != nil {
 		return json.RawMessage(`{"node_instance_id":"` + nodeInstanceID + `"}`)
 	}
@@ -254,18 +267,30 @@ type InstanceRepository interface {
 	InsertNodeInstance(ctx context.Context, n model.NodeInstance) error
 	UpdateNodeInstance(ctx context.Context, n model.NodeInstance) error
 	GetNodeInstance(ctx context.Context, workflowInstanceID, occurrenceID string) (*model.NodeInstance, error)
-	// GetNodeInstanceByNode returns the occurrence of a workflow graph node
-	// within an instance, or ErrNodeInstanceNotFound. Multiple rows per
-	// node exist after loop iterations and rollback re-parks; callers that
-	// need the latest row must filter ListNodeInstances instead.
+	// GetNodeInstanceByNode returns the parent-scope occurrence of a workflow
+	// graph node within an instance, or ErrNodeInstanceNotFound. Multiple
+	// rows per node exist after loop iterations and rollback re-parks;
+	// callers that need the latest row must filter ListNodeInstances
+	// instead. Branch attempts never match; use GetBranchNodeInstanceByNode.
 	GetNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error)
-	// GetLiveNodeInstanceByNode returns the newest live (running) occurrence
-	// of a workflow graph node, or ErrNodeInstanceNotFound. Used by input
-	// delivery so a superseded (stopped) park is never resurrected.
+	// GetLiveNodeInstanceByNode returns the newest live (running) parent-scope
+	// occurrence of a workflow graph node, or ErrNodeInstanceNotFound. Used
+	// by input delivery so a superseded (stopped) park is never resurrected.
 	GetLiveNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error)
-	// GetRunningNodeInstance returns the in-flight attempt of an instance,
-	// or ErrNodeInstanceNotFound.
+	// GetRunningNodeInstance returns the in-flight parent-scope attempt of an
+	// instance, or ErrNodeInstanceNotFound.
 	GetRunningNodeInstance(ctx context.Context, workflowInstanceID string) (*model.NodeInstance, error)
+	// GetBranchNodeInstanceByNode returns the occurrence of a workflow graph
+	// node owned by a parallel branch, or ErrNodeInstanceNotFound.
+	GetBranchNodeInstanceByNode(ctx context.Context, branchID, nodeID string) (*model.NodeInstance, error)
+	// GetLiveBranchNodeInstanceByNode returns the newest live (running)
+	// branch-owned occurrence of a workflow graph node, or
+	// ErrNodeInstanceNotFound. Used by branch input delivery; parent-scope
+	// and finished attempts never match.
+	GetLiveBranchNodeInstanceByNode(ctx context.Context, branchID, nodeID string) (*model.NodeInstance, error)
+	// GetRunningBranchNodeInstance returns the in-flight attempt of a
+	// parallel branch, or ErrNodeInstanceNotFound.
+	GetRunningBranchNodeInstance(ctx context.Context, branchID string) (*model.NodeInstance, error)
 	ListNodeInstances(ctx context.Context, workflowInstanceID string) ([]model.NodeInstance, error)
 
 	// Audit events.
@@ -613,28 +638,37 @@ func (r *instanceRepo) Checkpoint(ctx context.Context, c Checkpoint) error {
 	}
 	now := time.Now().UTC()
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Exec(checkpointSQL,
-			string(c.Status), string(c.WaitingReason), c.PauseRequested,
-			frame, counters, jsonCol(c.Context, "{}"), c.Error,
-			c.FinishedAt,
-			c.InstanceID, c.Revision, c.WorkerID,
-		)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected != 1 {
-			return r.diagnoseFence(ctx, tx, c.InstanceID, c.WorkerID, c.Revision)
-		}
-		if err := appendHistoryTx(tx, c.InstanceID, c.History, now); err != nil {
-			return err
-		}
-		from := statusWithReason{status: c.FromStatus, waitingReason: c.FromWaitingReason}
-		to := statusWithReason{status: c.Status, waitingReason: c.WaitingReason}
-		return r.enqueueStatusUpdate(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, c.Context, now)
+		return execInstanceCheckpointTx(ctx, tx, c, frame, counters, now)
 	})
 }
 
-func (r *instanceRepo) diagnoseFence(ctx context.Context, g *gorm.DB, id, workerID string, revision int64) error {
+// execInstanceCheckpointTx runs the fenced parent write (state, history,
+// outbox) inside the caller's transaction so multi-row commits like the
+// parallel join stay atomic.
+func execInstanceCheckpointTx(ctx context.Context, tx *gorm.DB, c Checkpoint, frame, counters []byte, now time.Time) error {
+	res := tx.Exec(checkpointSQL,
+		string(c.Status), string(c.WaitingReason), c.PauseRequested,
+		frame, counters, jsonCol(c.Context, "{}"), c.Error,
+		c.FinishedAt,
+		c.InstanceID, c.Revision, c.WorkerID,
+	)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return diagnoseInstanceFenceTx(ctx, tx, c.InstanceID, c.WorkerID, c.Revision)
+	}
+	if err := appendHistoryTx(tx, c.InstanceID, c.History, now); err != nil {
+		return err
+	}
+	from := statusWithReason{status: c.FromStatus, waitingReason: c.FromWaitingReason}
+	to := statusWithReason{status: c.Status, waitingReason: c.WaitingReason}
+	return enqueueStatusUpdateTx(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, c.Context, now)
+}
+
+// diagnoseInstanceFenceTx is the receiver-free fence diagnosis shared by
+// Checkpoint and the parallel join.
+func diagnoseInstanceFenceTx(ctx context.Context, g *gorm.DB, id, workerID string, revision int64) error {
 	var m WorkflowInstanceModel
 	if err := g.WithContext(ctx).Where("id = ?", id).First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -779,6 +813,61 @@ func (r *instanceRepo) Stop(ctx context.Context, id, reason string) (bool, error
 			}).Error; err != nil {
 				return err
 			}
+			// Cancel the instance's parallel rows in the same
+			// transaction: live branches and executions cancel (lease
+			// clears fence in-flight workers), and running branch
+			// attempts stop so the termination sweep can settle.
+			// In-flight branch workers make termination pending.
+			var runningBranches int64
+			if err := tx.Model(&ParallelBranchModel{}).
+				Where("instance_id = ? AND status = ?", id, string(model.ParallelBranchRunning)).
+				Count(&runningBranches).Error; err != nil {
+				return err
+			}
+			if runningBranches > 0 {
+				pending = true
+				if err := tx.Model(&WorkflowInstanceModel{}).Where("id = ?", id).
+					Update("termination_pending", true).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Model(&ParallelBranchModel{}).
+				Where("instance_id = ? AND status IN ?", id, []string{
+					string(model.ParallelBranchPending),
+					string(model.ParallelBranchRunning),
+					string(model.ParallelBranchWaiting),
+				}).
+				Updates(map[string]any{
+					"status":       string(model.ParallelBranchCancelled),
+					"leased_by":    "",
+					"lease_expiry": nil,
+					"revision":     gorm.Expr("revision + 1"),
+					"updated_at":   now,
+				}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&ParallelExecutionModel{}).
+				Where("instance_id = ? AND status IN ?", id, []string{
+					string(model.ParallelWaitingForBranches),
+					string(model.ParallelReadyToJoin),
+				}).
+				Updates(map[string]any{
+					"status":     string(model.ParallelExecutionCancelled),
+					"updated_at": now,
+				}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&NodeInstanceModel{}).
+				Where("workflow_instance_id = ? AND branch_id IS NOT NULL AND status = ?", id, string(model.NodeRunning)).
+				Updates(map[string]any{
+					"status":     string(model.NodeStopped),
+					"cancelled":  true,
+					"stopped_at": now,
+					"error":      "instance stopped",
+					"updated_at": now,
+				}).Error; err != nil {
+				return err
+			}
 			from := statusWithReason{status: model.WorkflowStatus(m.Status), waitingReason: model.WaitingReason(m.WaitingReason)}
 			to := statusWithReason{status: model.WorkflowStopped}
 			return r.enqueueStatusUpdate(ctx, tx, id, m.WorkflowDefinitionID, m.Revision+1, from, to, transitionEvents(from, to), reason, m.Context, now)
@@ -873,7 +962,13 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		return r.getDelivery(ctx, c.InstanceID, c.IdempotencyKey)
 	}
 	if c.PostFailure {
+		if c.BranchID != "" {
+			return r.failBranchInput(ctx, c, &delivery)
+		}
 		return r.failInput(ctx, c, &delivery)
+	}
+	if c.BranchID != "" {
+		return r.deliverBranchInput(ctx, c, &delivery)
 	}
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -942,7 +1037,7 @@ func (r *instanceRepo) DeliverInput(ctx context.Context, c InputCompletion) (*mo
 		for _, ev := range []model.WorkflowInstanceEvent{
 			{
 				ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
-				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, c.Anonymous),
+				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, "", c.Anonymous),
 				CreatedBy: c.CreatedBy, CreatedAt: now,
 			},
 		} {
@@ -1045,7 +1140,7 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 		for _, ev := range []model.WorkflowInstanceEvent{
 			{
 				ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
-				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, c.Anonymous),
+				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, "", c.Anonymous),
 				CreatedBy: c.CreatedBy, CreatedAt: now,
 			},
 			{
@@ -1054,6 +1149,202 @@ func (r *instanceRepo) failInput(ctx context.Context, c InputCompletion, deliver
 				CreatedBy: c.CreatedBy, CreatedAt: now,
 			},
 		} {
+			em := WorkflowInstanceEventToModel(ev)
+			if err := tx.Create(&em).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, errDeliveryExists) {
+		return r.getDelivery(ctx, c.InstanceID, c.IdempotencyKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return delivery, nil
+}
+
+// deliverBranchInput atomically completes a branch-parked input delivery:
+// the delivery row, the finished branch attempt, and the branch cursor
+// advance (frame, context, woken to runnable) change together. The instance
+// row is untouched and no status update is enqueued: branch input is not an
+// instance transition. An input_received event records the delivery with
+// its branch.
+func (r *instanceRepo) deliverBranchInput(ctx context.Context, c InputCompletion, delivery *model.InputDelivery) (*model.InputDelivery, error) {
+	now := time.Now().UTC()
+	frameRaw, err := c.NewFrame.JSON()
+	if err != nil {
+		return nil, err
+	}
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var b ParallelBranchModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", c.BranchID).First(&b).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrParallelBranchNotFound
+			}
+			return err
+		}
+		if b.InstanceID != c.InstanceID {
+			return ErrStatusConflict
+		}
+		m := InputDeliveryToModel(*delivery)
+		res := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "workflow_instance_id"}, {Name: "idempotency_key"}},
+			DoNothing: true,
+		}).Create(&m)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errDeliveryExists
+		}
+		if b.Status != string(model.ParallelBranchWaiting) || b.WaitingReason != string(model.WaitingReasonInput) {
+			return ErrStatusConflict
+		}
+		fin := tx.Model(&NodeInstanceModel{}).
+			Where("id = ? AND branch_id = ? AND status = ?", c.NodeInstanceID, c.BranchID, string(model.NodeRunning)).
+			Updates(map[string]any{
+				"status":        string(model.NodeFinished),
+				"output":        jsonCol(c.Payload, "null"),
+				"context_after": jsonCol(c.NewContext, "null"),
+				"finished_at":   now,
+				"updated_at":    now,
+			})
+		if fin.Error != nil {
+			return fin.Error
+		}
+		if fin.RowsAffected == 0 {
+			return ErrStatusConflict
+		}
+		upd := tx.Model(&ParallelBranchModel{}).
+			Where("id = ? AND status = ? AND waiting_reason = ?",
+				c.BranchID, string(model.ParallelBranchWaiting), string(model.WaitingReasonInput)).
+			Updates(map[string]any{
+				"frame":          frameRaw,
+				"context":        jsonCol(c.NewContext, "{}"),
+				"waiting_reason": string(model.WaitingReasonRunnable),
+				"updated_at":     now,
+			})
+		if upd.Error != nil {
+			return upd.Error
+		}
+		if upd.RowsAffected == 0 {
+			return ErrStatusConflict
+		}
+		em := WorkflowInstanceEventToModel(model.WorkflowInstanceEvent{
+			ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
+			Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, c.BranchID, c.Anonymous),
+			CreatedBy: c.CreatedBy, CreatedAt: now,
+		})
+		return tx.Create(&em).Error
+	})
+	if errors.Is(err, errDeliveryExists) {
+		return r.getDelivery(ctx, c.InstanceID, c.IdempotencyKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return delivery, nil
+}
+
+// failBranchInput atomically records an accepted branch delivery whose post
+// processing failed: the delivery row, the branch attempt taking its final
+// status, and the failed branch change together, and the failure climbs
+// through the execution tree like any branch failure. Events mirror the
+// engine's branch failure trail.
+func (r *instanceRepo) failBranchInput(ctx context.Context, c InputCompletion, delivery *model.InputDelivery) (*model.InputDelivery, error) {
+	now := time.Now().UTC()
+	events := []model.WorkflowInstanceEvent{}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var b ParallelBranchModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", c.BranchID).First(&b).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrParallelBranchNotFound
+			}
+			return err
+		}
+		if b.InstanceID != c.InstanceID {
+			return ErrStatusConflict
+		}
+		m := InputDeliveryToModel(*delivery)
+		res := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "workflow_instance_id"}, {Name: "idempotency_key"}},
+			DoNothing: true,
+		}).Create(&m)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return errDeliveryExists
+		}
+		if b.Status != string(model.ParallelBranchWaiting) || b.WaitingReason != string(model.WaitingReasonInput) {
+			return ErrStatusConflict
+		}
+		fin := tx.Model(&NodeInstanceModel{}).
+			Where("id = ? AND branch_id = ? AND status = ?", c.NodeInstanceID, c.BranchID, string(model.NodeRunning)).
+			Updates(map[string]any{
+				"status":        string(c.NodeStatus),
+				"output":        jsonCol(c.Payload, "null"),
+				"context_after": jsonCol(c.NewContext, "null"),
+				"error":         c.Error,
+				"finished_at":   now,
+				"updated_at":    now,
+			})
+		if fin.Error != nil {
+			return fin.Error
+		}
+		if fin.RowsAffected == 0 {
+			return ErrStatusConflict
+		}
+		failedParent, err := failBranchCascadeTx(ctx, tx, b, c.Error, now)
+		if err != nil {
+			return err
+		}
+		branchFailed, err := json.Marshal(map[string]string{
+			"error": c.Error, "branch_id": c.BranchID, "parallel_execution_id": b.ParallelExecutionID,
+			"branch_name": b.Name, "branch_index": strconv.Itoa(b.BranchIndex), "start_node_id": b.StartNodeID,
+		})
+		if err != nil {
+			return err
+		}
+		events = []model.WorkflowInstanceEvent{
+			{
+				ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
+				Type: "input_received", Data: inputReceivedData(c.NodeInstanceID, c.BranchID, c.Anonymous),
+				CreatedBy: c.CreatedBy, CreatedAt: now,
+			},
+			{
+				ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
+				Type: "parallel_branch_failed", Data: branchFailed,
+				CreatedBy: c.CreatedBy, CreatedAt: now,
+			},
+		}
+		if failedParent {
+			parallelFailed, err := json.Marshal(map[string]string{
+				"parallel_execution_id": b.ParallelExecutionID, "error": c.Error,
+			})
+			if err != nil {
+				return err
+			}
+			workflowFailed, err := json.Marshal(map[string]any{"error": c.Error})
+			if err != nil {
+				return err
+			}
+			events = append(events,
+				model.WorkflowInstanceEvent{
+					ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
+					Type: "parallel_failed", Data: parallelFailed,
+					CreatedBy: c.CreatedBy, CreatedAt: now,
+				},
+				model.WorkflowInstanceEvent{
+					ID: newRepoID(), WorkflowInstanceID: c.InstanceID,
+					Type: "workflow_failed", Data: workflowFailed,
+					CreatedBy: c.CreatedBy, CreatedAt: now,
+				},
+			)
+		}
+		for _, ev := range events {
 			em := WorkflowInstanceEventToModel(ev)
 			if err := tx.Create(&em).Error; err != nil {
 				return err
@@ -1135,7 +1426,7 @@ func (r *instanceRepo) GetNodeInstance(ctx context.Context, workflowInstanceID, 
 func (r *instanceRepo) GetNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error) {
 	var m NodeInstanceModel
 	if err := r.db.WithContext(ctx).
-		Where("workflow_instance_id = ? AND node_id = ?", workflowInstanceID, nodeID).
+		Where("workflow_instance_id = ? AND node_id = ? AND branch_id IS NULL", workflowInstanceID, nodeID).
 		First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNodeInstanceNotFound
@@ -1149,7 +1440,7 @@ func (r *instanceRepo) GetNodeInstanceByNode(ctx context.Context, workflowInstan
 func (r *instanceRepo) GetLiveNodeInstanceByNode(ctx context.Context, workflowInstanceID, nodeID string) (*model.NodeInstance, error) {
 	var m NodeInstanceModel
 	if err := r.db.WithContext(ctx).
-		Where("workflow_instance_id = ? AND node_id = ? AND status = ?", workflowInstanceID, nodeID, string(model.NodeRunning)).
+		Where("workflow_instance_id = ? AND node_id = ? AND status = ? AND branch_id IS NULL", workflowInstanceID, nodeID, string(model.NodeRunning)).
 		Order("created_at DESC, id DESC").
 		First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1164,7 +1455,51 @@ func (r *instanceRepo) GetLiveNodeInstanceByNode(ctx context.Context, workflowIn
 func (r *instanceRepo) GetRunningNodeInstance(ctx context.Context, workflowInstanceID string) (*model.NodeInstance, error) {
 	var m NodeInstanceModel
 	if err := r.db.WithContext(ctx).
-		Where("workflow_instance_id = ? AND status = ?", workflowInstanceID, string(model.NodeRunning)).
+		Where("workflow_instance_id = ? AND status = ? AND branch_id IS NULL", workflowInstanceID, string(model.NodeRunning)).
+		Order("updated_at DESC").
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNodeInstanceNotFound
+		}
+		return nil, err
+	}
+	n := NodeInstanceFromModel(m)
+	return &n, nil
+}
+
+func (r *instanceRepo) GetBranchNodeInstanceByNode(ctx context.Context, branchID, nodeID string) (*model.NodeInstance, error) {
+	var m NodeInstanceModel
+	if err := r.db.WithContext(ctx).
+		Where("branch_id = ? AND node_id = ?", branchID, nodeID).
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNodeInstanceNotFound
+		}
+		return nil, err
+	}
+	n := NodeInstanceFromModel(m)
+	return &n, nil
+}
+
+func (r *instanceRepo) GetLiveBranchNodeInstanceByNode(ctx context.Context, branchID, nodeID string) (*model.NodeInstance, error) {
+	var m NodeInstanceModel
+	if err := r.db.WithContext(ctx).
+		Where("branch_id = ? AND node_id = ? AND status = ?", branchID, nodeID, string(model.NodeRunning)).
+		Order("created_at DESC, id DESC").
+		First(&m).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNodeInstanceNotFound
+		}
+		return nil, err
+	}
+	n := NodeInstanceFromModel(m)
+	return &n, nil
+}
+
+func (r *instanceRepo) GetRunningBranchNodeInstance(ctx context.Context, branchID string) (*model.NodeInstance, error) {
+	var m NodeInstanceModel
+	if err := r.db.WithContext(ctx).
+		Where("branch_id = ? AND status = ?", branchID, string(model.NodeRunning)).
 		Order("updated_at DESC").
 		First(&m).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {

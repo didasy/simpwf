@@ -42,7 +42,8 @@ type customSchemaEntry struct {
 func IsBuiltinNodeType(t string) bool {
 	switch NodeType(t) {
 	case NodeTypeScript, NodeTypeConditions, NodeTypeInput, NodeTypeGroup,
-		NodeTypeExternalCall, NodeTypeOutput, NodeTypePoller:
+		NodeTypeExternalCall, NodeTypeOutput, NodeTypePoller,
+		NodeTypeParallelStart, NodeTypeParallelEnd:
 		return true
 	default:
 		return false

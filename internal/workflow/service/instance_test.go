@@ -58,12 +58,14 @@ func setupSvcDB(t *testing.T) *gorm.DB {
 		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{}, &repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{}, &repository.StatusUpdateOutboxModel{},
+		&repository.ParallelExecutionModel{}, &repository.ParallelBranchModel{},
 	); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 	if err := db.Exec(`TRUNCATE TABLE
 		role_permissions, roles,
 		secrets, status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
+		parallel_branches, parallel_executions,
 		workflow_instances, workflow_requests, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users RESTART IDENTITY`).Error; err != nil {
 		t.Fatalf("truncate tables: %v", err)
@@ -172,6 +174,7 @@ func svcInstanceServiceWithOptions(db *gorm.DB, options model.LeanOptions) servi
 	validator := &executor.InputExecutor{}
 	return service.NewInstanceService(
 		instances,
+		repository.NewParallelRepository(db),
 		repository.NewWorkflowDefinitionRepository(db),
 		repository.NewSecretRepository(db),
 		svcWorkflowService(db),
@@ -195,6 +198,7 @@ func svcInstanceServiceWithCatalogAndOptions(db *gorm.DB, options model.LeanOpti
 	validator := &executor.InputExecutor{}
 	return service.NewInstanceServiceWithCatalog(
 		instances,
+		repository.NewParallelRepository(db),
 		repository.NewWorkflowDefinitionRepository(db),
 		repository.NewSecretRepository(db),
 		svcWorkflowService(db),
@@ -208,8 +212,8 @@ func svcInstanceServiceWithCatalogAndOptions(db *gorm.DB, options model.LeanOpti
 	)
 }
 
-// driveEngine runs claim -> process until the instance parks on input,
-// finishes, or fails.
+// driveEngine runs claim -> process until the instance parks on input or a
+// parallel join, finishes, or fails.
 func driveEngine(t *testing.T, db *gorm.DB, instanceID string) model.WorkflowInstance {
 	return driveEngineWithExecLimitsAndOptions(t, db, instanceID, executor.Limits{}, model.LeanOptions{})
 }
@@ -244,7 +248,7 @@ func driveOne(t *testing.T, db *gorm.DB, w model.WorkflowInstance) error {
 		}
 		return wfSvc.Materialize(ctx, wc)
 	}
-	e := engine.NewEngine(instances, executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, model.LeanOptions{})
+	e := engine.NewEngine(instances, repository.NewParallelRepository(db), executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, model.LeanOptions{})
 	return e.Process(context.Background(), w)
 }
 
@@ -268,7 +272,7 @@ func driveEngineWithExecLimitsAndOptions(t *testing.T, db *gorm.DB, instanceID s
 		}
 		return wfSvc.Materialize(ctx, wc)
 	}
-	e := engine.NewEngine(instances, executor.NewExecutors(execLimits, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, leanOptions)
+	e := engine.NewEngine(instances, repository.NewParallelRepository(db), executor.NewExecutors(execLimits, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, leanOptions)
 	for i := 0; i < 200; i++ {
 		claimed, err := instances.ClaimNext(ctx, "svc-worker", time.Minute, 10)
 		if err != nil {
@@ -283,7 +287,7 @@ func driveEngineWithExecLimitsAndOptions(t *testing.T, db *gorm.DB, instanceID s
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cur.Status == model.WorkflowWaiting && cur.WaitingReason == model.WaitingReasonInput {
+		if cur.Status == model.WorkflowWaiting && (cur.WaitingReason == model.WaitingReasonInput || cur.WaitingReason == model.WaitingReasonParallel) {
 			return *cur
 		}
 		if cur.Status == model.WorkflowFinished || cur.Status == model.WorkflowFailed || cur.Status == model.WorkflowStopped {
@@ -1421,6 +1425,7 @@ func svcControlService(db *gorm.DB, c service.Canceller) service.InstanceService
 	instances := repository.NewInstanceRepository(db)
 	return service.NewInstanceService(
 		instances,
+		repository.NewParallelRepository(db),
 		repository.NewWorkflowDefinitionRepository(db),
 		repository.NewSecretRepository(db),
 		svcWorkflowService(db),
@@ -2969,7 +2974,7 @@ func svcTestEngine(t *testing.T, db *gorm.DB) *engine.Engine {
 		}
 		return wfSvc.Materialize(ctx, wc)
 	}
-	return engine.NewEngine(instances, executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, model.LeanOptions{AnchorEvery: 20, ReplayMax: 500})
+	return engine.NewEngine(instances, repository.NewParallelRepository(db), executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}), executor.NewHookRunner(nil), model.DefaultLimits(), loader, svcSysUserID, model.LeanOptions{AnchorEvery: 20, ReplayMax: 500})
 }
 
 func TestStatusDetailNodesMap(t *testing.T) {
@@ -3739,5 +3744,1120 @@ func TestLeanHistoryGapMapsToConflict(t *testing.T) {
 
 	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: occ1.ID}); !errors.Is(err, model.ErrConflict) {
 		t.Fatalf("Rollback(broken chain) error = %v, want ErrConflict", err)
+	}
+}
+
+const (
+	svcBranchStart = "11111111-1111-7111-8111-11111111c001"
+	svcBranchAsk   = "11111111-1111-7111-8111-11111111c002"
+	svcBranchNB    = "11111111-1111-7111-8111-11111111c003"
+	svcBranchEnd   = "11111111-1111-7111-8111-11111111c004"
+)
+
+// svcCreateBranchInputWorkflow builds a fork whose branch a parks on an http
+// input node while branch b runs a script; the join merges the delivered
+// webhook and the script result.
+func svcCreateBranchInputWorkflow(t *testing.T, db *gorm.DB, askExtra map[string]any) string {
+	t.Helper()
+	return svcCreateWorkflow(t, db, svcBranchStart,
+		svcNodeJSON(svcBranchStart, "parallel_start", "fork", "", "", map[string]any{
+			"branches":             map[string]any{"a": svcBranchAsk, "b": svcBranchNB},
+			"parallel_end_node_id": svcBranchEnd,
+		}),
+		svcNodeJSON(svcBranchAsk, "input", "ask", "", svcBranchEnd, askExtra),
+		svcNodeJSON(svcBranchNB, "script", "nb", "return 7;", svcBranchEnd, map[string]any{"output_property": "nb"}),
+		svcNodeJSON(svcBranchEnd, "parallel_end", "join", "", "", map[string]any{
+			"combining_script": `context.webhook = branch["a"].context.webhook; context.total = branch["b"].context.nb;`,
+		}),
+	)
+}
+
+func driveBranchOne(t *testing.T, db *gorm.DB, b model.ParallelBranch) {
+	t.Helper()
+	if err := svcTestEngine(t, db).ProcessBranch(context.Background(), b); err != nil {
+		t.Fatalf("ProcessBranch() error = %v", err)
+	}
+}
+
+func svcClaimBranches(t *testing.T, db *gorm.DB) map[string]model.ParallelBranch {
+	t.Helper()
+	claimed, err := repository.NewParallelRepository(db).ClaimNextBranches(context.Background(), "svc-worker", time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimNextBranches() error = %v", err)
+	}
+	byName := map[string]model.ParallelBranch{}
+	for _, b := range claimed {
+		byName[b.Name] = b
+	}
+	return byName
+}
+
+// svcSetupBranchInput creates an instance of wfID, forks it, and parks branch
+// a on its input node. It returns the instance id, the parked branch a, and
+// branch b's untouched claim (one claim grabs every runnable branch, so b
+// cannot be claimed again later).
+func svcSetupBranchInput(t *testing.T, db *gorm.DB, svc service.InstanceService, wfID string) (string, model.ParallelBranch, model.ParallelBranch) {
+	t.Helper()
+	ctx := context.Background()
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	claimed := svcClaimBranches(t, db)
+	a, ok := claimed["a"]
+	if !ok {
+		t.Fatalf("branch %q was not claimed", "a")
+	}
+	b, ok := claimed["b"]
+	if !ok {
+		t.Fatalf("branch %q was not claimed", "b")
+	}
+	driveBranchOne(t, db, a)
+	got, err := repository.NewParallelRepository(db).GetBranch(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.ParallelBranchWaiting || got.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("branch a = %s/%s, want waiting/input", got.Status, got.WaitingReason)
+	}
+	return inst.ID, *got, b
+}
+
+func TestDeliverBranchInputWakesBranch(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateBranchInputWorkflow(t, db, map[string]any{"channel": "http", "output_property": "webhook"})
+	instID, a, b := svcSetupBranchInput(t, db, svc, wfID)
+
+	d, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: a.ID, IdempotencyKey: "bk-1", Payload: []byte(`{"success":true}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if !d.Accepted {
+		t.Fatalf("delivery = %+v, want accepted", d)
+	}
+	prepo := repository.NewParallelRepository(db)
+	got, err := prepo.GetBranch(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.ParallelBranchWaiting || got.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("branch a = %s/%s, want waiting/runnable", got.Status, got.WaitingReason)
+	}
+	frame, _ := model.ParseFrame(got.Frame)
+	if frame.CurrentNodeID != svcBranchEnd {
+		t.Fatalf("branch cursor = %q, want join", frame.CurrentNodeID)
+	}
+	var bctx map[string]any
+	if err := json.Unmarshal(got.Context, &bctx); err != nil {
+		t.Fatal(err)
+	}
+	webhook, ok := bctx["webhook"].(map[string]any)
+	if !ok || webhook["success"] != true {
+		t.Fatalf("branch context = %v, want merged webhook", bctx)
+	}
+	// Finish the flow: branch a completes, branch b runs, the join merges.
+	resumed, ok := svcClaimBranches(t, db)["a"]
+	if !ok {
+		t.Fatalf("branch %q was not claimed after delivery", "a")
+	}
+	driveBranchOne(t, db, resumed)
+	driveBranchOne(t, db, b)
+	cur := driveEngine(t, db, instID)
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s (%s), want finished", cur.Status, cur.Error)
+	}
+	full, err := svc.GetContext(ctx, instID, auth.Principal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ctxMap map[string]any
+	if err := json.Unmarshal(full.Context, &ctxMap); err != nil {
+		t.Fatal(err)
+	}
+	if ctxMap["total"] != float64(7) {
+		t.Fatalf("context = %v, want total 7", ctxMap)
+	}
+	if _, ok := ctxMap["webhook"].(map[string]any); !ok {
+		t.Fatalf("context = %v, want merged webhook", ctxMap)
+	}
+}
+
+func TestDeliverBranchInputRejectsWrongScope(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateBranchInputWorkflow(t, db, map[string]any{"channel": "http", "output_property": "webhook"})
+	instID, a, b := svcSetupBranchInput(t, db, svc, wfID)
+
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: "33333333-3333-7333-8333-333333333333",
+		IdempotencyKey: "bk-404", Payload: []byte(`{"success":true}`),
+	}); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("unknown branch err = %v, want ErrNotFound", err)
+	}
+	// Branch b holds its setup lease on a script node: parked nowhere, so
+	// a delivery to it conflicts.
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: b.ID,
+		IdempotencyKey: "bk-unparked", Payload: []byte(`{"success":true}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("unparked branch err = %v, want ErrConflict", err)
+	}
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, IdempotencyKey: "bk-parent", Payload: []byte(`{"success":true}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("parent delivery err = %v, want ErrConflict", err)
+	}
+	other, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: other.ID, BranchID: a.ID,
+		IdempotencyKey: "bk-cross", Payload: []byte(`{"success":true}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("cross-instance branch err = %v, want ErrConflict", err)
+	}
+}
+
+func TestDeliverBranchInputReplaysSameKey(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateBranchInputWorkflow(t, db, map[string]any{"channel": "http", "output_property": "webhook"})
+	instID, a, b := svcSetupBranchInput(t, db, svc, wfID)
+
+	first, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: a.ID, IdempotencyKey: "bk-replay", Payload: []byte(`{"n":1}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	replay, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: a.ID, IdempotencyKey: "bk-replay", Payload: []byte(`{"n":1}`),
+	})
+	if err != nil {
+		t.Fatalf("replay DeliverInput() error = %v", err)
+	}
+	if replay.ID != first.ID {
+		t.Fatalf("replay.ID = %s, want %s", replay.ID, first.ID)
+	}
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: a.ID, IdempotencyKey: "bk-replay", Payload: []byte(`{"n":2}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("changed payload err = %v, want ErrConflict", err)
+	}
+	if _, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: b.ID, IdempotencyKey: "bk-replay", Payload: []byte(`{"n":1}`),
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("changed branch err = %v, want ErrConflict", err)
+	}
+}
+
+func TestDeliverBranchInputPostHookFailureFailsBranch(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateBranchInputWorkflow(t, db, map[string]any{
+		"channel": "http", "output_property": "webhook",
+		"post_script": map[string]any{"script": "throw new Error('branch ipost boom');"},
+	})
+	instID, a, _ := svcSetupBranchInput(t, db, svc, wfID)
+
+	delivery, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: instID, BranchID: a.ID, IdempotencyKey: "bk-postfail", Payload: []byte(`{"success":true}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if !delivery.Accepted {
+		t.Fatalf("delivery = %+v, want accepted (202) even though the branch fails", delivery)
+	}
+	if !strings.Contains(delivery.Error, "branch ipost boom") {
+		t.Fatalf("delivery error = %q, want post-script cause", delivery.Error)
+	}
+	prepo := repository.NewParallelRepository(db)
+	got, err := prepo.GetBranch(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.ParallelBranchFailed {
+		t.Fatalf("branch a = %s, want failed", got.Status)
+	}
+	cur, err := svc.GetStatus(ctx, instID, auth.Principal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowFailed {
+		t.Fatalf("status = %s, want failed after branch post failure", cur.Status)
+	}
+	if !strings.Contains(cur.Error, "branch ipost boom") {
+		t.Fatalf("instance error = %q, want post-script cause", cur.Error)
+	}
+	branches, err := prepo.ListBranches(ctx, a.ParallelExecutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range branches {
+		if b.ID != a.ID && b.Status != model.ParallelBranchCancelled {
+			t.Fatalf("sibling %s = %s, want cancelled", b.Name, b.Status)
+		}
+	}
+}
+
+func TestGetStatusDetailIncludesParallelTree(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateBranchInputWorkflow(t, db, map[string]any{"channel": "http", "output_property": "webhook"})
+	instID, a, _ := svcSetupBranchInput(t, db, svc, wfID)
+
+	d, err := svc.GetStatusDetail(ctx, instID, auth.Principal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parallel) != 1 {
+		t.Fatalf("parallel executions = %d, want 1", len(d.Parallel))
+	}
+	ex := d.Parallel[0]
+	if ex.StartNodeID != svcBranchStart || ex.EndNodeID != svcBranchEnd {
+		t.Fatalf("execution = %+v", ex)
+	}
+	if ex.Status != string(model.ParallelWaitingForBranches) || ex.Depth != 1 {
+		t.Fatalf("execution = %+v", ex)
+	}
+	if ex.BranchCount != 2 || ex.CompletedCount != 0 {
+		t.Fatalf("execution = %+v", ex)
+	}
+	if ex.ParentBranchID != nil {
+		t.Fatalf("top-level parent_branch_id = %v, want nil", ex.ParentBranchID)
+	}
+	if len(ex.Branches) != 2 {
+		t.Fatalf("branches = %d, want 2", len(ex.Branches))
+	}
+	byName := map[string]service.ParallelBranchView{}
+	for _, b := range ex.Branches {
+		byName[b.Name] = b
+	}
+	ba := byName["a"]
+	if ba.ID != a.ID || ba.BranchIndex != 0 || ba.StartNodeID != svcBranchAsk {
+		t.Fatalf("branch a = %+v", ba)
+	}
+	if ba.Status != string(model.ParallelBranchWaiting) || ba.WaitingReason != string(model.WaitingReasonInput) {
+		t.Fatalf("branch a = %+v", ba)
+	}
+	bb := byName["b"]
+	if bb.BranchIndex != 1 || bb.StartNodeID != svcBranchNB {
+		t.Fatalf("branch b = %+v", bb)
+	}
+	if bb.Status != string(model.ParallelBranchRunning) {
+		t.Fatalf("branch b = %+v (holds its setup lease)", bb)
+	}
+}
+
+func TestGetStatusDetailOmitsParallelWithoutFork(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, "11111111-1111-7111-8111-111111111101",
+		svcNodeJSON("11111111-1111-7111-8111-111111111101", "script", "a", "return 1;", "", nil),
+	)
+	svc := svcInstanceService(db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parallel) != 0 {
+		t.Fatalf("parallel = %+v, want empty", d.Parallel)
+	}
+}
+
+func TestGetStatusDetailShowsNestedParallel(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	start := svcNewID()
+	na := svcNewID()
+	nstart := svcNewID()
+	nx := svcNewID()
+	ny := svcNewID()
+	nend := svcNewID()
+	nb := svcNewID()
+	end := svcNewID()
+	wfID := svcCreateWorkflow(t, db, start,
+		svcNodeJSON(start, "parallel_start", "fork", "", "", map[string]any{
+			"branches":             map[string]any{"a": na, "b": nb},
+			"parallel_end_node_id": end,
+		}),
+		svcNodeJSON(na, "script", "na", "return 1;", nstart, map[string]any{"output_property": "na"}),
+		svcNodeJSON(nstart, "parallel_start", "nested-fork", "", "", map[string]any{
+			"branches":             map[string]any{"x": nx, "y": ny},
+			"parallel_end_node_id": nend,
+		}),
+		svcNodeJSON(nx, "script", "nx", "return 10;", nend, map[string]any{"output_property": "x"}),
+		svcNodeJSON(ny, "script", "ny", "return 20;", nend, map[string]any{"output_property": "y"}),
+		svcNodeJSON(nend, "parallel_end", "nested-join", "", end, map[string]any{
+			"combining_script": `context.n = branch["x"].context.x + branch["y"].context.y;`,
+		}),
+		svcNodeJSON(nb, "script", "nb", "return 2;", end, map[string]any{"output_property": "nb"}),
+		svcNodeJSON(end, "parallel_end", "join", "", "", map[string]any{
+			"combining_script": `context.total = branch["a"].context.n + branch["b"].context.nb;`,
+		}),
+	)
+	svc := svcInstanceService(db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s", cur.Status, cur.WaitingReason)
+	}
+	claimed := svcClaimBranches(t, db)
+	driveBranchOne(t, db, claimed["a"])
+	afterNa, ok := svcClaimBranches(t, db)["a"]
+	if !ok {
+		t.Fatalf("branch a was not claimed after na")
+	}
+	driveBranchOne(t, db, afterNa)
+
+	d, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Parallel) != 2 {
+		t.Fatalf("parallel executions = %d, want 2", len(d.Parallel))
+	}
+	var nested *service.ParallelExecutionView
+	for i := range d.Parallel {
+		if d.Parallel[i].Depth == 2 {
+			nested = &d.Parallel[i]
+		}
+	}
+	if nested == nil {
+		t.Fatalf("no depth-2 execution in %+v", d.Parallel)
+	}
+	if nested.ParentBranchID == nil {
+		t.Fatalf("nested parent_branch_id is nil")
+	}
+	outer := d.Parallel[0]
+	if outer.Depth != 1 {
+		outer = d.Parallel[1]
+	}
+	found := false
+	for _, b := range outer.Branches {
+		if b.ID == *nested.ParentBranchID && b.Name == "a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("nested parent %s is not outer branch a", *nested.ParentBranchID)
+	}
+	if len(nested.Branches) != 2 || nested.StartNodeID != nstart || nested.EndNodeID != nend {
+		t.Fatalf("nested execution = %+v", nested)
+	}
+}
+
+const (
+	svcDebugStart = "11111111-1111-7111-8111-11111111d001"
+	svcDebugS1    = "11111111-1111-7111-8111-11111111d002"
+	svcDebugS2    = "11111111-1111-7111-8111-11111111d003"
+	svcDebugB     = "11111111-1111-7111-8111-11111111d004"
+	svcDebugEnd   = "11111111-1111-7111-8111-11111111d005"
+	svcDebugDone  = "11111111-1111-7111-8111-11111111d006"
+)
+
+// svcSetupDebugFork creates a debug instance and drives it to a paused
+// fork: the parent sits paused/parallel with both branches paused.
+func svcSetupDebugFork(t *testing.T, db *gorm.DB, svc service.InstanceService) string {
+	t.Helper()
+	ctx := context.Background()
+	wfID := svcCreateWorkflow(t, db, svcDebugStart,
+		svcNodeJSON(svcDebugStart, "parallel_start", "fork", "", "", map[string]any{
+			"branches":             map[string]any{"a": svcDebugS1, "b": svcDebugB},
+			"parallel_end_node_id": svcDebugEnd,
+		}),
+		svcNodeJSON(svcDebugS1, "script", "s1", "context.s1 = 1", svcDebugS2, nil),
+		svcNodeJSON(svcDebugS2, "script", "s2", "context.s2 = 2", svcDebugEnd, nil),
+		svcNodeJSON(svcDebugB, "script", "b", "context.bb = 3", svcDebugEnd, nil),
+		svcNodeJSON(svcDebugEnd, "parallel_end", "join", "", svcDebugDone, map[string]any{
+			"combining_script": `context.x = branch["a"].context.s2`,
+		}),
+		svcNodeJSON(svcDebugDone, "script", "done", "context.done = true", "", nil),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Status != model.WorkflowPaused {
+		t.Fatalf("status = %s, want paused at debug create", inst.Status)
+	}
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	claimed, err := repo.ClaimNext(ctx, "svc-worker", time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimNext() = %d, %v", len(claimed), err)
+	}
+	if err := driveOne(t, db, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	cur, err := repo.GetByID(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowPaused || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("parent = %s/%s, want paused/parallel", cur.Status, cur.WaitingReason)
+	}
+	return inst.ID
+}
+
+func svcDebugBranch(t *testing.T, db *gorm.DB, instanceID, name string) model.ParallelBranch {
+	t.Helper()
+	prepo := repository.NewParallelRepository(db)
+	exs, err := prepo.ListExecutions(context.Background(), instanceID)
+	if err != nil || len(exs) != 1 {
+		t.Fatalf("ListExecutions() = %d, %v", len(exs), err)
+	}
+	branches, err := prepo.ListBranches(context.Background(), exs[0].ID)
+	if err != nil {
+		t.Fatalf("ListBranches() error = %v", err)
+	}
+	for _, b := range branches {
+		if b.Name == name {
+			return b
+		}
+	}
+	t.Fatalf("branch %q not found", name)
+	return model.ParallelBranch{}
+}
+
+func svcResumeBranchStep(t *testing.T, db *gorm.DB, svc service.InstanceService, instanceID, name string) model.ParallelBranch {
+	t.Helper()
+	res, err := svc.Resume(context.Background(), service.ControlRequest{InstanceID: instanceID})
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if res.Status != model.WorkflowPaused {
+		t.Fatalf("Resume() status = %s, want paused (parent stays parked)", res.Status)
+	}
+	got := svcDebugBranch(t, db, instanceID, name)
+	if got.Status != model.ParallelBranchWaiting || got.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("branch %s = %s/%s, want waiting/runnable", name, got.Status, got.WaitingReason)
+	}
+	claimed := svcClaimBranches(t, db)
+	b, ok := claimed[name]
+	if !ok {
+		t.Fatalf("branch %q was not claimed", name)
+	}
+	driveBranchOne(t, db, b)
+	return svcDebugBranch(t, db, instanceID, name)
+}
+
+func TestResumeDebugStepsBranchesAlphabetically(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	instID := svcSetupDebugFork(t, db, svc)
+	prepo := repository.NewParallelRepository(db)
+
+	// Resume 1 wakes branch a, alphabetically first; its step parks it
+	// paused again while b never moves.
+	after := svcResumeBranchStep(t, db, svc, instID, "a")
+	if after.Status != model.ParallelBranchWaiting || after.WaitingReason != model.WaitingReasonPaused {
+		t.Fatalf("branch a = %s/%s, want waiting/paused", after.Status, after.WaitingReason)
+	}
+	other := svcDebugBranch(t, db, instID, "b")
+	if other.Status != model.ParallelBranchWaiting || other.WaitingReason != model.WaitingReasonPaused {
+		t.Fatalf("branch b = %s/%s, want waiting/paused", other.Status, other.WaitingReason)
+	}
+
+	// Resume 2 wakes a again: it is still the first paused branch. Its
+	// second step completes into the barrier.
+	after = svcResumeBranchStep(t, db, svc, instID, "a")
+	if after.Status != model.ParallelBranchCompleted {
+		t.Fatalf("branch a = %s, want completed", after.Status)
+	}
+
+	// Resume 3 wakes b; its single step completes and arms the barrier.
+	after = svcResumeBranchStep(t, db, svc, instID, "b")
+	if after.Status != model.ParallelBranchCompleted {
+		t.Fatalf("branch b = %s, want completed", after.Status)
+	}
+	exs, err := prepo.ListExecutions(ctx, instID)
+	if err != nil || len(exs) != 1 || exs[0].Status != model.ParallelReadyToJoin {
+		t.Fatalf("execution = %+v, %v, want ready_to_join", exs, err)
+	}
+
+	// Resume 4 finds no paused branch and wakes the parent; the join
+	// step parks paused past it.
+	res, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID})
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if res.Status != model.WorkflowWaiting {
+		t.Fatalf("Resume() status = %s, want waiting (parent woken)", res.Status)
+	}
+	repo := repository.NewInstanceRepository(db)
+	claimed, err := repo.ClaimNext(ctx, "svc-worker", time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimNext() = %d, %v", len(claimed), err)
+	}
+	if err := driveOne(t, db, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	cur, err := repo.GetByID(ctx, instID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowPaused {
+		t.Fatalf("parent = %s after join, want paused", cur.Status)
+	}
+	frame, _ := model.ParseFrame(cur.Frame)
+	if frame.CurrentNodeID != svcDebugDone {
+		t.Fatalf("parent cursor = %q, want done node", frame.CurrentNodeID)
+	}
+
+	// Resume 5 runs the final step to finished.
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	claimed, err = repo.ClaimNext(ctx, "svc-worker", time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimNext() = %d, %v", len(claimed), err)
+	}
+	if err := driveOne(t, db, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	cur, err = repo.GetByID(ctx, instID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("parent = %s, want finished", cur.Status)
+	}
+	events, err := repo.ListEvents(ctx, instID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	resumed := 0
+	for _, ev := range events {
+		if ev.Type == "parallel_branch_resumed" {
+			resumed++
+		}
+	}
+	if resumed != 3 {
+		t.Fatalf("parallel_branch_resumed events = %d, want 3 (a, a, b)", resumed)
+	}
+}
+
+func TestResumeDebugRejectsInflightBranch(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	instID := svcSetupDebugFork(t, db, svc)
+	prepo := repository.NewParallelRepository(db)
+
+	a := svcDebugBranch(t, db, instID, "a")
+	if err := prepo.WakePausedBranch(ctx, a.ID); err != nil {
+		t.Fatalf("WakePausedBranch() error = %v", err)
+	}
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("Resume(runnable branch) = %v, want ErrConflict", err)
+	}
+	claimed := svcClaimBranches(t, db)
+	running, ok := claimed["a"]
+	if !ok {
+		t.Fatalf("branch %q was not claimed", "a")
+	}
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("Resume(running branch) = %v, want ErrConflict", err)
+	}
+	// Drive both branches to completion so no runnable row leaks into
+	// later tests' claim windows.
+	driveBranchOne(t, db, running)
+	wakeDebugBranch(t, db, svcDebugBranch(t, db, instID, "a").ID)
+	again := svcClaimBranches(t, db)
+	driveBranchOne(t, db, again["a"])
+	wakeDebugBranch(t, db, svcDebugBranch(t, db, instID, "b").ID)
+	last := svcClaimBranches(t, db)
+	driveBranchOne(t, db, last["b"])
+	if got := svcDebugBranch(t, db, instID, "b"); got.Status != model.ParallelBranchCompleted {
+		t.Fatalf("branch b = %s, want completed", got.Status)
+	}
+}
+
+func wakeDebugBranch(t *testing.T, db *gorm.DB, branchID string) {
+	t.Helper()
+	if err := repository.NewParallelRepository(db).WakePausedBranch(context.Background(), branchID); err != nil {
+		t.Fatalf("WakePausedBranch() error = %v", err)
+	}
+}
+
+func TestPauseResumeAcrossParallelJoin(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateWorkflow(t, db, svcDebugStart,
+		svcNodeJSON(svcDebugStart, "parallel_start", "fork", "", "", map[string]any{
+			"branches":             map[string]any{"a": svcDebugS1, "b": svcDebugB},
+			"parallel_end_node_id": svcDebugEnd,
+		}),
+		svcNodeJSON(svcDebugS1, "script", "s1", "context.s1 = 1", svcDebugS2, nil),
+		svcNodeJSON(svcDebugS2, "script", "s2", "context.s2 = 2", svcDebugEnd, nil),
+		svcNodeJSON(svcDebugB, "script", "b", "context.bb = 3", svcDebugEnd, nil),
+		svcNodeJSON(svcDebugEnd, "parallel_end", "join", "", svcDebugDone, map[string]any{
+			"combining_script": `context.x = branch["a"].context.s2`,
+		}),
+		svcNodeJSON(svcDebugDone, "script", "done", "context.done = true", "", nil),
+	)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	// A manual pause mid-parallel parks the parent while its branches
+	// keep running; the barrier flips the paused parent runnable.
+	pres, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID})
+	if err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	if pres.Status != model.WorkflowPaused || pres.PauseRequested {
+		t.Fatalf("Pause() = %+v, want paused without defer", pres)
+	}
+	claimed := svcClaimBranches(t, db)
+	driveBranchOne(t, db, claimed["a"])
+	again := svcClaimBranches(t, db)
+	driveBranchOne(t, db, again["a"])
+	driveBranchOne(t, db, claimed["b"])
+	repo := repository.NewInstanceRepository(db)
+	curPtr, err := repo.GetByID(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if curPtr.Status != model.WorkflowPaused || curPtr.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("parent = %s/%s, want paused/runnable", curPtr.Status, curPtr.WaitingReason)
+	}
+	// Resume lands claimable and the run finishes through the join.
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	cur = driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished", cur.Status)
+	}
+}
+
+const (
+	svcRbPre   = "11111111-1111-7111-8111-11111111e001"
+	svcRbStart = "11111111-1111-7111-8111-11111111e002"
+	svcRbA     = "11111111-1111-7111-8111-11111111e003"
+	svcRbB     = "11111111-1111-7111-8111-11111111e004"
+	svcRbEnd   = "11111111-1111-7111-8111-11111111e005"
+	svcRbDone  = "11111111-1111-7111-8111-11111111e006"
+)
+
+// svcSetupRbWorkflow builds pre → fork{a,b} → join → done: the pre node
+// gives rollback a parent-scope target on both sides of the block.
+func svcSetupRbWorkflow(t *testing.T, db *gorm.DB) string {
+	t.Helper()
+	return svcCreateWorkflow(t, db, svcRbPre,
+		svcNodeJSON(svcRbPre, "script", "pre", "context.pre = 1", svcRbStart, nil),
+		svcNodeJSON(svcRbStart, "parallel_start", "fork", "", "", map[string]any{
+			"branches":             map[string]any{"a": svcRbA, "b": svcRbB},
+			"parallel_end_node_id": svcRbEnd,
+		}),
+		svcNodeJSON(svcRbA, "script", "a", "context.a = 1", svcRbEnd, nil),
+		svcNodeJSON(svcRbB, "script", "b", "context.b = 2", svcRbEnd, nil),
+		svcNodeJSON(svcRbEnd, "parallel_end", "join", "", svcRbDone, map[string]any{
+			"combining_script": `context.x = branch["a"].context.a + branch["b"].context.b`,
+		}),
+		svcNodeJSON(svcRbDone, "script", "done", "context.done = true", "", nil),
+	)
+}
+
+// svcDriveRbBranches runs every branch of instID to completion through the
+// engine: each branch here finishes in a single step.
+func svcDriveRbBranches(t *testing.T, db *gorm.DB, instID string) {
+	t.Helper()
+	claimed := svcClaimBranches(t, db)
+	driven := 0
+	for _, b := range claimed {
+		if b.InstanceID != instID {
+			continue
+		}
+		driveBranchOne(t, db, b)
+		driven++
+	}
+	if driven != 2 {
+		t.Fatalf("drove %d branches, want 2", driven)
+	}
+}
+
+// svcDriveRbJoin runs the parent's join step after the barrier armed,
+// leaving the instance waiting past the join with done still ahead.
+func svcDriveRbJoin(t *testing.T, db *gorm.DB, instID string) {
+	t.Helper()
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+	claimed, err := repo.ClaimNext(ctx, "svc-worker", time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimNext() = %d, %v", len(claimed), err)
+	}
+	if err := driveOne(t, db, claimed[0]); err != nil {
+		t.Fatalf("Process(join) error = %v", err)
+	}
+	cur, err := repo.GetByID(ctx, instID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowWaiting {
+		t.Fatalf("instance = %s, want waiting past the join", cur.Status)
+	}
+	frame, _ := model.ParseFrame(cur.Frame)
+	if frame.CurrentNodeID != svcRbDone {
+		t.Fatalf("cursor = %q, want done node", frame.CurrentNodeID)
+	}
+}
+
+func svcOccurrenceByNode(t *testing.T, db *gorm.DB, instanceID, nodeID string) model.NodeInstance {
+	t.Helper()
+	occs, err := repository.NewInstanceRepository(db).ListNodeInstances(context.Background(), instanceID)
+	if err != nil {
+		t.Fatalf("ListNodeInstances() error = %v", err)
+	}
+	for _, o := range occs {
+		if o.NodeID == nodeID && o.BranchID == "" {
+			return o
+		}
+	}
+	t.Fatalf("no parent occurrence for node %s", nodeID)
+	return model.NodeInstance{}
+}
+
+func TestRollbackRejectsBranchOccurrence(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcSetupRbWorkflow(t, db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	claimed := svcClaimBranches(t, db)
+	driveBranchOne(t, db, claimed["a"])
+	occs, err := repository.NewInstanceRepository(db).ListNodeInstances(ctx, inst.ID)
+	if err != nil {
+		t.Fatalf("ListNodeInstances() error = %v", err)
+	}
+	var branchOccID string
+	for _, o := range occs {
+		if o.BranchID != "" {
+			branchOccID = o.ID
+		}
+	}
+	if branchOccID == "" {
+		t.Fatal("no branch-owned occurrence found")
+	}
+	// The live parallel executions would also conflict, so finish the
+	// other branch and run the join step first to isolate the
+	// branch-target rejection, pausing before done executes.
+	driveBranchOne(t, db, claimed["b"])
+	svcDriveRbJoin(t, db, inst.ID)
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	_, err = svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: branchOccID})
+	if !errors.Is(err, model.ErrInvalid) {
+		t.Fatalf("Rollback(branch occurrence) = %v, want ErrInvalid", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "branch") {
+		t.Fatalf("Rollback(branch occurrence) = %v, want a branch-target error", err)
+	}
+}
+
+func TestRollbackRejectsLiveParallel(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcSetupRbWorkflow(t, db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	pre := svcOccurrenceByNode(t, db, inst.ID, svcRbPre)
+	// Even a valid parent-scope target conflicts while branches are live.
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: pre.ID}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("Rollback(live parallel) = %v, want ErrConflict", err)
+	}
+	// The live check precedes target validation, like the other
+	// instance-state gates.
+	if _, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: "bogus"}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("Rollback(live parallel, bogus target) = %v, want ErrConflict", err)
+	}
+}
+
+func TestRollbackAfterParallelCompletes(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcSetupRbWorkflow(t, db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	svcDriveRbBranches(t, db, inst.ID)
+	svcDriveRbJoin(t, db, inst.ID)
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	// Rolling back to before the block is accepted once the block
+	// completed: the re-execution forks a fresh execution.
+	pre := svcOccurrenceByNode(t, db, inst.ID, svcRbPre)
+	rolled, err := svc.Rollback(ctx, service.RollbackRequest{InstanceID: inst.ID, TargetOccurrenceID: pre.ID})
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if rolled.Status != model.WorkflowPaused || rolled.CurrentNodeID != svcRbPre {
+		t.Fatalf("Rollback() = %+v, want paused at pre", rolled)
+	}
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	reforked := driveEngine(t, db, inst.ID)
+	if reforked.Status != model.WorkflowWaiting || reforked.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel after re-fork", reforked.Status, reforked.WaitingReason)
+	}
+	svcDriveRbBranches(t, db, inst.ID)
+	finished := driveEngine(t, db, inst.ID)
+	if finished.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished", finished.Status)
+	}
+	exs, err := repository.NewParallelRepository(db).ListExecutions(ctx, inst.ID)
+	if err != nil || len(exs) != 2 {
+		t.Fatalf("executions = %d, %v, want 2 (stale + re-fork)", len(exs), err)
+	}
+	for _, ex := range exs {
+		if ex.Status != model.ParallelExecutionCompleted {
+			t.Fatalf("execution %s = %s, want completed", ex.ID, ex.Status)
+		}
+	}
+}
+
+func TestDeliverBranchInputDebugPausedParent(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcCreateBranchInputWorkflow(t, db, map[string]any{"channel": "http", "output_property": "webhook"})
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID, Debug: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	repo := repository.NewInstanceRepository(db)
+	claimed, err := repo.ClaimNext(ctx, "svc-worker", time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimNext() = %d, %v", len(claimed), err)
+	}
+	if err := driveOne(t, db, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	prepo := repository.NewParallelRepository(db)
+	exs, err := prepo.ListExecutions(ctx, inst.ID)
+	if err != nil || len(exs) != 1 {
+		t.Fatalf("ListExecutions() = %d, %v", len(exs), err)
+	}
+	branches, err := prepo.ListBranches(ctx, exs[0].ID)
+	if err != nil || len(branches) != 2 {
+		t.Fatalf("ListBranches() = %d, %v", len(branches), err)
+	}
+	// Step branch a onto its input node; the parent stays paused on
+	// the join throughout.
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	byName := svcClaimBranches(t, db)
+	driveBranchOne(t, db, byName["a"])
+	parked, err := prepo.GetBranch(ctx, byName["a"].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parked.Status != model.ParallelBranchWaiting || parked.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("branch a = %s/%s, want waiting/input", parked.Status, parked.WaitingReason)
+	}
+	// The delivery is accepted even though the parent is paused: only
+	// the branch advances.
+	delivered, err := svc.DeliverInput(ctx, service.DeliverInput{
+		InstanceID: inst.ID, BranchID: parked.ID,
+		IdempotencyKey: "dbg-branch-key-1", Payload: []byte(`{"success":true}`),
+	})
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if !delivered.Accepted {
+		t.Fatalf("DeliverInput() accepted = false")
+	}
+	after, err := prepo.GetBranch(ctx, parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != model.ParallelBranchWaiting || after.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("branch a = %s/%s, want waiting/runnable", after.Status, after.WaitingReason)
+	}
+	cur, err := repo.GetByID(ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowPaused || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("parent = %s/%s, want paused/parallel", cur.Status, cur.WaitingReason)
+	}
+	// Run the rest to completion so no runnable row leaks.
+	rest := svcClaimBranches(t, db)
+	driveBranchOne(t, db, rest["a"])
+	wakeDebugBranch(t, db, branches[1].ID)
+	final := svcClaimBranches(t, db)
+	driveBranchOne(t, db, final["b"])
+}
+
+func TestResumeDebugWaitingParallelStepsBranches(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	instID := svcSetupDebugFork(t, db, svc)
+	repo := repository.NewInstanceRepository(db)
+	// Simulate the post-delivery state: a waiting parent with paused
+	// branches behind it.
+	if err := repo.Resume(ctx, instID); err != nil {
+		t.Fatalf("Resume(repo) error = %v", err)
+	}
+	res, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID})
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if res.Status != model.WorkflowWaiting {
+		t.Fatalf("Resume() status = %s, want waiting (parent untouched)", res.Status)
+	}
+	a := svcDebugBranch(t, db, instID, "a")
+	if a.Status != model.ParallelBranchWaiting || a.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("branch a = %s/%s, want waiting/runnable", a.Status, a.WaitingReason)
+	}
+	cur, err := repo.GetByID(ctx, instID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("parent = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	// Step the rest through the waiting parent to a clean finish.
+	step := func(name string) {
+		t.Helper()
+		byName := svcClaimBranches(t, db)
+		driveBranchOne(t, db, byName[name])
+	}
+	step("a")
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	step("a")
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	step("b")
+	pclaimed, err := repo.ClaimNext(ctx, "svc-worker", time.Minute, 1)
+	if err != nil || len(pclaimed) != 1 {
+		t.Fatalf("ClaimNext() = %d, %v", len(pclaimed), err)
+	}
+	if err := driveOne(t, db, pclaimed[0]); err != nil {
+		t.Fatalf("Process(join) error = %v", err)
+	}
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: instID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	done := driveEngine(t, db, instID)
+	if done.Status != model.WorkflowFinished {
+		t.Fatalf("status = %s, want finished", done.Status)
+	}
+}
+
+func TestStatusNodesBranchOccurrenceNotRollbackable(t *testing.T) {
+	db := setupSvcDB(t)
+	ctx := context.Background()
+	svc := svcInstanceService(db)
+	wfID := svcSetupRbWorkflow(t, db)
+	inst, err := svc.Create(ctx, service.CreateInstance{WorkflowDefinitionID: wfID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := driveEngine(t, db, inst.ID)
+	if cur.Status != model.WorkflowWaiting || cur.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s, want waiting/parallel", cur.Status, cur.WaitingReason)
+	}
+	claimed := svcClaimBranches(t, db)
+	driveBranchOne(t, db, claimed["a"])
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	got, err := svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+	// The branch-owned occurrence is never a rollback target, and while
+	// branches are live no node is rollbackable either.
+	if got.Nodes[svcRbA].Rollbackable {
+		t.Fatalf("Nodes[%s].Rollbackable = true, want false (branch-owned)", svcRbA)
+	}
+	if got.Nodes[svcRbPre].Rollbackable {
+		t.Fatalf("Nodes[%s].Rollbackable = true, want false (live parallel)", svcRbPre)
+	}
+	// Once the block completes, the parent-scope history becomes
+	// rollbackable again while the branch row stays excluded.
+	driveBranchOne(t, db, claimed["b"])
+	if _, err := svc.Resume(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	svcDriveRbJoin(t, db, inst.ID)
+	if _, err := svc.Pause(ctx, service.ControlRequest{InstanceID: inst.ID}); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	got, err = svc.GetStatusDetail(ctx, inst.ID, auth.Principal{})
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+	if !got.Nodes[svcRbPre].Rollbackable {
+		t.Fatalf("Nodes[%s].Rollbackable = false, want true after the join", svcRbPre)
+	}
+	if got.Nodes[svcRbA].Rollbackable {
+		t.Fatalf("Nodes[%s].Rollbackable = true, want false (branch-owned)", svcRbA)
 	}
 }

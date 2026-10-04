@@ -177,6 +177,7 @@ func (NodeContextHistoryModel) TableName() string { return "node_context_history
 type NodeInstanceModel struct {
 	ID                 string         `gorm:"column:id;type:uuid;primaryKey"`
 	WorkflowInstanceID string         `gorm:"column:workflow_instance_id;type:uuid;not null;index"`
+	BranchID           *string        `gorm:"column:branch_id;type:uuid;index"`
 	NodeID             string         `gorm:"column:node_id;type:uuid;not null"`
 	NodeDefinitionID   *string        `gorm:"column:node_definition_id;type:uuid"`
 	Name               string         `gorm:"column:name;not null"`
@@ -256,3 +257,49 @@ type StatusUpdateOutboxModel struct {
 
 // TableName is the status_update_outbox table.
 func (StatusUpdateOutboxModel) TableName() string { return "status_update_outbox" }
+
+// ParallelExecutionModel persists model.ParallelExecution: one durable
+// fork/join scope. CompletedCount is maintained by the barrier transaction,
+// never recomputed from branches, so the last-branch check stays atomic.
+type ParallelExecutionModel struct {
+	ID             string    `gorm:"column:id;type:uuid;primaryKey"`
+	InstanceID     string    `gorm:"column:instance_id;type:uuid;not null;index"`
+	ParentBranchID *string   `gorm:"column:parent_branch_id;type:uuid;index"`
+	Depth          int       `gorm:"column:depth;not null;default:1"`
+	StartNodeID    string    `gorm:"column:start_node_id;type:uuid;not null"`
+	EndNodeID      string    `gorm:"column:end_node_id;type:uuid;not null"`
+	Status         string    `gorm:"column:status;not null;index"`
+	BranchCount    int       `gorm:"column:branch_count;not null;default:0"`
+	CompletedCount int       `gorm:"column:completed_count;not null;default:0"`
+	CreatedAt      time.Time `gorm:"column:created_at;not null"`
+	UpdatedAt      time.Time `gorm:"column:updated_at;not null"`
+}
+
+// TableName is the parallel_executions table.
+func (ParallelExecutionModel) TableName() string { return "parallel_executions" }
+
+// ParallelBranchModel persists model.ParallelBranch: one branch cursor with
+// its own context, status, and lease. Name is unique per execution so the
+// join addresses stable branch identities.
+type ParallelBranchModel struct {
+	ID                  string         `gorm:"column:id;type:uuid;primaryKey"`
+	ParallelExecutionID string         `gorm:"column:parallel_execution_id;type:uuid;not null;index;uniqueIndex:uq_parallel_branches_execution_name,priority:1"`
+	InstanceID          string         `gorm:"column:instance_id;type:uuid;not null;index"`
+	Name                string         `gorm:"column:name;not null;uniqueIndex:uq_parallel_branches_execution_name,priority:2"`
+	BranchIndex         int            `gorm:"column:branch_index;not null;default:0"`
+	StartNodeID         string         `gorm:"column:start_node_id;type:uuid;not null"`
+	Frame               datatypes.JSON `gorm:"column:frame;type:jsonb;not null;default:'{}'"`
+	Context             datatypes.JSON `gorm:"column:context;type:jsonb;not null;default:'{}'"`
+	Counters            datatypes.JSON `gorm:"column:counters;type:jsonb;not null;default:'{}'"`
+	Status              string         `gorm:"column:status;not null;index"`
+	WaitingReason       string         `gorm:"column:waiting_reason;not null;default:''"`
+	Revision            int64          `gorm:"column:revision;not null;default:0"`
+	LeasedBy            string         `gorm:"column:leased_by;not null;default:''"`
+	LeaseExpiry         *time.Time     `gorm:"column:lease_expiry;index"`
+	Error               string         `gorm:"column:error;not null;default:''"`
+	CreatedAt           time.Time      `gorm:"column:created_at;not null"`
+	UpdatedAt           time.Time      `gorm:"column:updated_at;not null"`
+}
+
+// TableName is the parallel_branches table.
+func (ParallelBranchModel) TableName() string { return "parallel_branches" }
