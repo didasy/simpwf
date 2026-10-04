@@ -85,6 +85,7 @@ func bootstrapSchema(t *testing.T, dsn string) {
 		&repository.WorkflowDefinitionModel{},
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
+		&repository.CronScheduleModel{},
 		&repository.WorkflowInstanceModel{},
 		&repository.NodeInstanceModel{},
 		&repository.WorkflowInstanceEventModel{},

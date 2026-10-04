@@ -384,3 +384,29 @@ type RunsPerDayResponse struct {
 	FailedRuns   int64  `json:"failed_runs"`
 	StoppedRuns  int64  `json:"stopped_runs"`
 }
+
+// -- schedules ---------------------------------------------------------------
+
+// CreateScheduleRequest is the POST /v1/workflow/schedules body.
+type CreateScheduleRequest struct {
+	WorkflowDefinitionID string          `json:"workflow_definition_id"`
+	Crontab              string          `json:"crontab"`
+	Timezone             string          `json:"timezone,omitempty"`
+	Context              json.RawMessage `json:"context,omitempty" swaggertype:"object"`
+	// Enabled defaults to true when omitted.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// ScheduleResponse mirrors api/openapi.yaml.
+type ScheduleResponse struct {
+	ID                   string          `json:"id"`
+	WorkflowDefinitionID string          `json:"workflow_definition_id"`
+	Crontab              string          `json:"crontab"`
+	Timezone             string          `json:"timezone"`
+	Context              json.RawMessage `json:"context" swaggertype:"object"`
+	Enabled              bool            `json:"enabled"`
+	CreatedBy            string          `json:"created_by"`
+	UpdatedBy            string          `json:"updated_by"`
+	CreatedAt            time.Time       `json:"created_at"`
+	UpdatedAt            time.Time       `json:"updated_at"`
+}

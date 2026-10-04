@@ -80,6 +80,24 @@ type WorkflowRequest struct {
 	CreatedAt            time.Time
 }
 
+// CronSchedule fires a workflow definition on a crontab expression. While
+// Enabled, the engine creates an instance of WorkflowDefinitionID with
+// Context on every tick. Crontab is a standard 5-field cron expression
+// (minute first) or an @descriptor; Timezone is the IANA zone ticks are
+// evaluated in.
+type CronSchedule struct {
+	ID                   string
+	WorkflowDefinitionID string
+	Crontab              string
+	Timezone             string
+	Context              json.RawMessage
+	Enabled              bool
+	CreatedBy            string
+	UpdatedBy            string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
 // WorkflowInstance is a single execution of a workflow definition.
 // Debug marks a step-through run: the instance starts paused and the
 // engine re-pauses after every node transition until termination.

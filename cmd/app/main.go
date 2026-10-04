@@ -40,6 +40,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/inputtransport"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"github.com/simpwf/workflow-engine/internal/workflow/scheduler"
 	"github.com/simpwf/workflow-engine/internal/workflow/service"
 	"github.com/simpwf/workflow-engine/internal/workflow/statusupdate"
 	"github.com/simpwf/workflow-engine/internal/workflow/transport"
@@ -424,12 +425,31 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 	}()
 
+	// Cron scheduler: creates an instance of the target definition on
+	// every tick of each enabled schedule. Single-replica in v1 (see the
+	// scheduler package); the service refreshes its entries after every
+	// mutation through onChange.
+	schedRepo := repository.NewScheduleRepository(db)
+	cronScheduler := scheduler.New(ctx, schedRepo, instSvc)
+	schedSvc := service.NewScheduleService(schedRepo, wfDefs, actor, cronScheduler.Refresh)
+	if err := cronScheduler.Run(); err != nil {
+		return fmt.Errorf("scheduler: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := cronScheduler.Shutdown(shutdownCtx); err != nil {
+			logger.Warnf("scheduler shutdown: %v", err)
+		}
+	}()
+
 	router := handler.NewRouter(handler.Deps{
 		Health:              handler.NewHealth(sqlDB),
 		NodeDefinitions:     nodeSvc,
 		WorkflowDefinitions: wfSvc,
 		Secrets:             secretSvc,
 		Instances:           instSvc,
+		Schedules:           schedSvc,
 		Statistics:          statsSvc,
 		Auth:                authSvc,
 		SwaggerEnabled:      cfg.Infra.HTTP.SwaggerEnabled,

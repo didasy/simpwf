@@ -22,6 +22,7 @@ tags:
   - name: Statistics
   - name: Auth
   - name: Roles
+  - name: Schedules
 paths:
   /v1/auth/config:
     get:
@@ -380,7 +381,7 @@ paths:
       security:
         - ApiKeyAuth: []
         - BearerAuth: []
-      summary: Delete a workflow definition (fails if referenced by instances)
+      summary: Delete a workflow definition (fails if referenced)
       parameters:
         - $ref: "#/components/parameters/DefinitionID"
       responses:
@@ -784,6 +785,132 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/Unprocessable" }
+  /v1/workflow/schedules:
+    post:
+      tags: [Schedules]
+      operationId: createCronSchedule
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Create a cron schedule that starts instances on every tick
+      description: |
+        Persists a crontab expression bound to a workflow definition. While
+        the schedule is enabled, the engine creates an instance of that
+        definition with the stored context on every tick; the instance runs
+        asynchronously through the normal dispatcher. Ticks are evaluated in
+        the schedule's timezone. A schedule referencing a definition blocks
+        that definition's deletion until the schedule is removed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CronScheduleRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CronSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    get:
+      tags: [Schedules]
+      operationId: listCronSchedules
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: List cron schedules
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: List of cron schedules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CronScheduleList"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/schedules/{id}:
+    get:
+      tags: [Schedules]
+      operationId: getCronSchedule
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Get a cron schedule by id
+      parameters:
+        - $ref: "#/components/parameters/ScheduleID"
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: Cron schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CronSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [Schedules]
+      operationId: deleteCronSchedule
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Delete a cron schedule (ticks stop; running instances are unaffected)
+      parameters:
+        - $ref: "#/components/parameters/ScheduleID"
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/schedules/{id}/pause:
+    post:
+      tags: [Schedules]
+      operationId: pauseCronSchedule
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Pause a cron schedule (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/ScheduleID"
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: Paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CronSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/workflow/schedules/{id}/resume:
+    post:
+      tags: [Schedules]
+      operationId: resumeCronSchedule
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      summary: Resume a paused cron schedule (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/ScheduleID"
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "200":
+          description: Resumed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CronSchedule" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -913,6 +1040,11 @@ components:
       schema: { type: string, format: uuid }
     NodeID:
       name: node_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ScheduleID:
+      name: id
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1506,3 +1638,51 @@ components:
         typescript:
           type: string
           description: Inline structural `declare const context` declaration for Monaco autocomplete; never carries literal values
+    CronScheduleRequest:
+      type: object
+      required: [workflow_definition_id, crontab]
+      properties:
+        workflow_definition_id: { type: string, format: uuid }
+        crontab:
+          type: string
+          description: |
+            Standard 5-field cron expression (minute first) or an @descriptor
+            (@yearly, @monthly, @weekly, @daily, @midnight, @hourly,
+            @every <duration>). No seconds field. An inline TZ=/CRON_TZ=
+            prefix wins over timezone.
+        timezone:
+          type: string
+          default: UTC
+          description: IANA timezone ticks are evaluated in; empty defaults to UTC
+        context:
+          type: object
+          description: JSON object new instances start from; empty normalizes to {}
+        enabled:
+          type: boolean
+          default: true
+          description: Omitted schedules start enabled
+    CronSchedule:
+      type: object
+      required: [id, workflow_definition_id, crontab, timezone, context, enabled, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        workflow_definition_id: { type: string, format: uuid }
+        crontab:
+          type: string
+          description: As submitted (an inline TZ=/CRON_TZ= prefix is kept verbatim); timezone carries the effective zone
+        timezone: { type: string }
+        context: { type: object }
+        enabled: { type: boolean }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CronScheduleList:
+      type: object
+      required: [items, page, per_page, total, total_pages]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/CronSchedule" } }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }

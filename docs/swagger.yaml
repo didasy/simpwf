@@ -95,6 +95,20 @@ definitions:
       type:
         type: string
     type: object
+  internal_workflow_handler.CreateScheduleRequest:
+    properties:
+      context:
+        type: object
+      crontab:
+        type: string
+      enabled:
+        description: Enabled defaults to true when omitted.
+        type: boolean
+      timezone:
+        type: string
+      workflow_definition_id:
+        type: string
+    type: object
   internal_workflow_handler.CreateSecretRequest:
     properties:
       key:
@@ -260,6 +274,21 @@ definitions:
       items:
         items:
           $ref: '#/definitions/internal_workflow_handler.NodeDefinitionResponse'
+        type: array
+      page:
+        type: integer
+      per_page:
+        type: integer
+      total:
+        type: integer
+      total_pages:
+        type: integer
+    type: object
+  internal_workflow_handler.ListResponse-internal_workflow_handler_ScheduleResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/internal_workflow_handler.ScheduleResponse'
         type: array
       page:
         type: integer
@@ -543,6 +572,29 @@ definitions:
         type: integer
       total_runs:
         type: integer
+    type: object
+  internal_workflow_handler.ScheduleResponse:
+    properties:
+      context:
+        type: object
+      created_at:
+        type: string
+      created_by:
+        type: string
+      crontab:
+        type: string
+      enabled:
+        type: boolean
+      id:
+        type: string
+      timezone:
+        type: string
+      updated_at:
+        type: string
+      updated_by:
+        type: string
+      workflow_definition_id:
+        type: string
     type: object
   internal_workflow_handler.SecretResponse:
     properties:
@@ -1981,6 +2033,254 @@ paths:
       summary: Stop workflow instance
       tags:
       - workflow-instances
+  /v1/workflow/schedules:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Items per page
+        in: query
+        name: per_page
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ListResponse-internal_workflow_handler_ScheduleResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: List cron schedules
+      tags:
+      - workflow-schedules
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Cron schedule
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_workflow_handler.CreateScheduleRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ScheduleResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Create cron schedule
+      tags:
+      - workflow-schedules
+  /v1/workflow/schedules/{id}:
+    delete:
+      parameters:
+      - description: Schedule ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Delete cron schedule
+      tags:
+      - workflow-schedules
+    get:
+      parameters:
+      - description: Schedule ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ScheduleResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Get cron schedule
+      tags:
+      - workflow-schedules
+  /v1/workflow/schedules/{id}/pause:
+    post:
+      parameters:
+      - description: Schedule ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ScheduleResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Pause cron schedule
+      tags:
+      - workflow-schedules
+  /v1/workflow/schedules/{id}/resume:
+    post:
+      parameters:
+      - description: Schedule ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.ScheduleResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_workflow_handler.Problem'
+      security:
+      - ApiKeyAuth: []
+      - BearerAuth: []
+      summary: Resume cron schedule
+      tags:
+      - workflow-schedules
 schemes:
 - http
 securityDefinitions:

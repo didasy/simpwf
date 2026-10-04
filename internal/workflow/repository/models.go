@@ -126,6 +126,23 @@ type WorkflowRequestModel struct {
 // TableName is the workflow_requests table.
 func (WorkflowRequestModel) TableName() string { return "workflow_requests" }
 
+// CronScheduleModel persists model.CronSchedule.
+type CronScheduleModel struct {
+	ID                   string         `gorm:"column:id;type:uuid;primaryKey"`
+	WorkflowDefinitionID string         `gorm:"column:workflow_definition_id;type:uuid;not null;index"`
+	Crontab              string         `gorm:"column:crontab;not null"`
+	Timezone             string         `gorm:"column:timezone;not null;default:'UTC'"`
+	Context              datatypes.JSON `gorm:"column:context;type:jsonb;not null;default:'{}'"`
+	Enabled              bool           `gorm:"column:enabled;not null"`
+	CreatedBy            string         `gorm:"column:created_by;type:uuid;not null"`
+	UpdatedBy            string         `gorm:"column:updated_by;type:uuid;not null"`
+	CreatedAt            time.Time      `gorm:"column:created_at;not null"`
+	UpdatedAt            time.Time      `gorm:"column:updated_at;not null"`
+}
+
+// TableName is the cron_schedules table.
+func (CronScheduleModel) TableName() string { return "cron_schedules" }
+
 // WorkflowInstanceModel persists model.WorkflowInstance.
 type WorkflowInstanceModel struct {
 	ID                   string         `gorm:"column:id;type:uuid;primaryKey"`

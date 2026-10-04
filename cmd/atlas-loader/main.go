@@ -27,6 +27,7 @@ func main() {
 		&repository.WorkflowDefinitionModel{},
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
+		&repository.CronScheduleModel{},
 		&repository.WorkflowInstanceModel{},
 		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{},
@@ -76,6 +77,10 @@ func foreignKeyDDL() string {
 	// workflow_requests
 	add("workflow_requests", "fk_workflow_requests_workflow_definition", "\"workflow_definition_id\"", "workflow_definitions", "\"id\"")
 	add("workflow_requests", "fk_workflow_requests_created_by", "\"created_by\"", "users", "\"id\"")
+	// cron_schedules
+	add("cron_schedules", "fk_cron_schedules_workflow_definition", "\"workflow_definition_id\"", "workflow_definitions", "\"id\"")
+	add("cron_schedules", "fk_cron_schedules_created_by", "\"created_by\"", "users", "\"id\"")
+	add("cron_schedules", "fk_cron_schedules_updated_by", "\"updated_by\"", "users", "\"id\"")
 	// workflow_instances
 	add("workflow_instances", "fk_workflow_instances_workflow_definition", "\"workflow_definition_id\"", "workflow_definitions", "\"id\"")
 	add("workflow_instances", "fk_workflow_instances_created_by", "\"created_by\"", "users", "\"id\"")

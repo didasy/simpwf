@@ -53,6 +53,8 @@ auth:
       - "instances:control"
       - "statistics:read"
       - "roles:read"
+      - "schedules:read"
+      - "schedules:write"
     finance:
       - "instances:create"
       - "instances:read"
