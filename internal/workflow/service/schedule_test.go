@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
@@ -77,6 +78,20 @@ func (f *fakeScheduleRepo) SetEnabled(_ context.Context, id string, enabled bool
 	s.UpdatedBy = actor
 	f.schedules[id] = s
 	return s, nil
+}
+
+// Claim stubs: the schedule service never claims ticks (the scheduler
+// firing loop owns that path), so these only satisfy the interface.
+func (f *fakeScheduleRepo) ClaimFire(_ context.Context, _ string, _ time.Time, _ string) (bool, error) {
+	return true, nil
+}
+
+func (f *fakeScheduleRepo) RecordFireInstance(_ context.Context, _ string, _ time.Time, _ string) error {
+	return nil
+}
+
+func (f *fakeScheduleRepo) SweepFires(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
 }
 
 const scheduleDefID = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"

@@ -21,7 +21,20 @@ import (
 type fakeScheduleRepo struct {
 	mu        sync.Mutex
 	schedules map[string]model.CronSchedule
+	fires     map[string]fakeFire
 	listErr   error
+}
+
+// fakeFire is one claimed tick: when it fired, who won it, and the instance
+// the winner created.
+type fakeFire struct {
+	at         time.Time
+	workerID   string
+	instanceID string
+}
+
+func fireKey(scheduleID string, fireAt time.Time) string {
+	return scheduleID + "\x00" + fireAt.UTC().Format(time.RFC3339)
 }
 
 func newFakeScheduleRepo() *fakeScheduleRepo {
@@ -97,6 +110,46 @@ func (f *fakeScheduleRepo) SetEnabled(_ context.Context, id string, enabled bool
 	s.UpdatedBy = actor
 	f.schedules[id] = s
 	return s, nil
+}
+
+func (f *fakeScheduleRepo) ClaimFire(_ context.Context, scheduleID string, fireAt time.Time, workerID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fireKey(scheduleID, fireAt)
+	if _, ok := f.fires[key]; ok {
+		return false, nil
+	}
+	if f.fires == nil {
+		f.fires = map[string]fakeFire{}
+	}
+	f.fires[key] = fakeFire{at: fireAt, workerID: workerID}
+	return true, nil
+}
+
+func (f *fakeScheduleRepo) RecordFireInstance(_ context.Context, scheduleID string, fireAt time.Time, instanceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fireKey(scheduleID, fireAt)
+	fire, ok := f.fires[key]
+	if !ok {
+		return model.ErrNotFound
+	}
+	fire.instanceID = instanceID
+	f.fires[key] = fire
+	return nil
+}
+
+func (f *fakeScheduleRepo) SweepFires(_ context.Context, olderThan time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var swept int64
+	for key, fire := range f.fires {
+		if fire.at.Before(olderThan) {
+			delete(f.fires, key)
+			swept++
+		}
+	}
+	return swept, nil
 }
 
 // fakeInstanceSvc records instance creations. Only Create is exercised; the
@@ -196,7 +249,7 @@ func TestTickCreatesInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(context.Background(), repo, inst)
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -221,7 +274,7 @@ func TestDisabledScheduleDoesNotFire(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(context.Background(), repo, inst)
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -238,7 +291,7 @@ func TestDisabledScheduleDoesNotFire(t *testing.T) {
 func TestRefreshAddsSchedule(t *testing.T) {
 	repo := newFakeScheduleRepo()
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(context.Background(), repo, inst)
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -258,7 +311,7 @@ func TestRefreshRemovesDeletedSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(ctx, repo, inst)
+	s := scheduler.New(ctx, repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -284,7 +337,7 @@ func TestPauseStopsFiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(ctx, repo, inst)
+	s := scheduler.New(ctx, repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -306,7 +359,7 @@ func TestPauseStopsFiring(t *testing.T) {
 func TestRunFailsWhenLoadFails(t *testing.T) {
 	repo := newFakeScheduleRepo()
 	repo.listErr = errors.New("db down")
-	s := scheduler.New(context.Background(), repo, &fakeInstanceSvc{})
+	s := scheduler.New(context.Background(), repo, &fakeInstanceSvc{}, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err == nil {
 		shutdown(t, s)
 		t.Fatalf("Run() error = nil, want load failure")
@@ -319,7 +372,7 @@ func TestRefreshKeepsEntriesOnLoadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(context.Background(), repo, inst)
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -347,7 +400,7 @@ func TestUnparsableRowIsSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := &fakeInstanceSvc{}
-	s := scheduler.New(ctx, repo, inst)
+	s := scheduler.New(ctx, repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -363,7 +416,7 @@ func TestShutdownHonorsDeadline(t *testing.T) {
 	}
 	gate := make(chan struct{})
 	inst := &fakeInstanceSvc{gate: gate}
-	s := scheduler.New(context.Background(), repo, inst)
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{})
 	if err := s.Run(); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -379,4 +432,78 @@ func TestShutdownHonorsDeadline(t *testing.T) {
 	if n := inst.count(); n < 1 {
 		t.Errorf("created %d instances, want >= 1 after gate release", n)
 	}
+}
+
+func TestTickRecordsFireClaim(t *testing.T) {
+	repo := newFakeScheduleRepo()
+	if err := repo.Create(context.Background(), newTestSchedule("sched-1", "@every 1s", true)); err != nil {
+		t.Fatal(err)
+	}
+	inst := &fakeInstanceSvc{}
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{})
+	if err := s.Run(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	defer shutdown(t, s)
+
+	waitFor(t, 5*time.Second, func() bool { return inst.count() >= 1 }, "first tick")
+	waitFor(t, 5*time.Second, func() bool {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		for _, fire := range repo.fires {
+			if fire.instanceID != "" {
+				return true
+			}
+		}
+		return false
+	}, "fire claim recorded")
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.fires) != 1 {
+		t.Fatalf("fires = %d, want 1", len(repo.fires))
+	}
+	for _, fire := range repo.fires {
+		if fire.workerID != "test-worker" {
+			t.Errorf("winner = %q, want test-worker", fire.workerID)
+		}
+		if fire.instanceID != "inst-1" {
+			t.Errorf("instance = %q, want inst-1", fire.instanceID)
+		}
+	}
+}
+
+func TestRefreshLoopPicksUpNewSchedule(t *testing.T) {
+	repo := newFakeScheduleRepo()
+	inst := &fakeInstanceSvc{}
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{RefreshInterval: 100 * time.Millisecond})
+	if err := s.Run(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	defer shutdown(t, s)
+
+	if err := repo.Create(context.Background(), newTestSchedule("sched-1", "@every 1s", true)); err != nil {
+		t.Fatal(err)
+	}
+	// No manual Refresh: the background loop must pick the schedule up.
+	waitFor(t, 5*time.Second, func() bool { return inst.count() >= 1 }, "tick after background refresh")
+}
+
+func TestRefreshLoopSweepsOldClaims(t *testing.T) {
+	repo := newFakeScheduleRepo()
+	stale := time.Now().UTC().Add(-48 * time.Hour)
+	repo.fires = map[string]fakeFire{
+		fireKey("sched-gone", stale): {at: stale, workerID: "old-worker"},
+	}
+	inst := &fakeInstanceSvc{}
+	s := scheduler.New(context.Background(), repo, inst, "test-worker", scheduler.SchedulerOptions{RefreshInterval: 100 * time.Millisecond})
+	if err := s.Run(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	defer shutdown(t, s)
+
+	waitFor(t, 5*time.Second, func() bool {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		return len(repo.fires) == 0
+	}, "sweep of stale claim")
 }

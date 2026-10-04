@@ -27,11 +27,12 @@ const (
 
 // Config is the root configuration for the service.
 type Config struct {
-	Infra  Infra  `mapstructure:"infra"`
-	Worker Worker `mapstructure:"worker"`
-	Engine Engine `mapstructure:"engine"`
-	System System `mapstructure:"system"`
-	Auth   Auth   `mapstructure:"auth"`
+	Infra     Infra     `mapstructure:"infra"`
+	Worker    Worker    `mapstructure:"worker"`
+	Scheduler Scheduler `mapstructure:"scheduler"`
+	Engine    Engine    `mapstructure:"engine"`
+	System    System    `mapstructure:"system"`
+	Auth      Auth      `mapstructure:"auth"`
 }
 
 // Infra groups infrastructure endpoints.
@@ -83,6 +84,17 @@ type Worker struct {
 // WorkerPool holds the pool size.
 type WorkerPool struct {
 	Size int `mapstructure:"size"`
+}
+
+// Scheduler holds the cron-scheduler firing-loop settings.
+type Scheduler struct {
+	// Enabled starts the tick firing loop. Every enabled replica fires
+	// the same ticks, but the fire claim keeps each tick to one
+	// instance; disable on replicas that should serve API only.
+	Enabled bool `mapstructure:"enabled"`
+	// RefreshInterval reloads the enabled schedules from the database so
+	// mutations made on other replicas take effect locally.
+	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 }
 
 // Engine holds the workflow engine limits.
@@ -299,6 +311,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("worker.pre_alloc", false)
 	v.SetDefault("worker.non_blocking", false)
 	v.SetDefault("worker.disable_purge", false)
+	v.SetDefault("scheduler.enabled", true)
+	v.SetDefault("scheduler.refresh_interval", "30s")
 	v.SetDefault("engine.default_node_timeout", "30s")
 	v.SetDefault("engine.max_node_timeout", "5m")
 	v.SetDefault("engine.condition_timeout", "5s")
@@ -331,6 +345,9 @@ func (c *Config) validate() error {
 	}
 	if c.Worker.Pool.Size <= 0 {
 		return errors.New("configuration: worker.pool.size must be > 0")
+	}
+	if c.Scheduler.RefreshInterval <= 0 {
+		return errors.New("configuration: scheduler.refresh_interval must be > 0")
 	}
 	if c.Engine.DefaultNodeTimeout <= 0 {
 		return errors.New("configuration: engine.default_node_timeout must be > 0")

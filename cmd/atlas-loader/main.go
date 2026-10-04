@@ -28,6 +28,7 @@ func main() {
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
 		&repository.CronScheduleModel{},
+		&repository.ScheduleFireModel{},
 		&repository.WorkflowInstanceModel{},
 		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{},

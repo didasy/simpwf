@@ -45,6 +45,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
 		&repository.CronScheduleModel{},
+		&repository.ScheduleFireModel{},
 		&repository.WorkflowInstanceModel{},
 		&repository.NodeContextHistoryModel{},
 		&repository.NodeInstanceModel{},
@@ -75,7 +76,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err := db.Exec(`TRUNCATE TABLE
 		role_permissions, roles,
 		secrets, status_update_outbox, node_context_history, input_deliveries, workflow_instance_events, node_instances,
-		workflow_instances, workflow_requests, cron_schedules, workflow_definition_node_refs,
+		workflow_instances, workflow_requests, cron_schedules, schedule_fires, workflow_definition_node_refs,
 		workflow_definitions, node_definitions, users
 		RESTART IDENTITY`).Error; err != nil {
 		t.Fatalf("truncate tables: %v", err)

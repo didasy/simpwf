@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,5 +239,134 @@ func TestWorkflowDefinitionDeleteReferencedByScheduleConflict(t *testing.T) {
 	}
 	if err := defs.Delete(ctx, def.ID); err != nil {
 		t.Errorf("delete after schedule removed error = %v, want nil", err)
+	}
+}
+
+func TestClaimFireWinsOnce(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	repo := repository.NewScheduleRepository(db)
+
+	scheduleID := "11111111-1111-7111-8111-111111111111"
+	fireAt := time.Now().UTC().Truncate(time.Second)
+
+	claimed, err := repo.ClaimFire(ctx, scheduleID, fireAt, "worker-1")
+	if err != nil {
+		t.Fatalf("ClaimFire() error = %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimFire() claimed = false, want true for first claim")
+	}
+	claimed, err = repo.ClaimFire(ctx, scheduleID, fireAt, "worker-2")
+	if err != nil {
+		t.Fatalf("second ClaimFire() error = %v", err)
+	}
+	if claimed {
+		t.Error("second ClaimFire() claimed = true, want false (tick already claimed)")
+	}
+	// A different tick of the same schedule is a separate claim.
+	claimed, err = repo.ClaimFire(ctx, scheduleID, fireAt.Add(time.Second), "worker-2")
+	if err != nil || !claimed {
+		t.Errorf("next-tick ClaimFire() claimed = %v err = %v, want true nil", claimed, err)
+	}
+}
+
+func TestClaimFireConcurrentNoDoubleClaim(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	repo := repository.NewScheduleRepository(db)
+
+	scheduleID := "22222222-2222-7222-8222-222222222222"
+	fireAt := time.Now().UTC().Truncate(time.Second)
+
+	start := make(chan struct{})
+	var wonA, wonB bool
+	var errA, errB error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		wonA, errA = repo.ClaimFire(ctx, scheduleID, fireAt, "worker-a")
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		wonB, errB = repo.ClaimFire(ctx, scheduleID, fireAt, "worker-b")
+	}()
+	close(start)
+	wg.Wait()
+	if errA != nil || errB != nil {
+		t.Fatalf("claim errors: %v, %v", errA, errB)
+	}
+	if wonA == wonB {
+		t.Fatalf("wins = %v/%v, want exactly one winner", wonA, wonB)
+	}
+
+	var count int64
+	if err := db.Model(&repository.ScheduleFireModel{}).Where("schedule_id = ?", scheduleID).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("fire rows = %d, want 1", count)
+	}
+}
+
+func TestRecordFireInstance(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	repo := repository.NewScheduleRepository(db)
+
+	scheduleID := "33333333-3333-7333-8333-333333333333"
+	fireAt := time.Now().UTC().Truncate(time.Second)
+	if _, err := repo.ClaimFire(ctx, scheduleID, fireAt, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordFireInstance(ctx, scheduleID, fireAt, "44444444-4444-7444-8444-444444444444"); err != nil {
+		t.Fatalf("RecordFireInstance() error = %v", err)
+	}
+	var stored repository.ScheduleFireModel
+	if err := db.Where("schedule_id = ? AND fire_at = ?", scheduleID, fireAt).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.FiredBy != "worker-1" {
+		t.Errorf("fired_by = %q, want worker-1", stored.FiredBy)
+	}
+	if stored.InstanceID == nil || *stored.InstanceID != "44444444-4444-7444-8444-444444444444" {
+		t.Errorf("instance_id = %v, want the recorded instance", stored.InstanceID)
+	}
+	if err := repo.RecordFireInstance(ctx, scheduleID, fireAt.Add(time.Hour), "55555555-5555-7555-8555-555555555555"); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("RecordFireInstance missing error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSweepFires(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	repo := repository.NewScheduleRepository(db)
+
+	scheduleID := "66666666-6666-7666-8666-666666666666"
+	oldFire := time.Now().UTC().Truncate(time.Second).Add(-48 * time.Hour)
+	newFire := time.Now().UTC().Truncate(time.Second)
+	for _, at := range []time.Time{oldFire, newFire} {
+		if _, err := repo.ClaimFire(ctx, scheduleID, at, "worker-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swept, err := repo.SweepFires(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("SweepFires() error = %v", err)
+	}
+	if swept != 1 {
+		t.Errorf("swept = %d, want 1", swept)
+	}
+	// The old tick is claimable again; the recent tick stays claimed.
+	claimed, err := repo.ClaimFire(ctx, scheduleID, oldFire, "worker-2")
+	if err != nil || !claimed {
+		t.Errorf("old-tick reclaim claimed = %v err = %v, want true nil", claimed, err)
+	}
+	claimed, err = repo.ClaimFire(ctx, scheduleID, newFire, "worker-2")
+	if err != nil || claimed {
+		t.Errorf("new-tick reclaim claimed = %v err = %v, want false nil", claimed, err)
 	}
 }

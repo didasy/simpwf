@@ -29,6 +29,18 @@ type ScheduleRepository interface {
 	// SetEnabled flips a schedule on or off, recording the actor, and
 	// returns the updated row. A missing id yields model.ErrNotFound.
 	SetEnabled(ctx context.Context, id string, enabled bool, actor string) (model.CronSchedule, error)
+	// ClaimFire inserts the mutual-exclusion claim for one schedule tick.
+	// The first replica to claim (scheduleID, fireAt) wins (claimed=true);
+	// a concurrent or replayed claim for the same tick loses
+	// (claimed=false, nil error). fireAt is the tick truncated to whole
+	// seconds UTC.
+	ClaimFire(ctx context.Context, scheduleID string, fireAt time.Time, workerID string) (claimed bool, err error)
+	// RecordFireInstance attaches the created instance to a won claim. A
+	// missing claim yields model.ErrNotFound.
+	RecordFireInstance(ctx context.Context, scheduleID string, fireAt time.Time, instanceID string) error
+	// SweepFires deletes claims older than olderThan, returning the rows
+	// removed.
+	SweepFires(ctx context.Context, olderThan time.Time) (int64, error)
 }
 
 type gormScheduleRepository struct {
@@ -124,4 +136,46 @@ func (r *gormScheduleRepository) SetEnabled(ctx context.Context, id string, enab
 		return model.CronSchedule{}, fmt.Errorf("%w: cron schedule %s", model.ErrNotFound, id)
 	}
 	return r.GetByID(ctx, id)
+}
+
+func (r *gormScheduleRepository) ClaimFire(ctx context.Context, scheduleID string, fireAt time.Time, workerID string) (bool, error) {
+	now := time.Now().UTC()
+	m := ScheduleFireModel{
+		ScheduleID: scheduleID,
+		FireAt:     fireAt.UTC(),
+		FiredBy:    workerID,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := r.db.WithContext(ctx).Create(&m).Error; err != nil {
+		if isUniqueViolation(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("schedule fire claim: %w", err)
+	}
+	return true, nil
+}
+
+func (r *gormScheduleRepository) RecordFireInstance(ctx context.Context, scheduleID string, fireAt time.Time, instanceID string) error {
+	res := r.db.WithContext(ctx).Model(&ScheduleFireModel{}).
+		Where("schedule_id = ? AND fire_at = ?", scheduleID, fireAt).
+		Updates(map[string]any{
+			"instance_id": instanceID,
+			"updated_at":  time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("schedule fire record instance: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("%w: schedule fire %s @ %s", model.ErrNotFound, scheduleID, fireAt.Format(time.RFC3339))
+	}
+	return nil
+}
+
+func (r *gormScheduleRepository) SweepFires(ctx context.Context, olderThan time.Time) (int64, error) {
+	res := r.db.WithContext(ctx).Where("fire_at < ?", olderThan).Delete(&ScheduleFireModel{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("schedule fire sweep: %w", res.Error)
+	}
+	return res.RowsAffected, nil
 }

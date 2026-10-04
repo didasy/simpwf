@@ -35,6 +35,15 @@ worker:
   non_blocking: false
   disable_purge: false
 
+# Cron scheduler firing loop. Every enabled replica fires the same ticks,
+# but the fire claim keeps each tick to one instance; disable on replicas
+# that should serve API only. refresh_interval is how often each replica
+# reloads the enabled schedules, bounding how long a mutation made on one
+# replica takes to reach the others.
+scheduler:
+  enabled: true
+  refresh_interval: 30s
+
 # Engine limits. Node timeouts are parsed as Go duration strings; scripts and
 # external calls default to default_node_timeout and are capped by
 # max_node_timeout. Condition evaluation and input validation always run at

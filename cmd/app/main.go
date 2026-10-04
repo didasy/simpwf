@@ -426,22 +426,29 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	}()
 
 	// Cron scheduler: creates an instance of the target definition on
-	// every tick of each enabled schedule. Single-replica in v1 (see the
-	// scheduler package); the service refreshes its entries after every
-	// mutation through onChange.
+	// every tick of each enabled schedule. All enabled replicas fire and
+	// the fire claim keeps each tick to one instance (see the scheduler
+	// package); onChange refreshes the local entries after every
+	// mutation, and other replicas catch up on the refresh interval.
 	schedRepo := repository.NewScheduleRepository(db)
-	cronScheduler := scheduler.New(ctx, schedRepo, instSvc)
-	schedSvc := service.NewScheduleService(schedRepo, wfDefs, actor, cronScheduler.Refresh)
-	if err := cronScheduler.Run(); err != nil {
-		return fmt.Errorf("scheduler: %w", err)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := cronScheduler.Shutdown(shutdownCtx); err != nil {
-			logger.Warnf("scheduler shutdown: %v", err)
+	var onScheduleChange func()
+	if cfg.Scheduler.Enabled {
+		cronScheduler := scheduler.New(ctx, schedRepo, instSvc, "scheduler-"+hostname, scheduler.SchedulerOptions{
+			RefreshInterval: cfg.Scheduler.RefreshInterval,
+		})
+		onScheduleChange = cronScheduler.Refresh
+		if err := cronScheduler.Run(); err != nil {
+			return fmt.Errorf("scheduler: %w", err)
 		}
-	}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := cronScheduler.Shutdown(shutdownCtx); err != nil {
+				logger.Warnf("scheduler shutdown: %v", err)
+			}
+		}()
+	}
+	schedSvc := service.NewScheduleService(schedRepo, wfDefs, actor, onScheduleChange)
 
 	router := handler.NewRouter(handler.Deps{
 		Health:              handler.NewHealth(sqlDB),
