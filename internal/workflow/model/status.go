@@ -89,9 +89,16 @@ const (
 	WaitingReasonRunnable WaitingReason = ""
 	// WaitingReasonInput marks a waiting instance blocked on input delivery.
 	WaitingReasonInput WaitingReason = "input"
+	// WaitingReasonParallel marks a waiting instance blocked on a parallel
+	// join: its branches run independently and wake it when all complete.
+	WaitingReasonParallel WaitingReason = "parallel"
+	// WaitingReasonPaused marks a waiting branch parked by a debug
+	// instance: each resume wakes exactly one paused branch. Instance rows
+	// never carry it; they use the paused status instead.
+	WaitingReasonPaused WaitingReason = "paused"
 )
 
 // ValidWaitingReason reports whether r is a known waiting reason.
 func ValidWaitingReason(r WaitingReason) bool {
-	return r == WaitingReasonRunnable || r == WaitingReasonInput
+	return r == WaitingReasonRunnable || r == WaitingReasonInput || r == WaitingReasonParallel || r == WaitingReasonPaused
 }

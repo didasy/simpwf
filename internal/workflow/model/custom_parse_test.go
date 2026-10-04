@@ -148,7 +148,7 @@ func TestParseCustomNodeRejectsBuiltinKeys(t *testing.T) {
 		{"script", `{"type":"parsecustom","config":{"city":"x"},"script":"return 1;"}`, "does not support"},
 		{"http_config", `{"type":"parsecustom","config":{"city":"x"},"http_config":{"url":"https://example.com"}}`, "does not support"},
 		{"keys", `{"type":"parsecustom","config":{"city":"x"},"keys":{"a":"11111111-1111-7111-8111-111111111111"}}`, "only valid for group"},
-		{"branches", `{"type":"parsecustom","config":{"city":"x"},"branches":{"a":"b"}}`, "branches is not supported"},
+		{"branches", `{"type":"parsecustom","config":{"city":"x"},"branches":{"a":"b"}}`, "does not support"},
 		// A custom type is never an input node, so the input node's
 		// authorization surface is refused by the same guard as any other
 		// builtin executable field.

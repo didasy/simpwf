@@ -90,6 +90,8 @@ func bootstrapSchema(t *testing.T, dsn string) {
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
 		&repository.StatusUpdateOutboxModel{},
+		&repository.ParallelExecutionModel{},
+		&repository.ParallelBranchModel{},
 	); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}

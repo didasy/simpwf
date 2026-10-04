@@ -93,7 +93,7 @@ func ParseWorkflowContent(raw []byte, limits NodeLimits) (*WorkflowContent, erro
 		ContextMode:  contextMode,
 		StatusUpdate: statusUpdate,
 	}
-	if err := ValidateWorkflowContent(wc); err != nil {
+	if err := ValidateWorkflowContent(wc, limits.Parallel); err != nil {
 		return nil, err
 	}
 	return wc, nil
@@ -101,8 +101,9 @@ func ParseWorkflowContent(raw []byte, limits NodeLimits) (*WorkflowContent, erro
 
 // ValidateWorkflowContent validates a parsed or materialized workflow tree.
 // Referenced nodes with unresolved types defer condition coverage checks until
-// materialization provides their executable fields.
-func ValidateWorkflowContent(wc *WorkflowContent) error {
+// materialization provides their executable fields. Zero parallel limit
+// fields substitute the defaults.
+func ValidateWorkflowContent(wc *WorkflowContent, limits ParallelLimits) error {
 	if wc == nil {
 		return errors.New("workflow content is required")
 	}
@@ -142,7 +143,7 @@ func ValidateWorkflowContent(wc *WorkflowContent) error {
 			return err
 		}
 	}
-	return nil
+	return validateParallelScopes(wc, limits)
 }
 
 // walkIDs records every node id in the tree, flagging duplicates.

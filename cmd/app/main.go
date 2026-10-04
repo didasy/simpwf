@@ -210,6 +210,10 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		DefaultTimeout:   cfg.Engine.DefaultNodeTimeout,
 		MaxTimeout:       cfg.Engine.MaxNodeTimeout,
 		ConditionTimeout: cfg.Engine.ConditionTimeout,
+		Parallel: model.ParallelLimits{
+			MaxDepth:               cfg.Engine.Parallel.MaxDepth,
+			MaxBranchesPerParallel: cfg.Engine.Parallel.MaxBranchesPerParallel,
+		},
 	}
 	if nodeLimits.DefaultTimeout <= 0 {
 		nodeLimits.DefaultTimeout = 30 * time.Second
@@ -233,6 +237,12 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	}
 	if cfg.Engine.ClaimBatchSize > 0 {
 		limits.ClaimBatchSize = cfg.Engine.ClaimBatchSize
+	}
+	if cfg.Engine.Parallel.MaxActiveBranchesPerInstance > 0 {
+		limits.MaxActiveBranchesPerInstance = cfg.Engine.Parallel.MaxActiveBranchesPerInstance
+	}
+	if cfg.Engine.Parallel.MaxDepth > 0 {
+		limits.MaxParallelDepth = cfg.Engine.Parallel.MaxDepth
 	}
 
 	maxRedirects := cfg.Engine.MaxRedirects
@@ -302,9 +312,10 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 		return wfSvc.Materialize(ctx, wc)
 	}
-	eng := engine.NewEngine(instances, executors, hookRunner, limits, loader, actor, leanOpts)
+	eng := engine.NewEngine(instances, repository.NewParallelRepository(db), executors, hookRunner, limits, loader, actor, leanOpts)
 	instSvc := service.NewInstanceServiceWithCatalog(
 		instances,
+		repository.NewParallelRepository(db),
 		wfDefs,
 		secrets,
 		wfSvc,
@@ -361,7 +372,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 	}()
 
-	dispatcher, err := engine.NewDispatcher(ctx, eng, instances, "dispatcher-"+hostname, engine.DispatcherOptions{
+	dispatcher, err := engine.NewDispatcher(ctx, eng, instances, repository.NewParallelRepository(db), "dispatcher-"+hostname, engine.DispatcherOptions{
 		Lease:     limits.LeaseDuration,
 		BatchSize: limits.ClaimBatchSize,
 		PoolSize:  cfg.Worker.Pool.Size,

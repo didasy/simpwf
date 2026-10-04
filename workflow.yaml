@@ -3,10 +3,11 @@
 # This YAML is the source a workflow builder would save as the workflow
 # definition content (JSON). Every node id is a UUIDv7 and must be unique.
 # Accepted node types: script, conditions, input, group, output,
-# external_call (http_config or execution_config), and poller (one of
-# http, redis, or rabbitmq). Docs-only draft 2020-12 JSON Schemas,
-# per type, are served on the read paths: `schema` on node definition
-# reads, `schemas` (used types only) on workflow definition reads.
+# external_call (http_config or execution_config), poller (one of
+# http, redis, or rabbitmq), parallel_start, and parallel_end.
+# Docs-only draft 2020-12 JSON Schemas, per type, are served on the
+# read paths: `schema` on node definition reads, `schemas` (used types
+# only) on workflow definition reads.
 #
 # Node links:
 #   - script, input, output, group, external_call and poller may carry
@@ -346,4 +347,44 @@ nodes:
 #     command: ["convert", "{{ job.source }}", "-resize", "200x200", "{{ job.target }}"]
 #     stdin: "{{ job.label }}"
 #   output_property: thumbnail
+#   next_node: "11111111-1111-7111-8111-111111111109"
+
+# ---------------------------------------------------------------------------
+# Parallel example (commented). A parallel_start forks one branch per entry
+# from a frozen snapshot of the parent context; every branch path must reach
+# the paired parallel_end, whose combining_script merges the frozen per-branch
+# contexts (branch["<name>"].context) into the parent context. There is no
+# auto-merge: the parent context only gains what the script writes.
+# parallel_start carries no next_node (the parent resumes via the join);
+# parallel_end carries next_node like any continuing node.
+# ---------------------------------------------------------------------------
+#
+# - type: parallel_start
+#   id: "22222222-2222-7222-8222-222222222226"
+#   name: "Fork billing and shipping"
+#   branches:
+#     billing: "22222222-2222-7222-8222-222222222227"
+#     shipping: "22222222-2222-7222-8222-222222222228"
+#   parallel_end_node_id: "22222222-2222-7222-8222-222222222229"
+#
+# - type: script
+#   id: "22222222-2222-7222-8222-222222222227"
+#   name: "Billing"
+#   script: 'return "INV-" + context.order.id;'
+#   output_property: invoice
+#   next_node: "22222222-2222-7222-8222-222222222229"
+#
+# - type: script
+#   id: "22222222-2222-7222-8222-222222222228"
+#   name: "Shipping"
+#   script: 'return context.order.total > 100 ? "express" : "standard";'
+#   output_property: label
+#   next_node: "22222222-2222-7222-8222-222222222229"
+#
+# - type: parallel_end
+#   id: "22222222-2222-7222-8222-222222222229"
+#   name: "Join"
+#   combining_script: >-
+#     context.invoice = branch["billing"].context.invoice;
+#     context.label = branch["shipping"].context.label;
 #   next_node: "11111111-1111-7111-8111-111111111109"

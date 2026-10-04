@@ -25,6 +25,7 @@ type DispatcherOptions struct {
 type Dispatcher struct {
 	engine    *Engine
 	instances repository.InstanceRepository
+	parallel  repository.ParallelRepository
 	workerID  string
 	pool      *ants.Pool
 
@@ -39,7 +40,7 @@ type Dispatcher struct {
 }
 
 // NewDispatcher builds a dispatcher; it is inert until Run is called.
-func NewDispatcher(ctx context.Context, e *Engine, instances repository.InstanceRepository, workerID string, opts DispatcherOptions) (*Dispatcher, error) {
+func NewDispatcher(ctx context.Context, e *Engine, instances repository.InstanceRepository, parallel repository.ParallelRepository, workerID string, opts DispatcherOptions) (*Dispatcher, error) {
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = 200 * time.Millisecond
 	}
@@ -63,6 +64,7 @@ func NewDispatcher(ctx context.Context, e *Engine, instances repository.Instance
 	return &Dispatcher{
 		engine:       e,
 		instances:    instances,
+		parallel:     parallel,
 		workerID:     workerID,
 		pool:         pool,
 		pollInterval: opts.PollInterval,
@@ -113,6 +115,38 @@ func (d *Dispatcher) claimLoop() {
 				}
 			}
 		}
+		d.claimBranches()
+	}
+}
+
+func (d *Dispatcher) claimBranches() {
+	if d.parallel == nil {
+		return
+	}
+	branches, err := d.parallel.ClaimNextBranches(d.ctx, d.workerID, d.lease, d.batchSize)
+	if err != nil {
+		if d.ctx.Err() == nil {
+			slog.Warn("dispatcher branch claim failed", "worker", d.workerID, "error", err)
+		}
+		return
+	}
+	if len(branches) > 0 {
+		slog.Debug("dispatcher claimed branches", "worker", d.workerID, "count", len(branches))
+	}
+	for _, b := range branches {
+		b := b
+		err := d.pool.Submit(func() {
+			if err := d.engine.ProcessBranch(d.ctx, b); err != nil && d.ctx.Err() == nil {
+				slog.Warn("dispatcher branch process failed", "worker", d.workerID, "branch", b.ID, "error", err)
+			}
+		})
+		if err != nil {
+			// Pool closed (shutdown): run the transition inline rather
+			// than dropping the claim.
+			if err := d.engine.ProcessBranch(d.ctx, b); err != nil && d.ctx.Err() == nil {
+				slog.Warn("dispatcher inline branch process failed", "worker", d.workerID, "branch", b.ID, "error", err)
+			}
+		}
 	}
 }
 
@@ -128,6 +162,11 @@ func (d *Dispatcher) heartbeatLoop() {
 		}
 		if err := d.instances.RenewLeases(d.ctx, d.workerID, d.lease); err != nil && d.ctx.Err() == nil {
 			slog.Warn("dispatcher heartbeat failed", "worker", d.workerID, "error", err)
+		}
+		if d.parallel != nil {
+			if err := d.parallel.RenewBranchLeases(d.ctx, d.workerID, d.lease); err != nil && d.ctx.Err() == nil {
+				slog.Warn("dispatcher branch heartbeat failed", "worker", d.workerID, "error", err)
+			}
 		}
 		d.pollTermination()
 	}
@@ -146,9 +185,28 @@ func (d *Dispatcher) pollTermination() {
 	}
 	for _, id := range pending {
 		d.engine.Cancel(id)
+		d.cancelBranches(id)
 	}
 	if err := d.instances.SweepTermination(d.ctx); err != nil && d.ctx.Err() == nil {
 		slog.Warn("dispatcher termination sweep failed", "worker", d.workerID, "error", err)
+	}
+}
+
+// cancelBranches fans a termination cancel out to an instance's in-flight
+// branch workers, which register under their branch ids.
+func (d *Dispatcher) cancelBranches(instanceID string) {
+	if d.parallel == nil {
+		return
+	}
+	ids, err := d.parallel.ListBranchIDs(d.ctx, instanceID)
+	if err != nil {
+		if d.ctx.Err() == nil {
+			slog.Warn("dispatcher branch cancel list failed", "worker", d.workerID, "instance", instanceID, "error", err)
+		}
+		return
+	}
+	for _, id := range ids {
+		d.engine.Cancel(id)
 	}
 }
 

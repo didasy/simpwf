@@ -33,6 +33,8 @@ func main() {
 		&repository.WorkflowInstanceEventModel{},
 		&repository.InputDeliveryModel{},
 		&repository.StatusUpdateOutboxModel{},
+		&repository.ParallelExecutionModel{},
+		&repository.ParallelBranchModel{},
 	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -81,6 +83,7 @@ func foreignKeyDDL() string {
 	// node_instances
 	add("node_instances", "fk_node_instances_workflow_instance", "\"workflow_instance_id\"", "workflow_instances", "\"id\"")
 	add("node_instances", "fk_node_instances_node_definition", "\"node_definition_id\"", "node_definitions", "\"id\"")
+	add("node_instances", "fk_node_instances_branch", "\"branch_id\"", "parallel_branches", "\"id\"")
 	// node_context_history
 	add("node_context_history", "fk_node_context_history_workflow_instance", "\"workflow_instance_id\"", "workflow_instances", "\"id\"")
 	// workflow_instance_events
@@ -92,6 +95,12 @@ func foreignKeyDDL() string {
 	// status_update_outbox
 	add("status_update_outbox", "fk_status_update_outbox_workflow_instance", "\"workflow_instance_id\"", "workflow_instances", "\"id\"")
 	add("status_update_outbox", "fk_status_update_outbox_workflow_definition", "\"workflow_definition_id\"", "workflow_definitions", "\"id\"")
+	// parallel_executions
+	add("parallel_executions", "fk_parallel_executions_instance", "\"instance_id\"", "workflow_instances", "\"id\"")
+	add("parallel_executions", "fk_parallel_executions_parent_branch", "\"parent_branch_id\"", "parallel_branches", "\"id\"")
+	// parallel_branches
+	add("parallel_branches", "fk_parallel_branches_execution", "\"parallel_execution_id\"", "parallel_executions", "\"id\"")
+	add("parallel_branches", "fk_parallel_branches_instance", "\"instance_id\"", "workflow_instances", "\"id\"")
 	// Partial index: only undelivered, non-dead events are claimable.
 	fmt.Fprintf(&b, "CREATE INDEX %q ON %q (%s) WHERE %s;\n",
 		"idx_status_update_outbox_ready", "status_update_outbox",

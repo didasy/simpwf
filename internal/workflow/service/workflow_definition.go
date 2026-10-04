@@ -221,7 +221,7 @@ func (s *workflowDefinitionService) Materialize(ctx context.Context, wc *model.W
 		ContextMode:  wc.ContextMode,
 		StatusUpdate: wc.StatusUpdate,
 	}
-	if err := model.ValidateWorkflowContent(materialized); err != nil {
+	if err := model.ValidateWorkflowContent(materialized, s.limits.Parallel); err != nil {
 		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
 	return materialized, nil

@@ -107,6 +107,19 @@ type Engine struct {
 	// the whole namespace.
 	EnvDenyExtra       []string `mapstructure:"env_deny_extra"`
 	EnvAllowExceptions []string `mapstructure:"env_allow_exceptions"`
+	// Parallel bounds parallel execution fan-out, nesting, and load.
+	Parallel Parallel `mapstructure:"parallel"`
+}
+
+// Parallel holds the parallel execution safety limits.
+type Parallel struct {
+	// MaxDepth caps structural parallel nesting (1 = one parallel block).
+	MaxDepth int `mapstructure:"max_depth"`
+	// MaxBranchesPerParallel caps the branch count of one parallel_start.
+	MaxBranchesPerParallel int `mapstructure:"max_branches_per_parallel"`
+	// MaxActiveBranchesPerInstance caps concurrently active branches of one
+	// instance across all its parallel executions.
+	MaxActiveBranchesPerInstance int `mapstructure:"max_active_branches_per_instance"`
 }
 
 // System holds the configured audit actor (no auth yet).
@@ -304,6 +317,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.lean_replay_max", 500)
 	v.SetDefault("engine.env_deny_extra", []string{})
 	v.SetDefault("engine.env_allow_exceptions", []string{})
+	v.SetDefault("engine.parallel.max_depth", 4)
+	v.SetDefault("engine.parallel.max_branches_per_parallel", 32)
+	v.SetDefault("engine.parallel.max_active_branches_per_instance", 128)
 	v.SetDefault("system.user_id", "00000000-0000-7000-8000-000000000001")
 	v.SetDefault("system.name", "system")
 	v.SetDefault("system.email", "system@localhost")
@@ -330,6 +346,15 @@ func (c *Config) validate() error {
 	}
 	if c.Engine.LeanReplayMax <= 0 {
 		return errors.New("configuration: engine.lean_replay_max must be > 0")
+	}
+	if c.Engine.Parallel.MaxDepth <= 0 {
+		return errors.New("configuration: engine.parallel.max_depth must be > 0")
+	}
+	if c.Engine.Parallel.MaxBranchesPerParallel <= 0 {
+		return errors.New("configuration: engine.parallel.max_branches_per_parallel must be > 0")
+	}
+	if c.Engine.Parallel.MaxActiveBranchesPerInstance <= 0 {
+		return errors.New("configuration: engine.parallel.max_active_branches_per_instance must be > 0")
 	}
 	if err := validateEnvPatterns("engine.env_deny_extra", c.Engine.EnvDenyExtra); err != nil {
 		return err

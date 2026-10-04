@@ -650,6 +650,15 @@ paths:
           in: header
           required: true
           schema: { type: string }
+        - name: branch_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: |
+            Parallel branch holding the parked input node (omit for the
+            instance cursor). Unknown branches return 404; a branch that is
+            not parked on an input node, or a key already used for a
+            different branch, returns 409.
       requestBody:
         required: true
         content:
@@ -1274,6 +1283,16 @@ components:
             input node). The frontend renders its dynamic form from
             pending_input.form, then delivers the payload. form is null
             when the input node carries no form contract.
+        parallel:
+          type: array
+          nullable: true
+          description: |
+            Parallel executions in creation order with their branches
+            (omitted unless the instance forked). Loops fork repeatedly;
+            nested executions link to their owner branch via
+            parent_branch_id. Lease internals and branch contexts are
+            never exposed here.
+          items: { $ref: "#/components/schemas/ParallelExecution" }
         error: { type: string, nullable: true }
         started_at: { type: string, format: date-time, nullable: true }
         finished_at: { type: string, format: date-time, nullable: true }
@@ -1333,6 +1352,47 @@ components:
           $ref: "#/components/schemas/InputForm"
           nullable: true
           description: Dynamic form contract (null when the input node carries none)
+    ParallelExecution:
+      type: object
+      required: [id, depth, start_node_id, end_node_id, status, branch_count, completed_count, branches]
+      properties:
+        id: { type: string, format: uuid }
+        parent_branch_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Owning branch of a nested execution (null for a top-level fork)
+        depth:
+          type: integer
+          description: Structural nesting level (1 for a top-level fork)
+        start_node_id: { type: string, format: uuid }
+        end_node_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [waiting_for_branches, ready_to_join, completed, failed, cancelled]
+        branch_count: { type: integer }
+        completed_count: { type: integer }
+        branches:
+          type: array
+          items: { $ref: "#/components/schemas/ParallelBranch" }
+    ParallelBranch:
+      type: object
+      required: [id, name, branch_index, start_node_id, status, waiting_reason, error, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        branch_index:
+          type: integer
+          description: Alphabetical position among siblings; drives deterministic debug stepping and status order
+        start_node_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, running, waiting, completed, failed, cancelled]
+        waiting_reason:
+          type: string
+          description: Park reason while waiting (input, parallel, or empty once runnable)
+        error: { type: string }
+        updated_at: { type: string, format: date-time }
     InputForm:
       type: object
       required: [schema]

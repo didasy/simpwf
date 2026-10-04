@@ -21,8 +21,9 @@ path ids on GET/controls are not format-checked; only send back ids the API gave
 
 ### Node type (`type`)
 
-`script`, `conditions`, `input`, `group`, `external_call`, `output`, `poller`. Case-sensitive. Unknown → `422`. Registered
-custom types (e.g. `s3fetch`) are accepted the same way; unknown → `422` unchanged.
+`script`, `conditions`, `input`, `group`, `external_call`, `output`, `poller`, `parallel_start`, `parallel_end`.
+Case-sensitive. Unknown → `422`. Registered custom types (e.g. `s3fetch`) are accepted the same way;
+unknown → `422` unchanged.
 
 ### Node schemas (`schema` / `schemas`)
 
@@ -45,7 +46,10 @@ views add `not_started` for graph nodes that never ran (`occurrence_id: null`, `
 
 ### Waiting reason (`waiting_reason`)
 
-`null` = runnable, `"input"` = parked on an input node. No other value exists.
+`null` = runnable, `"input"` = parked on an input node, `"parallel"` = parked on a parallel join: the parent waits
+for the barrier and is not claimable until the barrier flips it runnable. Branch rows in the status `parallel` tree
+additionally use `"paused"` while a debug run holds them between steps (each resume wakes exactly one; never claimed
+directly).
 
 ### Channels
 
@@ -112,6 +116,8 @@ Per node:
 | `external_call` | Exactly one of `http_config` / `execution_config` (required). `timeout`, `output_property`, `next_node`, `on_failure`, `retry_on_recovery`, hooks, `metadata`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Workflow context for templating: `http_config` renders `url`, `method`, header values, and body string values against context (`{{ path }}`). `execution_config.stdin` renders the same way; `command` argv is literal (never a shell). No reserved roots here (unlike poller).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | `http_config` → `{Status: number, Headers: {name: string[]}, Body: any}` (`Body` = parsed JSON when the response parses, else raw string). Non-2xx with `on_failure` set still records this object as `result` inside the failure payload and routes instead of failing. `execution_config` → `{ExitCode: number, Stdout: string, Stderr: string, TimedOut: boolean, Truncated: boolean}` (non-zero exit fails the node). Stored at `output_property` (blank = the graph node id). |
 | `output`        | `channel` (required: `redis`/`rabbitmq`; `http` → `422`). `context_path` (required). `timeout`, `output_property`, `next_node`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Reads the value at `context_path` from the live context and publishes its exact JSON. No external request, no script. Missing path fails the node. Redis destination is derived: `workflow:output:<instance-id>`. RabbitMQ destination is the server-configured output queue.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | `{Channel: string, Destination: string, MessageID: string}` (`MessageID` = `"<instance-id>:<occurrence-id>"` stable execution id). Stored at `output_property` (blank = the graph node id). Original payload stays in context untouched.                                                                                                                                                                                                                                   |
 | `poller`        | Exactly one of `http` / `redis` / `rabbitmq` (required) + non-blank `until` predicate (required). `output_property`, `next_node`, `on_failure`, `retry_on_recovery` (default `true`), hooks, `metadata`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Workflow context for templating (unlike `external_call`, poller templates also get reserved roots `workflow_instance_id` / `node_instance_id`, which win over same-named context values): poller `url`/`method`/`key`/`channel`/`queue` render against context. `until` predicate sees frozen `context` plus frozen `response` var (the normalized shape below) and must `return` a boolean. Occupies a worker slot while waiting.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Normalized `PollerResponse` (lowercase keys via explicit `json` tags): HTTP → `{body: any, headers: {name: string[]}, status: number}`; redis GET/SUB → `{body: any}` (missing GET key = `body: null`); rabbitmq → `{body: any, headers: {name: string}}`. `body` = parsed JSON when it parses, else raw string. Stored at `output_property` (blank = the graph node id). Exhausted budget without a match fails the node.                                                         |
+| `parallel_start` | `branches` (required object of branch name → node id, min 2 entries, max `max_branches_per_parallel`, default 32). Names non-blank; targets must be UUID siblings in the same scope, never the start node itself. `parallel_end_node_id` (required UUID of a `parallel_end` node in the same scope, paired 1:1). No `next_node`, no `output_property`, no `combining_script`.                                                                                                                                                                                                                                                                                                                                                                            | Forks one branch per entry: each branch starts from a snapshot of the frozen parent context at its target node. Branch index = alphabetical order of branch names. The parent cursor moves to the join and waits for the barrier.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | No native output and no context write of its own. Every branch path must reach the paired join (checked at definition time). Blocks nest to `max_depth` (default 4), measured over branch reachability; groups add no depth. A branch failure fails its execution, cancels live siblings, and fails a parked top-level parent with the leaf error; instance stop cancels the whole tree.                                                                                                                                                                                |
+| `parallel_end`  | `combining_script` (required, non-blank). `next_node`, hooks. No `branches`, no `parallel_end_node_id`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Runs after the barrier (all branches completed). `combining_script` runs over the parent context with a frozen read-only `branch` view (`branch["<name>"]` = `{context, status, branch_id, start_node_id}`) under the condition timeout (default `5s`, not settable).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | The script's mutated context replaces the parent context: merge explicitly, there is no auto-merge. The run continues at `next_node`. A failing script fails the execution and the scope.                                                                                                                                                                                                                                                                                                                                            |
 
 Cross-type fields:
 
@@ -129,13 +135,17 @@ Cross-type fields:
   `on_failure`, `keys` for groups, hooks, `metadata`, `retry_on_recovery`). Inline executable fields (`script`,
   `conditions`, `channel`, `http_config`, `nodes`, poller blocks) → `422`. Optional `type` must match the referenced
   definition.
-- `timeout`: omitted/null = engine default. `branches` anywhere → `422` (define `keys` on the workflow/group instead).
+- `timeout`: omitted/null = engine default. `branches` is parallel-only: a required object on `parallel_start`,
+  rejected (`422`) on every other type (define `keys` on the workflow/group instead). `parallel_end_node_id` and
+  `combining_script` are likewise rejected outside their owner type.
 
 `status_update` block: at least one of `http`/`redis`/`rabbitmq` → else `422`. `http.url` required, absolute http(s).
 Header names non-empty, no CR/LF in names or values. Redis publishes to `workflow:status:<instance>`, rabbitmq to the
 configured status queue; channel/queue names are fixed, only retry policy is configurable. Input/output broker
 addresses: input redis channel `workflow:input:<instance>`, output redis channel `workflow:output:<instance>`, rabbitmq
 input/output/status queues from server config.
+
+Full worked parallel definitions are inlined under [Parallel examples](#parallel-examples).
 
 ## Input gates
 
@@ -205,8 +215,16 @@ guard; authoring is trusted, same as scripts that can already read full context)
 - `debug`: boolean on instance status and list items. `true` = step-through run created with `"debug": true`.
   Immutable after create. Response-only: no list filter or `order` key for it.
 - `current_node_instance_id`: `"<instance-id>:<occurrence-id>"`, `null` when unresolvable.
-- Rollback `rollbackable` hint: true only when the instance is paused/failed without `termination_pending`, the node is
-  not a group, the occurrence is `finished`/`failed`/`stopped`, and its `context_before` parses as a JSON object.
+- Rollback `rollbackable` hint: true only when the instance is paused/failed without `termination_pending`, no
+  parallel execution is still waiting for branches or for its join, the node is not a group, the occurrence is
+  parent-scope (`branch_id` empty), `finished`/`failed`/`stopped`, and its `context_before` parses as a JSON object.
+- `parallel`: present only when the instance forked at least once, `null`/omitted otherwise. List of executions in
+  creation order, each `{id, parent_branch_id, depth, start_node_id, end_node_id, status, branch_count,
+  completed_count, branches[]}` with branches `{id, name, branch_index, start_node_id, status, waiting_reason,
+  error, updated_at}`. Execution `status`: `waiting_for_branches`, `ready_to_join`, `completed`, `failed`,
+  `cancelled`. Branch `status`: `pending`, `running`, `waiting`, `completed`, `failed`, `cancelled`. Nested
+  executions link via `parent_branch_id` (null at depth 1). A re-fork (loops, rollback re-execution) appends a new
+  execution; old rows stay as history.
 - Node debug `duration_ms`: set only when both `started_at` and `finished_at` exist.
   `recovery_policy`/`recovery_result`: `null` unless a recovery happened.
 - Debug-context `typescript`: rendered from the secret-redacted snapshot at the debug position (never
@@ -240,3 +258,154 @@ nothing; `group` has no native output (children write their own). Field-for-fiel
   `on_failure.output_property` (not `output_property`). `result` is the partial native output when one exists (e.g.
   the non-2xx HTTP object), else `null`. The failed attempt keeps `status: "failed"` with `output` = `result`
   (`null` when absent); the workflow itself stays runnable and advances to `on_failure.next_node`.
+
+## Parallel examples
+
+Simple fork/join with a scripted merge (`seed` → `parallel_start` → `billing`/`shipping` → `parallel_end` → `done`):
+
+```json
+{
+  "start_node_id": "11111111-1111-7111-8111-000000000001",
+  "nodes": [
+    {
+      "id": "11111111-1111-7111-8111-000000000001",
+      "type": "script",
+      "name": "seed",
+      "script": "context.order = {id: 7, total: 300}; return context.order;",
+      "output_property": "order",
+      "next_node": "11111111-1111-7111-8111-000000000002"
+    },
+    {
+      "id": "11111111-1111-7111-8111-000000000002",
+      "type": "parallel_start",
+      "name": "fork",
+      "branches": {
+        "billing": "11111111-1111-7111-8111-000000000003",
+        "shipping": "11111111-1111-7111-8111-000000000004"
+      },
+      "parallel_end_node_id": "11111111-1111-7111-8111-000000000005"
+    },
+    {
+      "id": "11111111-1111-7111-8111-000000000003",
+      "type": "script",
+      "name": "billing",
+      "script": "context.invoice = \"INV-\" + context.order.id; return context.invoice;",
+      "output_property": "invoice",
+      "next_node": "11111111-1111-7111-8111-000000000005"
+    },
+    {
+      "id": "11111111-1111-7111-8111-000000000004",
+      "type": "script",
+      "name": "shipping",
+      "script": "context.label = context.order.total > 100 ? \"express\" : \"standard\"; return context.label;",
+      "output_property": "label",
+      "next_node": "11111111-1111-7111-8111-000000000005"
+    },
+    {
+      "id": "11111111-1111-7111-8111-000000000005",
+      "type": "parallel_end",
+      "name": "join",
+      "combining_script": "context.invoice = branch[\"billing\"].context.invoice; context.label = branch[\"shipping\"].context.label;",
+      "next_node": "11111111-1111-7111-8111-000000000006"
+    },
+    {
+      "id": "11111111-1111-7111-8111-000000000006",
+      "type": "script",
+      "name": "done",
+      "script": "context.ready = true; return context.ready;",
+      "output_property": "ready"
+    }
+  ]
+}
+```
+
+Nested blocks: outer fork `a`/`b` with an inner fork `x`/`y` inside branch `a`, each with its own join:
+
+```json
+{
+  "start_node_id": "22222222-2222-7222-8222-000000000001",
+  "nodes": [
+    {
+      "id": "22222222-2222-7222-8222-000000000001",
+      "type": "script",
+      "name": "seed",
+      "script": "context.cart = [12, 30, 8]; return context.cart;",
+      "output_property": "cart",
+      "next_node": "22222222-2222-7222-8222-000000000002"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000002",
+      "type": "parallel_start",
+      "name": "outer-fork",
+      "branches": {
+        "a": "22222222-2222-7222-8222-000000000003",
+        "b": "22222222-2222-7222-8222-000000000004"
+      },
+      "parallel_end_node_id": "22222222-2222-7222-8222-000000000009"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000003",
+      "type": "script",
+      "name": "tally",
+      "script": "context.subtotal = context.cart.reduce(function(s, n) { return s + n; }, 0); return context.subtotal;",
+      "output_property": "subtotal",
+      "next_node": "22222222-2222-7222-8222-000000000005"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000004",
+      "type": "script",
+      "name": "coupon",
+      "script": "context.coupon = 5; return context.coupon;",
+      "output_property": "coupon",
+      "next_node": "22222222-2222-7222-8222-000000000009"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000005",
+      "type": "parallel_start",
+      "name": "inner-fork",
+      "branches": {
+        "x": "22222222-2222-7222-8222-000000000006",
+        "y": "22222222-2222-7222-8222-000000000007"
+      },
+      "parallel_end_node_id": "22222222-2222-7222-8222-000000000008"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000006",
+      "type": "script",
+      "name": "tax",
+      "script": "context.tax = context.subtotal * 0.2; return context.tax;",
+      "output_property": "tax",
+      "next_node": "22222222-2222-7222-8222-000000000008"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000007",
+      "type": "script",
+      "name": "fee",
+      "script": "context.fee = 2; return context.fee;",
+      "output_property": "fee",
+      "next_node": "22222222-2222-7222-8222-000000000008"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000008",
+      "type": "parallel_end",
+      "name": "inner-join",
+      "combining_script": "context.tax = branch[\"x\"].context.tax; context.fee = branch[\"y\"].context.fee;",
+      "next_node": "22222222-2222-7222-8222-000000000009"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000009",
+      "type": "parallel_end",
+      "name": "outer-join",
+      "combining_script": "context.total = branch[\"a\"].context.subtotal + branch[\"a\"].context.tax + branch[\"a\"].context.fee - branch[\"b\"].context.coupon;",
+      "next_node": "22222222-2222-7222-8222-000000000010"
+    },
+    {
+      "id": "22222222-2222-7222-8222-000000000010",
+      "type": "script",
+      "name": "done",
+      "script": "context.ready = true; return context.ready;",
+      "output_property": "ready"
+    }
+  ]
+}
+```

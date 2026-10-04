@@ -163,7 +163,7 @@ surface as `500` if the database rejects the literal instead of returning zero r
 Response:
 
 - Identity, `status` enum, `context_mode` (`full`/`lean`, snapshotted at creation), `debug` (step-through flag,
-  immutable after create), `waiting_reason` (`null` = runnable, `"input"` = parked).
+  immutable after create), `waiting_reason` (`null` = runnable, `"input"` = parked, `"parallel"` = parked on a join).
 - `pause_requested`, `termination_pending`, `current_group_id`, `current_node_id`, `current_node_instance_id`
   (`"<instance>:<occurrence>"`, `null` when unresolvable).
 - `attempt`, `counters` (`{"total":N,"nodes":{...}}`), `error` (`null` when empty), `started_at`/`finished_at`, audit
@@ -171,6 +171,11 @@ Response:
 - `nodes`: map of graph node id → `{occurrence_id, status, attempt, rollbackable}`. Never-ran nodes carry
   `occurrence_id: null`, `attempt: null`, `status: "not_started"`. `rollbackable` is advisory; the rollback endpoint is
   the source of truth. Whole map is `null`/omitted when the definition cannot be loaded.
+- `parallel`: list of fork/join executions with their branches, `null`/omitted when the instance never forked. Each
+  execution carries `{id, parent_branch_id, depth, start_node_id, end_node_id, status, branch_count,
+  completed_count, branches[]}`; each branch `{id, name, branch_index, start_node_id, status, waiting_reason, error,
+  updated_at}`. A branch parked on an input node shows `status: "waiting"`, `waiting_reason: "input"`: deliver to it
+  with `PUT .../input?branch_id=<branch id>`. Full enum lists are in `fields.md`.
 
 ### `GET /v1/workflow/instance/{id}/context` → `200`
 
@@ -224,11 +229,17 @@ brokers, never by FE).
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Idempotency-Key` header | Required, non-blank → else `422`. Replays return the originally recorded delivery regardless of current state. Use a fresh key per genuinely new delivery. |
 | Body                   | Required. Any valid JSON (object, array, scalar). Empty body → `422`. Invalid JSON → `422`.                                                                  |
+| `branch_id` query        | Optional branch id (from the status `parallel` tree). Targets a branch-parked input node instead of the parent park; omit for the parent park. Unknown branch → `404`; branch of another instance → `409`. |
 
 Validation-script rejection → `422` with the rejection message in the problem detail (delivery recorded as
 `accepted: false`). Wrong state (terminal, not parked, parked on non-input node, channel mismatch, no live attempt) →
 `409`. Success → `202 {"accepted":true}`. A post-hook failure after acceptance still returns `202` but fails the
 workflow.
+
+A branch delivery requires the parent parked on its join (`waiting` or `paused` with `waiting_reason == "parallel"`)
+and the branch itself `waiting`/`"input"` on an `http` input node; anything else → `409`. The delivery advances only
+the branch (its attempt finishes, the branch wakes runnable); the parent never moves. Idempotency keys are
+instance-wide: a key already used on any park replays the original delivery.
 
 #### Anonymous delivery to a `public` node
 
@@ -263,18 +274,25 @@ malformed-UUID caveat as status (only send back ids the API gave you).
   surfaces as a conflict, so an unknown id here can return `409` instead of `404`; treat `409` on pause/resume/stop as
   "gone or terminal" and refresh.)
 
+Pausing mid-parallel parks only the parent: live branches keep running, and the barrier still flips the paused parent
+runnable when the last branch arrives, so a later resume lands claimable and runs the join.
+
 ### `POST /v1/workflow/instance/{id}/resume` → `200`
 
 Paused → `waiting`. Already waiting → `200` idempotent. Running with a pending pause clears the request. Unknown id →
 `404` (same `409` caveat as pause). Terminal → `409`. Response `{status}`. On debug runs each resume advances
 exactly one step before the instance re-pauses, so keep offering resume while `debug` is true and status returns to
-`paused`.
+`paused`. A debug resume with paused branches wakes exactly one branch — shallowest execution first, then
+alphabetically — while the parent stays `paused`; the parent wakes once no paused branch remains. A branch with a
+step already in flight → `409`, so wait and retry.
 
 ### `POST /v1/workflow/instance/{id}/stop` → `200`
 
 Waiting/running/paused → `stopped` (stop reason recorded as `"operator"`). Already stopped → `200` idempotent.
 Finished/failed → `409`. Unknown id → `404` (same `409` caveat as pause). Response `{status, termination_pending}`;
-`true` means a node attempt is still being cancelled and cleaned up.
+`true` means a node attempt is still being cancelled and cleaned up. On instances with live parallel branches, stop
+cancels the whole tree (live siblings, nested subtrees) in the same transaction; `termination_pending` covers
+in-flight branch workers too.
 
 ### `POST /v1/workflow/instance/{id}/rollback` → `200`
 
@@ -283,14 +301,16 @@ becomes paused, error cleared).
 
 | Body field           | Required | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `target_occurrence_id` | yes      | Real executed occurrence id (from the status `nodes` map or an executed debug response). Never-ran `not_started` ids are rejected (`404`, no occurrence row). Blank/missing/malformed body → `400`. Unknown occurrence or occurrence of another instance → `404`. Group node or occurrence whose node left the definition → `422`. Input occurrence that is not finished → `409`. Unrestorable context or history gap/overflow on lean instances → `422`/`409` (history failures map to `409`). |
+| `target_occurrence_id` | yes      | Real executed occurrence id (from the status `nodes` map or an executed debug response). Never-ran `not_started` ids are rejected (`404`, no occurrence row). Blank/missing/malformed body → `400`. Unknown occurrence or occurrence of another instance → `404`. Group node or occurrence whose node left the definition → `422`. Occurrence that ran inside a parallel branch → `422` (roll back to a node before or after the block). Input occurrence that is not finished → `409`. Unrestorable context or history gap/overflow on lean instances → `422`/`409` (history failures map to `409`). |
 | `reason`               | no       | Optional audit annotation on the rollback event only.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
-Guards: instance must be paused/failed → else `409`; `termination_pending` → `409`. Rolling back onto the currently
+Guards: instance must be paused/failed → else `409`; `termination_pending` → `409`; live parallel branches (any
+execution still waiting for branches or for its join) → `409`. Rolling back onto the currently
 parked input occurrence is a no-op `200` (no writes). Any other target atomically supersedes the live park (closed as
 stopped/cancelled, `"superseded by rollback"`). Context is restored from the target's `context_before`; input targets
 re-arm as a fresh attempt (`waiting_reason: "input"`, fresh `Idempotency-Key` accepted); other targets become runnable.
-Response `{status:"paused", current_node_id}`. Resume afterwards to re-execute.
+Targets before or after a completed parallel block are accepted: re-execution forks a fresh execution and old rows stay
+as history. Response `{status:"paused", current_node_id}`. Resume afterwards to re-execute.
 
 ## Statistics
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1878,5 +1879,383 @@ func TestDeliverInputReplaysAcrossNodeOccurrences(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("input_deliveries rows for the key = %d, want 1", count)
+	}
+}
+
+const (
+	branchInputNode = "01950000-0000-7000-8000-0000000000f1"
+	branchInputNext = "01950000-0000-7000-8000-0000000000f2"
+)
+
+// setupBranchInput forks an outer execution and parks its first branch on an
+// input node with a running attempt, mirroring what waitInput commits.
+func setupBranchInput(t *testing.T, db *gorm.DB, id, attemptID string) string {
+	t.Helper()
+	ctx := context.Background()
+	insertLeasedInstance(t, db, id)
+	prepo := repository.NewParallelRepository(db)
+	_, branches, err := prepo.Fork(ctx, parallelFork(id))
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+	claimed, err := prepo.ClaimNextBranches(ctx, "worker-1", time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ClaimNextBranches() error = %v", err)
+	}
+	branchID := branches[0].ID
+	found := false
+	for _, b := range claimed {
+		if b.ID == branchID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("branch %s was not claimed", branchID)
+	}
+	frameRaw, err := model.NewFrame(branchInputNode).JSON()
+	if err != nil {
+		t.Fatalf("frame JSON: %v", err)
+	}
+	if err := db.Model(&repository.ParallelBranchModel{}).Where("id = ?", branchID).Updates(map[string]any{
+		"status": string(model.ParallelBranchWaiting), "waiting_reason": string(model.WaitingReasonInput),
+		"frame": frameRaw, "leased_by": "", "lease_expiry": nil,
+	}).Error; err != nil {
+		t.Fatalf("park branch on input: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := repository.NewInstanceRepository(db).InsertNodeInstance(ctx, model.NodeInstance{
+		ID:                 attemptID,
+		WorkflowInstanceID: id,
+		BranchID:           branchID,
+		NodeID:             branchInputNode,
+		NodeDefinitionID:   fixtureNodeDefID,
+		Name:               "input",
+		Type:               string(model.NodeTypeInput),
+		Attempt:            1,
+		Status:             model.NodeRunning,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance() error = %v", err)
+	}
+	return branchID
+}
+
+func branchInputCompletion(id, branchID, attemptID, key string) repository.InputCompletion {
+	return repository.InputCompletion{
+		InstanceID:     id,
+		BranchID:       branchID,
+		NodeInstanceID: attemptID,
+		IdempotencyKey: key,
+		Payload:        json.RawMessage(`{"name":"x"}`),
+		Accepted:       true,
+		NewFrame:       model.NewFrame(branchInputNext),
+		NewContext:     json.RawMessage(`{"name":"x"}`),
+		CreatedBy:      fixtureUserID,
+	}
+}
+
+// instanceEventsOfType loads the data payloads of an instance's events of one type.
+func instanceEventsOfType(t *testing.T, db *gorm.DB, id, typ string) []map[string]any {
+	t.Helper()
+	var models []repository.WorkflowInstanceEventModel
+	if err := db.Model(&repository.WorkflowInstanceEventModel{}).
+		Where("workflow_instance_id = ? AND type = ?", id, typ).Find(&models).Error; err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	out := make([]map[string]any, 0, len(models))
+	for _, m := range models {
+		var data map[string]any
+		if err := json.Unmarshal(m.Data, &data); err != nil {
+			t.Fatalf("unmarshal event data: %v", err)
+		}
+		out = append(out, data)
+	}
+	return out
+}
+
+func TestDeliverBranchInputAdvancesBranchCursor(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000f0"
+	attemptID := "01950000-0000-7000-8000-0000000000f3"
+	branchID := setupBranchInput(t, db, id, attemptID)
+
+	repo := repository.NewInstanceRepository(db)
+	d, err := repo.DeliverInput(ctx, branchInputCompletion(id, branchID, attemptID, "branch-key-1"))
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if !d.Accepted {
+		t.Fatalf("delivery not accepted")
+	}
+	attempt, err := repo.GetNodeInstance(ctx, id, attemptID)
+	if err != nil {
+		t.Fatalf("GetNodeInstance() error = %v", err)
+	}
+	if attempt.Status != model.NodeFinished {
+		t.Fatalf("attempt status = %s", attempt.Status)
+	}
+	assertJSON(t, attempt.Output, `{"name":"x"}`)
+	prepo := repository.NewParallelRepository(db)
+	branch, err := prepo.GetBranch(ctx, branchID)
+	if err != nil {
+		t.Fatalf("GetBranch() error = %v", err)
+	}
+	if branch.Status != model.ParallelBranchWaiting || branch.WaitingReason != model.WaitingReasonRunnable {
+		t.Fatalf("branch = %s/%s", branch.Status, branch.WaitingReason)
+	}
+	frame, _ := model.ParseFrame(branch.Frame)
+	if frame.CurrentNodeID != branchInputNext {
+		t.Fatalf("branch cursor = %q", frame.CurrentNodeID)
+	}
+	assertJSON(t, branch.Context, `{"name":"x"}`)
+	// The instance row is untouched: still parked on the outer join.
+	inst, _ := repo.GetByID(ctx, id)
+	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonParallel {
+		t.Fatalf("instance = %s/%s", inst.Status, inst.WaitingReason)
+	}
+	if inst.Revision != 1 {
+		t.Fatalf("instance revision = %d, want 1", inst.Revision)
+	}
+	received := instanceEventsOfType(t, db, id, "input_received")
+	if len(received) != 1 {
+		t.Fatalf("input_received events = %d, want 1", len(received))
+	}
+	if received[0]["branch_id"] != branchID || received[0]["node_instance_id"] != attemptID {
+		t.Fatalf("input_received data = %v", received[0])
+	}
+	if finished := instanceEventsOfType(t, db, id, "workflow_finished"); len(finished) != 0 {
+		t.Fatalf("branch delivery emitted workflow_finished")
+	}
+}
+
+func TestDeliverBranchInputEnqueuesNoStatusUpdate(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	seedStatusUpdateDef(t, db, suDefID, suContent)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000f4"
+	attemptID := "01950000-0000-7000-8000-0000000000f5"
+	branchID := setupBranchInput(t, db, id, attemptID)
+	// Point the instance at a definition with status_update transports:
+	// a branch delivery still enqueues nothing (branch events land with
+	// the status API, not the outbox).
+	if err := db.Model(&repository.WorkflowInstanceModel{}).Where("id = ?", id).
+		Update("workflow_definition_id", suDefID).Error; err != nil {
+		t.Fatalf("repoint definition: %v", err)
+	}
+
+	repo := repository.NewInstanceRepository(db)
+	if _, err := repo.DeliverInput(ctx, branchInputCompletion(id, branchID, attemptID, "branch-key-su")); err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	var outbox int64
+	if err := db.Model(&repository.StatusUpdateOutboxModel{}).Where("workflow_instance_id = ?", id).Count(&outbox).Error; err != nil {
+		t.Fatalf("count outbox: %v", err)
+	}
+	if outbox != 0 {
+		t.Fatalf("outbox rows = %d, want 0", outbox)
+	}
+}
+
+func TestDeliverBranchInputRejectsWhenNotParked(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000f6"
+	attemptID := "01950000-0000-7000-8000-0000000000f7"
+	insertLeasedInstance(t, db, id)
+	prepo := repository.NewParallelRepository(db)
+	_, branches, err := prepo.Fork(ctx, parallelFork(id))
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+	branchID := claimBranchByID(t, prepo, ctx, branches[0].ID).ID
+	now := time.Now().UTC()
+	repo := repository.NewInstanceRepository(db)
+	if err := repo.InsertNodeInstance(ctx, model.NodeInstance{
+		ID: attemptID, WorkflowInstanceID: id, BranchID: branchID,
+		NodeID: branchInputNode, NodeDefinitionID: fixtureNodeDefID,
+		Type: string(model.NodeTypeInput), Status: model.NodeRunning,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertNodeInstance() error = %v", err)
+	}
+	// The branch is running, not parked on input: the delivery conflicts.
+	if _, err := repo.DeliverInput(ctx, branchInputCompletion(id, branchID, attemptID, "branch-key-race")); !errors.Is(err, repository.ErrStatusConflict) {
+		t.Fatalf("DeliverInput() = %v, want ErrStatusConflict", err)
+	}
+	attempt, _ := repo.GetNodeInstance(ctx, id, attemptID)
+	if attempt.Status != model.NodeRunning {
+		t.Fatalf("attempt status = %s", attempt.Status)
+	}
+}
+
+func TestDeliverBranchInputRejectsCrossInstance(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-000000000104"
+	attemptID := "01950000-0000-7000-8000-000000000105"
+	branchID := setupBranchInput(t, db, id, attemptID)
+	otherID := "01950000-0000-7000-8000-000000000106"
+	insertLeasedInstance(t, db, otherID)
+
+	repo := repository.NewInstanceRepository(db)
+	c := branchInputCompletion(otherID, branchID, attemptID, "branch-key-cross")
+	if _, err := repo.DeliverInput(ctx, c); !errors.Is(err, repository.ErrStatusConflict) {
+		t.Fatalf("DeliverInput() = %v, want ErrStatusConflict", err)
+	}
+	var count int64
+	if err := db.Model(&repository.InputDeliveryModel{}).
+		Where("workflow_instance_id = ? AND idempotency_key = ?", otherID, "branch-key-cross").
+		Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected delivery persisted %d rows", count)
+	}
+}
+
+func TestDeliverBranchInputReplaysExisting(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000f8"
+	attemptID := "01950000-0000-7000-8000-0000000000f9"
+	branchID := setupBranchInput(t, db, id, attemptID)
+
+	repo := repository.NewInstanceRepository(db)
+	first, err := repo.DeliverInput(ctx, branchInputCompletion(id, branchID, attemptID, "branch-key-replay"))
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	replay, err := repo.DeliverInput(ctx, branchInputCompletion(id, branchID, attemptID, "branch-key-replay"))
+	if err != nil {
+		t.Fatalf("replay DeliverInput() error = %v", err)
+	}
+	if replay.ID != first.ID {
+		t.Fatalf("replay.ID = %s, want %s", replay.ID, first.ID)
+	}
+}
+
+func TestDeliverBranchInputRejectedPersistsWithoutCursorMove(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000fa"
+	attemptID := "01950000-0000-7000-8000-0000000000fb"
+	branchID := setupBranchInput(t, db, id, attemptID)
+
+	repo := repository.NewInstanceRepository(db)
+	c := branchInputCompletion(id, branchID, attemptID, "branch-key-reject")
+	c.Accepted = false
+	c.Error = "schema says no"
+	d, err := repo.DeliverInput(ctx, c)
+	if err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	if d.Accepted {
+		t.Fatalf("delivery accepted")
+	}
+	branch, _ := repository.NewParallelRepository(db).GetBranch(ctx, branchID)
+	if branch.Status != model.ParallelBranchWaiting || branch.WaitingReason != model.WaitingReasonInput {
+		t.Fatalf("branch = %s/%s", branch.Status, branch.WaitingReason)
+	}
+	attempt, _ := repo.GetNodeInstance(ctx, id, attemptID)
+	if attempt.Status != model.NodeRunning {
+		t.Fatalf("attempt status = %s", attempt.Status)
+	}
+}
+
+func TestFailBranchInputFailsBranchAndClimbs(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000fc"
+	attemptID := "01950000-0000-7000-8000-0000000000fd"
+	branchID := setupBranchInput(t, db, id, attemptID)
+
+	repo := repository.NewInstanceRepository(db)
+	c := branchInputCompletion(id, branchID, attemptID, "branch-key-postfail")
+	c.PostFailure = true
+	c.NodeStatus = model.NodeFailed
+	c.Error = "post hook exploded"
+	if _, err := repo.DeliverInput(ctx, c); err != nil {
+		t.Fatalf("DeliverInput() error = %v", err)
+	}
+	attempt, _ := repo.GetNodeInstance(ctx, id, attemptID)
+	if attempt.Status != model.NodeFailed {
+		t.Fatalf("attempt status = %s", attempt.Status)
+	}
+	prepo := repository.NewParallelRepository(db)
+	branch, _ := prepo.GetBranch(ctx, branchID)
+	if branch.Status != model.ParallelBranchFailed {
+		t.Fatalf("branch status = %s", branch.Status)
+	}
+	exs, _ := prepo.ListExecutions(ctx, id)
+	if len(exs) != 1 || exs[0].Status != model.ParallelExecutionFailed {
+		t.Fatalf("executions = %+v", exs)
+	}
+	siblings, _ := prepo.ListBranches(ctx, exs[0].ID)
+	for _, s := range siblings {
+		if s.ID != branchID && s.Status != model.ParallelBranchCancelled {
+			t.Fatalf("sibling %s = %s", s.Name, s.Status)
+		}
+	}
+	inst, _ := repo.GetByID(ctx, id)
+	if inst.Status != model.WorkflowFailed {
+		t.Fatalf("instance status = %s", inst.Status)
+	}
+	if !strings.Contains(inst.Error, "post hook exploded") {
+		t.Fatalf("instance error = %q", inst.Error)
+	}
+	if got := instanceEventsOfType(t, db, id, "parallel_branch_failed"); len(got) != 1 {
+		t.Fatalf("parallel_branch_failed events = %d, want 1", len(got))
+	}
+	if got := instanceEventsOfType(t, db, id, "workflow_failed"); len(got) != 1 {
+		t.Fatalf("workflow_failed events = %d, want 1", len(got))
+	}
+}
+
+func TestGetLiveBranchNodeInstanceByNode(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000fe"
+	attemptID := "01950000-0000-7000-8000-0000000000ff"
+	branchID := setupBranchInput(t, db, id, attemptID)
+
+	repo := repository.NewInstanceRepository(db)
+	now := time.Now().UTC()
+	// A finished attempt of the same node in the same branch, and a live
+	// parent-scope attempt of the same node: neither is the answer.
+	for _, a := range []model.NodeInstance{
+		{ID: "01950000-0000-7000-8000-000000000100", WorkflowInstanceID: id, BranchID: branchID, NodeID: branchInputNode, NodeDefinitionID: fixtureNodeDefID, Type: string(model.NodeTypeInput), Status: model.NodeFinished, CreatedAt: now, UpdatedAt: now},
+		{ID: "01950000-0000-7000-8000-000000000101", WorkflowInstanceID: id, NodeID: branchInputNode, NodeDefinitionID: fixtureNodeDefID, Type: string(model.NodeTypeInput), Status: model.NodeRunning, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := repo.InsertNodeInstance(ctx, a); err != nil {
+			t.Fatalf("InsertNodeInstance() error = %v", err)
+		}
+	}
+	got, err := repo.GetLiveBranchNodeInstanceByNode(ctx, branchID, branchInputNode)
+	if err != nil {
+		t.Fatalf("GetLiveBranchNodeInstanceByNode() error = %v", err)
+	}
+	if got.ID != attemptID {
+		t.Fatalf("attempt = %s, want %s", got.ID, attemptID)
+	}
+	if _, err := repo.GetLiveBranchNodeInstanceByNode(ctx, branchID, "01950000-0000-7000-8000-000000000102"); !errors.Is(err, repository.ErrNodeInstanceNotFound) {
+		t.Fatalf("unknown node err = %v, want ErrNodeInstanceNotFound", err)
 	}
 }
