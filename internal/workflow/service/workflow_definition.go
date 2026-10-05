@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 )
@@ -44,6 +45,7 @@ type workflowDefinitionService struct {
 	nodeRepo repository.NodeDefinitionRepository
 	limits   model.NodeLimits
 	actor    string
+	mat      *kernel.Materializer
 }
 
 // NewWorkflowDefinitionService builds the service.
@@ -53,7 +55,7 @@ func NewWorkflowDefinitionService(
 	limits model.NodeLimits,
 	actor string,
 ) WorkflowDefinitionService {
-	return &workflowDefinitionService{repo: repo, nodeRepo: nodeRepo, limits: limits, actor: actor}
+	return &workflowDefinitionService{repo: repo, nodeRepo: nodeRepo, limits: limits, actor: actor, mat: kernel.NewMaterializer(nodeRepo, limits)}
 }
 
 func (s *workflowDefinitionService) Create(ctx context.Context, req CreateWorkflowDefinition) (model.WorkflowDefinition, error) {
@@ -206,102 +208,7 @@ func declaredNodeTypes(content []byte) map[string]bool {
 // with the executable fields of the referenced node definitions while keeping
 // the workflow-owned graph fields.
 func (s *workflowDefinitionService) Materialize(ctx context.Context, wc *model.WorkflowContent) (*model.WorkflowContent, error) {
-	nodes := make([]*model.NodeContent, 0, len(wc.Nodes))
-	for _, n := range wc.Nodes {
-		m, err := s.materializeNode(ctx, n)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, m)
-	}
-	materialized := &model.WorkflowContent{
-		StartNodeID:  wc.StartNodeID,
-		Keys:         wc.Keys,
-		Nodes:        nodes,
-		ContextMode:  wc.ContextMode,
-		StatusUpdate: wc.StatusUpdate,
-	}
-	if err := model.ValidateWorkflowContent(materialized, s.limits.Parallel); err != nil {
-		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
-	}
-	return materialized, nil
-}
-
-func (s *workflowDefinitionService) materializeNode(ctx context.Context, n *model.NodeContent) (*model.NodeContent, error) {
-	if n.NodeDefinitionID != "" {
-		def, err := s.nodeRepo.GetByID(ctx, n.NodeDefinitionID)
-		if err != nil {
-			return nil, fmt.Errorf("%w: node definition %s: %v", model.ErrInvalid, n.NodeDefinitionID, err)
-		}
-		dc, err := model.ParseNodeContent(def.Content, s.limits)
-		if err != nil {
-			return nil, fmt.Errorf("%w: node definition %s content is invalid: %v", model.ErrInvalid, n.NodeDefinitionID, err)
-		}
-		if nodeCarriesKeys(dc) {
-			return nil, fmt.Errorf("%w: node definition %s cannot carry workflow or group keys", model.ErrInvalid, n.NodeDefinitionID)
-		}
-		if n.Type != "" && n.Type != dc.Type {
-			return nil, fmt.Errorf("%w: node %s declares type %s but node definition %s is %s",
-				model.ErrInvalid, n.ID, n.Type, n.NodeDefinitionID, dc.Type)
-		}
-		merged := *dc
-		merged.ID = n.ID
-		merged.NodeDefinitionID = n.NodeDefinitionID
-		if n.Name != "" {
-			merged.Name = n.Name
-		}
-		// Lifecycle hooks: an omitted occurrence hook inherits the
-		// definition's; an explicit object replaces it; an explicit null
-		// disables it.
-		if n.PreScriptSet {
-			merged.PreScript = n.PreScript
-			merged.PreScriptSet = true
-		}
-		if n.PostScriptSet {
-			merged.PostScript = n.PostScript
-			merged.PostScriptSet = true
-		}
-		merged.NextNode = n.NextNode
-		if strings.TrimSpace(n.OutputProperty) != "" {
-			merged.OutputProperty = n.OutputProperty
-		}
-		if n.OnFailure != nil {
-			if merged.Type != model.NodeTypeExternalCall && merged.Type != model.NodeTypePoller {
-				if _, ok := model.LookupCustomType(string(merged.Type)); !ok {
-					return nil, fmt.Errorf("%w: node %s is %s which does not support on_failure", model.ErrInvalid, n.ID, merged.Type)
-				}
-			}
-			merged.OnFailure = n.OnFailure
-		}
-		if n.Group != nil {
-			if merged.Group == nil {
-				return nil, fmt.Errorf("%w: node %s defines keys but node definition %s is not a group",
-					model.ErrInvalid, n.ID, n.NodeDefinitionID)
-			}
-			merged.Group.Keys = n.Group.Keys
-		}
-		if n.RetryOnRecovery {
-			merged.RetryOnRecovery = true
-		}
-		if n.Metadata != nil {
-			merged.Metadata = n.Metadata
-		}
-		return &merged, nil
-	}
-	if n.Group != nil {
-		g := &model.GroupContent{StartNodeID: n.Group.StartNodeID, Keys: n.Group.Keys}
-		for _, child := range n.Group.Nodes {
-			m, err := s.materializeNode(ctx, child)
-			if err != nil {
-				return nil, err
-			}
-			g.Nodes = append(g.Nodes, m)
-		}
-		ng := *n
-		ng.Group = g
-		return &ng, nil
-	}
-	return n, nil
+	return s.mat.Materialize(ctx, wc)
 }
 
 // collectNodeRefs gathers the distinct node definition ids referenced by a

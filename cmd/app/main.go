@@ -38,6 +38,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/handler"
 	"github.com/simpwf/workflow-engine/internal/workflow/inputtransport"
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/scheduler"
@@ -260,6 +261,9 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	nodeSvc := service.NewNodeDefinitionService(nodeDefs, nodeLimits, actor)
 	wfSvc := service.NewWorkflowDefinitionService(wfDefs, nodeDefs, nodeLimits, actor)
 	secretSvc := service.NewSecretService(secrets)
+	// mat resolves definition references for the engine loader directly,
+	// keeping the engine's runtime path free of the service layer.
+	mat := kernel.NewMaterializer(nodeDefs, nodeLimits)
 
 	// Optional broker clients. They exist only when their DSN is configured;
 	// a configured but unreachable broker fails startup. The close defers are
@@ -311,7 +315,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		if err != nil {
 			return nil, err
 		}
-		return wfSvc.Materialize(ctx, wc)
+		return mat.Materialize(ctx, wc)
 	}
 	eng := engine.NewEngine(instances, repository.NewParallelRepository(db), executors, hookRunner, limits, loader, actor, leanOpts)
 	instSvc := service.NewInstanceServiceWithCatalog(

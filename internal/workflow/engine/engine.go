@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/contextdiff"
@@ -176,7 +177,7 @@ func (e *Engine) enterGroup(ctx context.Context, sc *execScope, g *workflowGraph
 	if err != nil {
 		return e.failWithContext(ctx, sc, err, ctxMap, nil)
 	}
-	if _, err := EnterGroup(frame, g, nc.ID); err != nil {
+	if _, err := kernel.EnterGroup(frame, g, nc.ID); err != nil {
 		return e.fail(ctx, sc, err)
 	}
 	_ = e.appendEvent(ctx, sc, "group_entered", map[string]any{"node_id": nc.ID})
@@ -576,13 +577,13 @@ func (e *Engine) executeStep(ctx context.Context, sc *execScope, g *workflowGrap
 	}
 	_ = e.appendEvent(ctx, sc, "node_finished", map[string]any{"node_id": nc.ID, "occurrence_id": attempt.ID, "attempt": attempt.Attempt})
 
-	done, exited, err := Advance(frame, g, next)
+	done, exited, err := kernel.Advance(frame, g, next)
 	if err != nil {
 		return e.fail(ctx, sc, err)
 	}
 	finalCtx := outCtx
 	if len(exited) > 0 {
-		finalCtx, err = RunExitedGroupPosts(ctx, e.hooks, g, exited, outCtx)
+		finalCtx, err = kernel.RunExitedGroupPosts(ctx, e.hooks, g, exited, outCtx)
 		if err != nil {
 			// The child attempt is already finished; the failure is a
 			// structural hook failure. Preserve the latest context instead
@@ -610,32 +611,6 @@ func (e *Engine) executeStep(ctx context.Context, sc *execScope, g *workflowGrap
 		return e.checkpoint(ctx, sc, frame, counters, finalCtx, model.WorkflowFinished, "", "", &now, commit)
 	}
 	return e.checkpoint(ctx, sc, frame, counters, finalCtx, e.nextStatus(sc), "", "", nil, commit)
-}
-
-// ExitedGroupLookup resolves a group node by id for post-exit hooks.
-type ExitedGroupLookup interface {
-	Node(id string) (*model.NodeContent, error)
-}
-
-// RunExitedGroupPosts executes the post_script of each exited group
-// innermost-first, threading the workflow context through the hooks in
-// order. The returned context is the last successfully transformed one:
-// when a hook fails it is the context before that hook, so the caller can
-// persist the latest completed state.
-func RunExitedGroupPosts(ctx context.Context, hooks *executor.HookRunner, lookup ExitedGroupLookup, exited []string, ctxMap map[string]any) (map[string]any, error) {
-	curCtx := ctxMap
-	for _, gid := range exited {
-		gnc, err := lookup.Node(gid)
-		if err != nil {
-			return curCtx, err
-		}
-		next, err := hooks.RunPost(ctx, gnc, curCtx, nil)
-		if err != nil {
-			return curCtx, err
-		}
-		curCtx = next
-	}
-	return curCtx, nil
 }
 
 // routeFailure records a handled execution failure on an external_call,
@@ -711,13 +686,13 @@ func (e *Engine) routeFailure(ctx context.Context, sc *execScope, g *workflowGra
 		"reason":          reason,
 	})
 
-	done, exited, err := Advance(frame, g, nc.OnFailure.NextNode)
+	done, exited, err := kernel.Advance(frame, g, nc.OnFailure.NextNode)
 	if err != nil {
 		return e.fail(ctx, sc, err)
 	}
 	finalCtx := outCtx
 	if len(exited) > 0 {
-		finalCtx, err = RunExitedGroupPosts(ctx, e.hooks, g, exited, outCtx)
+		finalCtx, err = kernel.RunExitedGroupPosts(ctx, e.hooks, g, exited, outCtx)
 		if err != nil {
 			return e.failWithContext(ctx, sc, err, finalCtx, &contextCommit{
 				start:        startCtx,

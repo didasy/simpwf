@@ -182,7 +182,7 @@ func (idx *parallelTreeIndex) walkBranch(s *NodeContent, branch string, parents 
 	visited := map[string]bool{}
 	reached := false
 	work := []parallelCursor{{node: s.ParallelBranches[branch], stack: append([]string(nil), base...)}}
-	// advance mirrors engine.Advance but never pops below the start's own
+	// advance mirrors kernel.Advance but never pops below the start's own
 	// group stack: leaving it means the path escaped the parallel scope.
 	advance := func(work []parallelCursor, from, next string, stack []string) ([]parallelCursor, error) {
 		stack = append([]string(nil), stack...)

@@ -1,10 +1,10 @@
-package engine_test
+package kernel_test
 
 import (
 	"fmt"
 	"testing"
 
-	"github.com/simpwf/workflow-engine/internal/workflow/engine"
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 )
 
@@ -58,7 +58,7 @@ func newGraph() mapGraph {
 func TestEnterGroup(t *testing.T) {
 	g := newGraph()
 	frame := model.NewFrame("a")
-	next, err := engine.EnterGroup(&frame, g, "g1")
+	next, err := kernel.EnterGroup(&frame, g, "g1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestEnterGroup(t *testing.T) {
 func TestEnterGroupUnknownStart(t *testing.T) {
 	g := newGraph()
 	frame := model.NewFrame("g1")
-	if _, err := engine.EnterGroup(&frame, g, "ghost-group"); err == nil {
+	if _, err := kernel.EnterGroup(&frame, g, "ghost-group"); err == nil {
 		t.Error("EnterGroup() error = nil, want error for unknown group")
 	}
 }
@@ -81,14 +81,14 @@ func TestEnterGroupUnknownStart(t *testing.T) {
 func TestAdvanceChain(t *testing.T) {
 	g := newGraph()
 	frame := model.NewFrame("a")
-	done, _, err := engine.Advance(&frame, g, "b")
+	done, _, err := kernel.Advance(&frame, g, "b")
 	if err != nil || done {
 		t.Fatalf("Advance() = done %v, err %v", done, err)
 	}
 	if frame.CurrentNodeID != "b" {
 		t.Errorf("current = %q, want b", frame.CurrentNodeID)
 	}
-	done, _, err = engine.Advance(&frame, g, "c")
+	done, _, err = kernel.Advance(&frame, g, "c")
 	if err != nil || done {
 		t.Fatalf("Advance() = done %v, err %v", done, err)
 	}
@@ -100,7 +100,7 @@ func TestAdvanceChain(t *testing.T) {
 func TestAdvanceFinishesAtTopLevel(t *testing.T) {
 	g := newGraph()
 	frame := model.NewFrame("c")
-	done, _, err := engine.Advance(&frame, g, "")
+	done, _, err := kernel.Advance(&frame, g, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestAdvanceExitsGroupOnEmptyNext(t *testing.T) {
 	// g1.next = "" (top level link of the group); g1n2 has no next -> exit g1 -> finish.
 	frame := model.NewFrame("g1n2")
 	frame.GroupStack = []string{"g1"}
-	done, exited, err := engine.Advance(&frame, g, "")
+	done, exited, err := kernel.Advance(&frame, g, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestAdvanceFollowsGroupLinkAfterExit(t *testing.T) {
 	g.next["g1"] = "b" // group link continues to b at top level
 	frame := model.NewFrame("g1n2")
 	frame.GroupStack = []string{"g1"}
-	done, _, err := engine.Advance(&frame, g, "")
+	done, _, err := kernel.Advance(&frame, g, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestAdvancePopsNestedGroups(t *testing.T) {
 	g.start["g2"] = "g2n1"
 	frame := model.NewFrame("g2n1")
 	frame.GroupStack = []string{"g1", "g2"}
-	done, exited, err := engine.Advance(&frame, g, "")
+	done, exited, err := kernel.Advance(&frame, g, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestAdvanceConditionTrueEndsGroup(t *testing.T) {
 	g.next["g1"] = "b"
 	frame := model.NewFrame("g1n1")
 	frame.GroupStack = []string{"g1"}
-	done, _, err := engine.Advance(&frame, g, "")
+	done, _, err := kernel.Advance(&frame, g, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestAdvanceUnknownGroupLink(t *testing.T) {
 	// A group id not present in the graph surfaces a NextOf error on exit.
 	frame := model.NewFrame("g1n2")
 	frame.GroupStack = []string{"ghost-group"}
-	if _, _, err := engine.Advance(&frame, g, ""); err == nil {
+	if _, _, err := kernel.Advance(&frame, g, ""); err == nil {
 		t.Error("Advance() error = nil, want error for unknown group")
 	}
 }

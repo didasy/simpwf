@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 )
@@ -55,13 +56,13 @@ func (e *Engine) joinParallel(ctx context.Context, sc *execScope, g *workflowGra
 		return nil
 	}
 
-	done, exited, err := Advance(frame, g, nc.NextNode)
+	done, exited, err := kernel.Advance(frame, g, nc.NextNode)
 	if err != nil {
 		return e.failJoin(ctx, sc, ex.ID, err)
 	}
 	finalCtx := merged
 	if len(exited) > 0 {
-		finalCtx, err = RunExitedGroupPosts(ctx, e.hooks, g, exited, merged)
+		finalCtx, err = kernel.RunExitedGroupPosts(ctx, e.hooks, g, exited, merged)
 		if err != nil {
 			return e.failJoin(ctx, sc, ex.ID, err)
 		}
@@ -168,7 +169,7 @@ func (e *Engine) joinNestedParallel(ctx context.Context, sc *execScope, g *workf
 		return nil
 	}
 
-	done, exited, err := Advance(frame, g, nc.NextNode)
+	done, exited, err := kernel.Advance(frame, g, nc.NextNode)
 	if err != nil {
 		return e.failJoin(ctx, sc, ex.ID, err)
 	}
@@ -179,7 +180,7 @@ func (e *Engine) joinNestedParallel(ctx context.Context, sc *execScope, g *workf
 	}
 	finalCtx := merged
 	if len(exited) > 0 {
-		finalCtx, err = RunExitedGroupPosts(ctx, e.hooks, g, exited, merged)
+		finalCtx, err = kernel.RunExitedGroupPosts(ctx, e.hooks, g, exited, merged)
 		if err != nil {
 			return e.failJoin(ctx, sc, ex.ID, err)
 		}
