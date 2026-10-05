@@ -1,9 +1,15 @@
 // Package configuration loads service configuration from a YAML config file
-// or environment variables, with config-file values taking priority.
+// and environment variables, merged per key.
 //
-// Precedence (highest first): config file > environment variables > defaults.
-// When no config file is given or the given path does not exist, environment
-// variables prefixed with SIMPWF_ are used (dots in keys become underscores).
+// Precedence (highest first): environment variables > config file > defaults.
+// Every key can be set as a SIMPWF_-prefixed environment variable (dots in
+// keys become underscores, e.g. SIMPWF_WORKER_POOL_SIZE); a key absent from
+// the environment falls back to the config file, then to the code default.
+// A set-but-empty variable is treated as unset and falls back the same way.
+// The role catalog is the exception: maps cannot ride AutomaticEnv, so
+// auth.role_permissions is applied from SIMPWF_AUTH_ROLE_PERMISSIONS as a
+// post-unmarshal JSON override, where a set non-blank value wins over the
+// file and blank falls back to it.
 package configuration
 
 import (
@@ -73,12 +79,10 @@ type RabbitMQ struct {
 
 // Worker holds the ants worker pool configuration.
 type Worker struct {
-	Pool             WorkerPool    `mapstructure:"pool"`
-	ExpiryDuration   time.Duration `mapstructure:"expiry_duration"`
-	MaxBlockingTasks int           `mapstructure:"max_blocking_tasks"`
-	PreAlloc         bool          `mapstructure:"pre_alloc"`
-	NonBlocking      bool          `mapstructure:"non_blocking"`
-	DisablePurge     bool          `mapstructure:"disable_purge"`
+	// Pool sizes the engine dispatcher; StatusPool sizes the
+	// status-update dispatcher. ants internals stay on library defaults.
+	Pool       WorkerPool `mapstructure:"pool"`
+	StatusPool WorkerPool `mapstructure:"status_pool"`
 }
 
 // WorkerPool holds the pool size.
@@ -106,13 +110,18 @@ type Engine struct {
 	MaxTotalExecutions   int           `mapstructure:"max_total_executions"`
 	LeaseDuration        time.Duration `mapstructure:"lease_duration"`
 	ClaimBatchSize       int           `mapstructure:"claim_batch_size"`
-	MaxOutputBytes       int           `mapstructure:"max_output_bytes"`
-	MaxRedirects         int           `mapstructure:"max_redirects"`
-	HTTPAllowlist        []string      `mapstructure:"http_allowlist"`
-	ExecAllowlist        []string      `mapstructure:"exec_allowlist"`
-	LeanContextDefault   bool          `mapstructure:"lean_context_default"`
-	LeanAnchorEvery      int           `mapstructure:"lean_anchor_every"`
-	LeanReplayMax        int           `mapstructure:"lean_replay_max"`
+	// PollInterval paces both dispatchers' claim loops; HeartbeatInterval
+	// paces the engine dispatcher's lease-renewal loop (the status
+	// dispatcher has no heartbeat loop).
+	PollInterval       time.Duration `mapstructure:"poll_interval"`
+	HeartbeatInterval  time.Duration `mapstructure:"heartbeat_interval"`
+	MaxOutputBytes     int           `mapstructure:"max_output_bytes"`
+	MaxRedirects       int           `mapstructure:"max_redirects"`
+	HTTPAllowlist      []string      `mapstructure:"http_allowlist"`
+	ExecAllowlist      []string      `mapstructure:"exec_allowlist"`
+	LeanContextDefault bool          `mapstructure:"lean_context_default"`
+	LeanAnchorEvery    int           `mapstructure:"lean_anchor_every"`
+	LeanReplayMax      int           `mapstructure:"lean_replay_max"`
 	// EnvDenyExtra and EnvAllowExceptions adjust the hardcoded env snapshot
 	// deny list: extra adds patterns, allow narrows it with exceptions. They
 	// never replace the defaults, so a misconfiguration cannot silently open
@@ -238,17 +247,25 @@ func Load(opts ...Option) (*Config, error) {
 	_ = v.BindEnv("engine.env_deny_extra", "SIMPWF_ENGINE_ENV_DENY_EXTRA")
 	_ = v.BindEnv("engine.env_allow_exceptions", "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS")
 
-	fileRead := false
 	if _, err := os.Stat(path); err == nil {
 		v.SetConfigFile(path)
 		if err := v.ReadInConfig(); err != nil {
 			return nil, fmt.Errorf("configuration: read config file %s: %w", path, err)
 		}
-		fileRead = true
 	}
-	if !fileRead {
-		v.AutomaticEnv()
+	// auth.role_permissions cannot ride AutomaticEnv: a set-but-blank
+	// SIMPWF_AUTH_ROLE_PERMISSIONS would shadow the file subtree with an
+	// empty catalog during unmarshal. When the JSON override below will
+	// not run (unset or blank), pin the file value above the environment
+	// so it survives.
+	if strings.TrimSpace(os.Getenv("SIMPWF_AUTH_ROLE_PERMISSIONS")) == "" {
+		if fileVal := v.Get("auth.role_permissions"); fileVal != nil {
+			v.Set("auth.role_permissions", fileVal)
+		}
 	}
+	// AutomaticEnv runs whether or not a file was read, so every key
+	// merges per key: environment > file > defaults.
+	v.AutomaticEnv()
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg, viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
@@ -306,11 +323,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("infra.rabbitmq.output_queue", "simpwf.output")
 	v.SetDefault("infra.rabbitmq.status_queue", "simpwf.status")
 	v.SetDefault("worker.pool.size", 1000)
-	v.SetDefault("worker.expiry_duration", "5m")
-	v.SetDefault("worker.max_blocking_tasks", 16)
-	v.SetDefault("worker.pre_alloc", false)
-	v.SetDefault("worker.non_blocking", false)
-	v.SetDefault("worker.disable_purge", false)
+	v.SetDefault("worker.status_pool.size", 20)
 	v.SetDefault("scheduler.enabled", true)
 	v.SetDefault("scheduler.refresh_interval", "30s")
 	v.SetDefault("engine.default_node_timeout", "30s")
@@ -322,6 +335,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.max_total_executions", 0)
 	v.SetDefault("engine.lease_duration", "0s")
 	v.SetDefault("engine.claim_batch_size", 0)
+	v.SetDefault("engine.poll_interval", "200ms")
+	v.SetDefault("engine.heartbeat_interval", "5s")
 	v.SetDefault("engine.max_output_bytes", 0)
 	v.SetDefault("engine.max_redirects", 0)
 	v.SetDefault("engine.http_allowlist", []string{})
@@ -346,6 +361,9 @@ func (c *Config) validate() error {
 	if c.Worker.Pool.Size <= 0 {
 		return errors.New("configuration: worker.pool.size must be > 0")
 	}
+	if c.Worker.StatusPool.Size <= 0 {
+		return errors.New("configuration: worker.status_pool.size must be > 0")
+	}
 	if c.Scheduler.RefreshInterval <= 0 {
 		return errors.New("configuration: scheduler.refresh_interval must be > 0")
 	}
@@ -357,6 +375,12 @@ func (c *Config) validate() error {
 	}
 	if c.Engine.ConditionTimeout <= 0 {
 		return errors.New("configuration: engine.condition_timeout must be > 0")
+	}
+	if c.Engine.PollInterval <= 0 {
+		return errors.New("configuration: engine.poll_interval must be > 0")
+	}
+	if c.Engine.HeartbeatInterval <= 0 {
+		return errors.New("configuration: engine.heartbeat_interval must be > 0")
 	}
 	if c.Engine.LeanAnchorEvery <= 0 {
 		return errors.New("configuration: engine.lean_anchor_every must be > 0")

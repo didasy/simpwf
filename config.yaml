@@ -25,15 +25,14 @@ infra:
     output_queue: "simpwf.output"
     status_queue: "simpwf.status"
 
-# github.com/panjf2000/ants/v2 worker pool for node transitions.
+# github.com/panjf2000/ants/v2 worker pools: pool drives engine node
+# transitions, status_pool drives status-update delivery. ants internals
+# stay on library defaults by design.
 worker:
   pool:
     size: 100
-  expiry_duration: 5m
-  max_blocking_tasks: 16
-  pre_alloc: false
-  non_blocking: false
-  disable_purge: false
+  status_pool:
+    size: 20
 
 # Cron scheduler firing loop. Every enabled replica fires the same ticks,
 # but the fire claim keeps each tick to one instance; disable on replicas
@@ -57,6 +56,11 @@ engine:
   max_total_executions: 1000
   lease_duration: 30s
   claim_batch_size: 10
+  # Claim-loop pacing shared by both dispatchers; heartbeat_interval paces
+  # the engine dispatcher's lease-renewal loop (the status dispatcher has
+  # no heartbeat loop).
+  poll_interval: 200ms
+  heartbeat_interval: 5s
   max_output_bytes: 1048576
   max_redirects: 5
   # Operator overrides: SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT,

@@ -116,9 +116,7 @@ func TestRunShutsDownGracefully(t *testing.T) {
 			PostgreSQL: configuration.PostgreSQL{DSN: dsn},
 		},
 		Worker: configuration.Worker{
-			Pool:             configuration.WorkerPool{Size: 4},
-			ExpiryDuration:   time.Minute,
-			MaxBlockingTasks: 4,
+			Pool: configuration.WorkerPool{Size: 4},
 		},
 		Scheduler: configuration.Scheduler{Enabled: true},
 	}
