@@ -7,10 +7,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/defcache"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// statusUpdateCacheSize bounds the parsed status_update config caches owned
+// by the instance and parallel repositories.
+const statusUpdateCacheSize = 1024
+
+// statusUpdateCache memoizes parsed status_update configs by definition ID,
+// including the nil "not configured" negative. Definitions are immutable,
+// so entries need no invalidation; the cached configs are shared and must
+// not be mutated.
+type statusUpdateCache = defcache.Cache[string, *model.StatusUpdateConfig]
 
 // ErrStatusUpdateClaimLost reports a delivery attempt on an outbox row the
 // worker no longer holds (lease expired, taken over, or already resolved).
@@ -244,20 +255,24 @@ func redactStatusUpdateError(contextRaw []byte, errMsg string) string {
 // skips silently; a definition with an invalid status_update block fails
 // the transaction.
 func (r *instanceRepo) enqueueStatusUpdate(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, contextRaw []byte, at time.Time) error {
-	return enqueueStatusUpdateTx(ctx, tx, instanceID, definitionID, revision, from, to, events, errMsg, contextRaw, at)
+	return enqueueStatusUpdateTx(ctx, tx, instanceID, definitionID, revision, from, to, events, errMsg, contextRaw, at, r.statusUpdateCache)
 }
 
 // enqueueStatusUpdateTx is the receiver-free enqueue used by repositories
-// other than instanceRepo inside their own transactions.
-func enqueueStatusUpdateTx(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, contextRaw []byte, at time.Time) error {
+// other than instanceRepo inside their own transactions. cache is the
+// caller's repository cache; a miss reads the definition inside tx so a
+// newly stored definition resolves in the same transaction.
+func enqueueStatusUpdateTx(ctx context.Context, tx *gorm.DB, instanceID, definitionID string, revision int64, from, to statusWithReason, events []string, errMsg string, contextRaw []byte, at time.Time, cache *statusUpdateCache) error {
 	if len(events) == 0 || definitionID == "" {
 		return nil
 	}
-	var def WorkflowDefinitionModel
-	if err := tx.Where("id = ?", definitionID).First(&def).Error; err != nil {
-		return err
-	}
-	cfg, err := model.ParseStatusUpdate(json.RawMessage(def.Content))
+	cfg, err := cache.GetOrCompute(definitionID, func() (*model.StatusUpdateConfig, error) {
+		var def WorkflowDefinitionModel
+		if err := tx.Where("id = ?", definitionID).First(&def).Error; err != nil {
+			return nil, err
+		}
+		return model.ParseStatusUpdate(json.RawMessage(def.Content))
+	})
 	if err != nil {
 		return err
 	}

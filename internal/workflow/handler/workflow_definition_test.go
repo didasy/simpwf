@@ -58,6 +58,14 @@ func (f *fakeWorkflowSvc) Materialize(_ context.Context, wc *model.WorkflowConte
 	return wc, nil
 }
 
+func (f *fakeWorkflowSvc) Resolve(ctx context.Context, id string) (*model.WorkflowContent, error) {
+	def, err := f.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return model.ParseWorkflowContent(def.Content, model.NodeLimits{})
+}
+
 // Schemas mirrors the service degrade contract: content that cannot be
 // parsed yields the types it declares.
 func (f *fakeWorkflowSvc) Schemas(_ context.Context, content json.RawMessage) map[string]json.RawMessage {

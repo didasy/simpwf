@@ -6,10 +6,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/defcache"
 	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 )
+
+// resolveCacheSize bounds the materialized-definition cache. Definitions
+// are immutable per ID, so entries need no invalidation; the working set
+// of live definitions fits comfortably under the cap.
+const resolveCacheSize = 1024
 
 // CreateWorkflowDefinition is the input for creating a workflow definition
 // (or the next version of an existing lineage).
@@ -33,6 +39,9 @@ type WorkflowDefinitionService interface {
 	// Materialize resolves node_definition_id references against the
 	// immutable node definitions and returns the executable node tree.
 	Materialize(ctx context.Context, wc *model.WorkflowContent) (*model.WorkflowContent, error)
+	// Resolve loads a stored definition by ID and returns its cached
+	// materialized tree. The returned tree is shared and READ-ONLY.
+	Resolve(ctx context.Context, defID string) (*model.WorkflowContent, error)
 	// Schemas returns the node-object schemas for the types used by a
 	// stored definition, keyed by type. A definition that cannot be
 	// parsed or whose references cannot be resolved degrades to the types
@@ -41,11 +50,12 @@ type WorkflowDefinitionService interface {
 }
 
 type workflowDefinitionService struct {
-	repo     repository.WorkflowDefinitionRepository
-	nodeRepo repository.NodeDefinitionRepository
-	limits   model.NodeLimits
-	actor    string
-	mat      *kernel.Materializer
+	repo         repository.WorkflowDefinitionRepository
+	nodeRepo     repository.NodeDefinitionRepository
+	limits       model.NodeLimits
+	actor        string
+	mat          *kernel.Materializer
+	resolveCache *defcache.Cache[string, *model.WorkflowContent]
 }
 
 // NewWorkflowDefinitionService builds the service.
@@ -55,7 +65,7 @@ func NewWorkflowDefinitionService(
 	limits model.NodeLimits,
 	actor string,
 ) WorkflowDefinitionService {
-	return &workflowDefinitionService{repo: repo, nodeRepo: nodeRepo, limits: limits, actor: actor, mat: kernel.NewMaterializer(nodeRepo, limits)}
+	return &workflowDefinitionService{repo: repo, nodeRepo: nodeRepo, limits: limits, actor: actor, mat: kernel.NewMaterializer(nodeRepo, limits), resolveCache: defcache.New[string, *model.WorkflowContent](resolveCacheSize)}
 }
 
 func (s *workflowDefinitionService) Create(ctx context.Context, req CreateWorkflowDefinition) (model.WorkflowDefinition, error) {
@@ -209,6 +219,30 @@ func declaredNodeTypes(content []byte) map[string]bool {
 // the workflow-owned graph fields.
 func (s *workflowDefinitionService) Materialize(ctx context.Context, wc *model.WorkflowContent) (*model.WorkflowContent, error) {
 	return s.mat.Materialize(ctx, wc)
+}
+
+// Resolve loads a stored definition by ID and returns its materialized
+// tree, fetching+parsing+materializing once per ID and serving later calls
+// from the cache. The returned tree is shared and must not be mutated.
+// A fetch failure passes through unwrapped; unparseable content and
+// unresolvable references fail as model.ErrInvalid. Failures are never
+// cached, so a retry recomputes.
+func (s *workflowDefinitionService) Resolve(ctx context.Context, defID string) (*model.WorkflowContent, error) {
+	return s.resolveCache.GetOrCompute(defID, func() (*model.WorkflowContent, error) {
+		def, err := s.repo.GetByID(ctx, defID)
+		if err != nil {
+			return nil, err
+		}
+		wc, err := model.ParseWorkflowContent(def.Content, s.limits)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+		}
+		wc, err = s.Materialize(ctx, wc)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
+		}
+		return wc, nil
+	})
 }
 
 // collectNodeRefs gathers the distinct node definition ids referenced by a

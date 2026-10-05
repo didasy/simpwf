@@ -38,7 +38,6 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/handler"
 	"github.com/simpwf/workflow-engine/internal/workflow/inputtransport"
-	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/scheduler"
@@ -52,7 +51,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout = 10 * time.Second
+	// statusLoaderCacheSize bounds the memoized status_update configs
+	// served to the delivery dispatcher.
+	statusLoaderCacheSize = 1024
+)
 
 func main() {
 	configPath := flag.String("config", "", "path to config file (default: config.yaml in working directory)")
@@ -276,9 +280,6 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	nodeSvc := service.NewNodeDefinitionService(nodeDefs, nodeLimits, actor)
 	wfSvc := service.NewWorkflowDefinitionService(wfDefs, nodeDefs, nodeLimits, actor)
 	secretSvc := service.NewSecretService(secrets)
-	// mat resolves definition references for the engine loader directly,
-	// keeping the engine's runtime path free of the service layer.
-	mat := kernel.NewMaterializer(nodeDefs, nodeLimits)
 
 	// Optional broker clients. They exist only when their DSN is configured;
 	// a configured but unreachable broker fails startup. The close defers are
@@ -322,15 +323,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		if err != nil {
 			return nil, err
 		}
-		def, err := wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
-		if err != nil {
-			return nil, err
-		}
-		wc, err := model.ParseWorkflowContent(def.Content, nodeLimits)
-		if err != nil {
-			return nil, err
-		}
-		return mat.Materialize(ctx, wc)
+		return wfSvc.Resolve(ctx, inst.WorkflowDefinitionID)
 	}
 	eng := engine.NewEngine(instances, repository.NewParallelRepository(db), executors, hookRunner, limits, loader, actor, leanOpts)
 	instSvc := service.NewInstanceServiceWithCatalog(
@@ -453,6 +446,9 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 		return model.ParseStatusUpdate(def.Content)
 	}
+	// Definitions are immutable: parse each definition's status_update
+	// block once and serve every later delivery from the cache.
+	statusLoader = statusupdate.CachedLoader(statusLoader, statusLoaderCacheSize)
 	statusPublishers := map[string]statusupdate.Publisher{
 		model.StatusUpdateTransportHTTP: statusupdate.NewHTTPPublisher(executor.NewHTTPExecutor(execLimits), 0),
 	}
