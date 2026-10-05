@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/auth"
-	"github.com/simpwf/workflow-engine/internal/workflow/engine"
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/form"
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/contextdiff"
@@ -1995,12 +1995,12 @@ func (s *instanceService) DeliverInput(ctx context.Context, req DeliverInput) (*
 	newCtx = postCtx
 
 	next := inputNode.NextNode
-	done, exited, err := engine.Advance(&frame, graph, next)
+	done, exited, err := kernel.Advance(&frame, graph, next)
 	if err != nil {
 		return nil, err
 	}
 	if len(exited) > 0 {
-		finalCtx, herr := engine.RunExitedGroupPosts(ctx, s.hooks, graph, exited, newCtx)
+		finalCtx, herr := kernel.RunExitedGroupPosts(ctx, s.hooks, graph, exited, newCtx)
 		if herr != nil {
 			// The input attempt finished; the structural group hook failure
 			// fails the scope with the latest completed context.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/kernel"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/pkg/ids"
@@ -62,7 +63,7 @@ func (s *nodeDefinitionService) Create(ctx context.Context, req CreateNodeDefini
 	if err != nil {
 		return model.NodeDefinition{}, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
-	if nodeCarriesKeys(nc) {
+	if kernel.NodeCarriesKeys(nc) {
 		return model.NodeDefinition{}, fmt.Errorf("%w: node definitions cannot carry workflow or group keys", model.ErrInvalid)
 	}
 	// A definition is the leaf of the reference chain: materializeNode
@@ -103,21 +104,6 @@ func (s *nodeDefinitionService) Create(ctx context.Context, req CreateNodeDefini
 		return model.NodeDefinition{}, err
 	}
 	return def, nil
-}
-
-func nodeCarriesKeys(n *model.NodeContent) bool {
-	if n.Group == nil {
-		return false
-	}
-	if n.Group.Keys != nil {
-		return true
-	}
-	for _, child := range n.Group.Nodes {
-		if nodeCarriesKeys(child) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *nodeDefinitionService) Get(ctx context.Context, id string) (model.NodeDefinition, error) {

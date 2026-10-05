@@ -1,6 +1,6 @@
-// Package engine implements the durable cursor/frame state machine, the
-// leased dispatcher, and node execution for workflow instances.
-package engine
+// Package kernel holds the workflow mechanics shared by the engine and
+// service packages, free of dependencies on either.
+package kernel
 
 import (
 	"fmt"
