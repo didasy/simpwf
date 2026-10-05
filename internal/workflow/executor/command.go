@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -13,10 +14,40 @@ import (
 
 // CommandExecutor runs external commands with direct argv (never a shell)
 // under an executable allowlist, a per-node timeout enforced by killing the
-// whole process group, and capped output capture.
+// whole process group, and capped output capture. Both the allowlist and the
+// requested executable must be absolute paths; matching is on the canonical
+// path after symlink resolution, and the canonical path is what executes.
 type CommandExecutor struct {
-	allowlist []string
+	allowlist map[string]struct{}
 	maxOutput int
+}
+
+// NewCommandExecutor builds a CommandExecutor over the canonical form of
+// allowlist. A non-absolute or unresolvable entry panics: bad allowlist
+// config must fail fast at startup, never per-request.
+func NewCommandExecutor(allowlist []string, maxOutput int) *CommandExecutor {
+	canonical := make(map[string]struct{}, len(allowlist))
+	for _, entry := range allowlist {
+		c, err := canonicalizeExecutable(entry)
+		if err != nil {
+			panic(fmt.Sprintf("executor: engine.exec_allowlist entry %q must be an absolute path, e.g. %q: %v", entry, "/bin/echo", err))
+		}
+		canonical[c] = struct{}{}
+	}
+	return &CommandExecutor{allowlist: canonical, maxOutput: maxOutput}
+}
+
+// canonicalizeExecutable resolves exe to its canonical absolute path. It
+// fails for non-absolute input and when the path cannot be resolved.
+func canonicalizeExecutable(exe string) (string, error) {
+	if !filepath.IsAbs(exe) {
+		return "", fmt.Errorf("not an absolute path")
+	}
+	abs, err := filepath.Abs(exe)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
 }
 
 func (e *CommandExecutor) Execute(ctx context.Context, req Request) (*Result, error) {
@@ -25,7 +56,8 @@ func (e *CommandExecutor) Execute(ctx context.Context, req Request) (*Result, er
 		return nil, &NodeError{Node: req.Node, Reason: "command", Err: fmt.Errorf("empty command")}
 	}
 	exe := cfg.Command[0]
-	if !e.allowedExecutable(exe) {
+	canonical, ok := e.allowedExecutable(exe)
+	if !ok {
 		return nil, &NodeError{Node: req.Node, Reason: "command", Err: fmt.Errorf("executable %q not in allowlist", exe)}
 	}
 	stdin := ""
@@ -40,7 +72,7 @@ func (e *CommandExecutor) Execute(ctx context.Context, req Request) (*Result, er
 	ctx, cancel := context.WithTimeout(ctx, nodeTimeout(req.Node))
 	defer cancel()
 
-	cmd := exec.Command(exe, cfg.Command[1:]...)
+	cmd := exec.Command(canonical, cfg.Command[1:]...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr cappedBuffer
 	stdout.max = e.maxOutput
@@ -88,17 +120,16 @@ func (e *CommandExecutor) Execute(ctx context.Context, req Request) (*Result, er
 	return res, nil
 }
 
-func (e *CommandExecutor) allowedExecutable(exe string) bool {
-	base := exe
-	if i := strings.LastIndexByte(exe, '/'); i >= 0 {
-		base = exe[i+1:]
+// allowedExecutable reports whether exe is allowlisted, returning the
+// canonical path to execute. Non-absolute input and resolution failures
+// fail closed.
+func (e *CommandExecutor) allowedExecutable(exe string) (string, bool) {
+	canonical, err := canonicalizeExecutable(exe)
+	if err != nil {
+		return "", false
 	}
-	for _, entry := range e.allowlist {
-		if entry == exe || entry == base {
-			return true
-		}
-	}
-	return false
+	_, ok := e.allowlist[canonical]
+	return canonical, ok
 }
 
 func exitCodeOf(cmd *exec.Cmd) int {

@@ -162,7 +162,7 @@ const externalCallNodeSchemaJSON = `{
     },
     "execution_config": {
       "type": "object",
-      "description": "Allowlisted command execution. argv is literal and never passed through a shell.",
+      "description": "Allowlisted command execution. argv is literal and never passed through a shell. command[0] must be an absolute path in engine.exec_allowlist.",
       "properties": {
         "command": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
         "stdin": { "type": "string" }
