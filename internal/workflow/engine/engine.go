@@ -869,6 +869,10 @@ func (e *Engine) failWithContext(ctx context.Context, sc *execScope, cause error
 	return e.checkpoint(ctx, sc, &frame, counters, ctxMap, model.WorkflowFailed, "", cause.Error(), &now, commit)
 }
 
+// maxCheckpointAttempts bounds the commit-only retry on revision conflict:
+// the initial fence plus up to 2 retries.
+const maxCheckpointAttempts = 3
+
 // checkpoint commits the transition under the worker's lease and revision.
 // A debug step that lands paused appends a debug-marked paused event so
 // UIs can tell step-through pauses from operator pauses. Branch scopes map
@@ -910,6 +914,46 @@ func (e *Engine) checkpoint(ctx context.Context, sc *execScope, frame *model.Fra
 	err = e.instances.Checkpoint(ctx, cp)
 	if errors.Is(err, repository.ErrLeaseLost) {
 		// Stop won the race; the worker is fenced and aborts silently.
+		return nil
+	}
+	// A Pause or Resume landing mid-execution bumps the revision and fences
+	// the commit. The failed fence wrote nothing, so re-issue the same
+	// commit against the fresh row (no re-execution): the fresh
+	// pause_requested flag wins in both directions. Terminal statuses pass
+	// through untouched; only the pause overlay on park statuses is
+	// recomputed. History stays as computed; events stay outside the loop.
+	for attempt := 1; errors.Is(err, repository.ErrRevisionConflict) && attempt < maxCheckpointAttempts; attempt++ {
+		fresh, ferr := e.instances.GetByID(ctx, sc.instanceID)
+		if ferr != nil {
+			return err
+		}
+		if fresh.LeasedBy != sc.leasedBy {
+			return nil
+		}
+		if fresh.Status != model.WorkflowRunning {
+			slog.Warn("checkpoint conflict on non-running instance; aborting commit",
+				"instance", sc.instanceID, "status", fresh.Status)
+			return nil
+		}
+		sc.revision = fresh.Revision
+		sc.pauseRequested = fresh.PauseRequested
+		cp.Revision = fresh.Revision
+		cp.PauseRequested = fresh.PauseRequested
+		if cp.Status == model.WorkflowWaiting || cp.Status == model.WorkflowPaused {
+			cp.Status = e.nextStatus(sc)
+		}
+		err = e.instances.Checkpoint(ctx, cp)
+		if errors.Is(err, repository.ErrLeaseLost) {
+			return nil
+		}
+	}
+	if errors.Is(err, repository.ErrRevisionConflict) {
+		// Persistent conflict under control-write spam: never return the
+		// error while holding the lease (that wedges the instance).
+		// Release our own lease instead so the next ClaimNext redrives.
+		_ = e.instances.ReleaseLease(ctx, sc.instanceID, sc.leasedBy)
+		slog.Warn("checkpoint revision conflict exhausted; lease released for redrive",
+			"instance", sc.instanceID, "attempts", maxCheckpointAttempts, "revision", sc.revision)
 		return nil
 	}
 	if err != nil {
