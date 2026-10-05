@@ -12,6 +12,20 @@ infra:
     swagger_enabled: true
   postgresql:
     dsn: "host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable TimeZone=Asia/Jakarta"
+    # Pool ceiling (per replica). Size max_open_conns ≈ (engine workers ×
+    # peak queries per transition) + headroom, divided across expected
+    # replicas. Exhaustion degrades to latency, not errors (database/sql
+    # queues for a free connection), and GORM holds a connection only per
+    # query — so the 25 default trades tail latency for Postgres safety
+    # under replica growth. Operator overrides:
+    # SIMPWF_INFRA_POSTGRESQL_MAX_OPEN_CONNS,
+    # SIMPWF_INFRA_POSTGRESQL_MAX_IDLE_CONNS,
+    # SIMPWF_INFRA_POSTGRESQL_CONN_MAX_LIFETIME,
+    # SIMPWF_INFRA_POSTGRESQL_CONN_MAX_IDLE_TIME.
+    max_open_conns: 25
+    max_idle_conns: 25
+    conn_max_lifetime: 5m
+    conn_max_idle_time: 5m
   # Optional Redis (pub/sub input, output, and status channels). Set the DSN
   # (e.g. redis://localhost:6379/0) to enable.
   redis:

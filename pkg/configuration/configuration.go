@@ -55,9 +55,14 @@ type HTTP struct {
 	SwaggerEnabled bool   `mapstructure:"swagger_enabled"`
 }
 
-// PostgreSQL holds the DSN for the application database.
+// PostgreSQL holds the DSN and the connection pool ceiling for the
+// application database.
 type PostgreSQL struct {
-	DSN string `mapstructure:"dsn"`
+	DSN             string        `mapstructure:"dsn"`
+	MaxOpenConns    int           `mapstructure:"max_open_conns"`
+	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time"`
 }
 
 // Redis holds the optional Redis connection. An empty DSN disables the
@@ -333,6 +338,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.clock_skew", "1m")
 	v.SetDefault("auth.oidc.cache_ttl", "5m")
 	v.SetDefault("infra.postgresql.dsn", "")
+	v.SetDefault("infra.postgresql.max_open_conns", 25)
+	v.SetDefault("infra.postgresql.max_idle_conns", 25)
+	v.SetDefault("infra.postgresql.conn_max_lifetime", "5m")
+	v.SetDefault("infra.postgresql.conn_max_idle_time", "5m")
 	v.SetDefault("infra.http.host", "localhost:8080")
 	v.SetDefault("infra.http.swagger_enabled", true)
 	// Optional brokers: empty DSN disables the transport. Queue names carry
@@ -381,6 +390,18 @@ func setDefaults(v *viper.Viper) {
 func (c *Config) validate() error {
 	if strings.TrimSpace(c.Infra.PostgreSQL.DSN) == "" {
 		return errors.New("configuration: infra.postgresql.dsn is required")
+	}
+	if c.Infra.PostgreSQL.MaxOpenConns <= 0 {
+		return errors.New("configuration: infra.postgresql.max_open_conns must be > 0")
+	}
+	if c.Infra.PostgreSQL.MaxIdleConns < 0 || c.Infra.PostgreSQL.MaxIdleConns > c.Infra.PostgreSQL.MaxOpenConns {
+		return errors.New("configuration: infra.postgresql.max_idle_conns must be >= 0 and <= infra.postgresql.max_open_conns")
+	}
+	if c.Infra.PostgreSQL.ConnMaxLifetime < 0 {
+		return errors.New("configuration: infra.postgresql.conn_max_lifetime must be >= 0")
+	}
+	if c.Infra.PostgreSQL.ConnMaxIdleTime < 0 {
+		return errors.New("configuration: infra.postgresql.conn_max_idle_time must be >= 0")
 	}
 	if c.Worker.Pool.Size <= 0 {
 		return errors.New("configuration: worker.pool.size must be > 0")
