@@ -73,9 +73,14 @@ engine:
     - "api.example.com"
     - "jsonplaceholder.typicode.com"
     - "openrouter.ai"
+  # exec_allowlist entries must be absolute paths (verified to exist in the
+  # alpine:3.20 runtime image); bare names fail startup. Each entry exposes
+  # that binary's full CLI, so prefer wrapper scripts for powerful binaries.
+  # Note: on busybox-based images every applet resolves to /bin/busybox, so
+  # one entry covers all applets.
   exec_allowlist:
-    - "echo"
-    - "ls"
+    - "/bin/echo"
+    - "/bin/ls"
   # Env snapshot deny list. At instance creation, SIMPWF_* process env is
   # snapshotted into the instance context under the reserved env root, and
   # these patterns are the credentials that never enter a workflow template:

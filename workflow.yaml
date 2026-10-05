@@ -198,10 +198,9 @@ nodes:
   # become compact JSON strings, and null values are omitted. Multipart
   # boundaries are generated automatically; file fields are not supported.
   # The sibling variant execution_config runs an allowlisted command instead
-  # (direct argv, never a shell; command[0] must be in
-  # engine.exec_allowlist by name or absolute path); see the commented
-  # example below the poller block. Exactly one of http_config /
-  # execution_config is required.
+  # (direct argv, never a shell; command[0] must be an absolute path in
+  # engine.exec_allowlist); see the commented example below the poller
+  # block. Exactly one of http_config / execution_config is required.
   - type: external_call
     id: "11111111-1111-7111-8111-111111111105"
     name: "Notify"
@@ -331,8 +330,8 @@ nodes:
 
 # ---------------------------------------------------------------------------
 # External-call execution_config example (commented). Runs an allowlisted
-# command with direct argv (never a shell): command[0] must match
-# engine.exec_allowlist by executable name or absolute path. stdin renders
+# command with direct argv (never a shell): command[0] must be an absolute
+# path matching engine.exec_allowlist. stdin renders
 # as a template against the workflow context. stdout/stderr are captured up
 # to engine.max_output_bytes (truncated flag when capped). The node output
 # is {ExitCode, Stdout, Stderr, TimedOut, Truncated}. Non-zero exit and
@@ -344,7 +343,7 @@ nodes:
 #   name: "Render thumbnail"
 #   timeout: 30s
 #   execution_config:
-#     command: ["convert", "{{ job.source }}", "-resize", "200x200", "{{ job.target }}"]
+#     command: ["/usr/bin/convert", "{{ job.source }}", "-resize", "200x200", "{{ job.target }}"]
 #     stdin: "{{ job.label }}"
 #   output_property: thumbnail
 #   next_node: "11111111-1111-7111-8111-111111111109"

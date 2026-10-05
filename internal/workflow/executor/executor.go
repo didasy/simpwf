@@ -17,8 +17,11 @@ type Limits struct {
 	// host:port (e.g. "example.com", "10.0.0.5:8080"); "*" allows any
 	// target for development and logs a warning.
 	HTTPAllowlist []string
-	// ExecAllowlist restricts executables run by command nodes. Entries
-	// match the executable name or its absolute path.
+	// ExecAllowlist restricts executables run by command nodes. Every entry
+	// must be an absolute path (e.g. "/bin/echo"); anything else panics at
+	// startup. Matching is against the canonical path after symlink
+	// resolution, and each entry exposes that binary's full CLI, so prefer
+	// wrapper scripts for powerful binaries.
 	ExecAllowlist []string
 	// MaxOutputBytes caps captured command stdout/stderr and response bodies.
 	MaxOutputBytes int
@@ -104,8 +107,9 @@ type Dependencies struct {
 
 // NewExecutors builds the executor set for every node type, merging
 // registered custom executors after the builtins. A duplicate or
-// builtin-colliding factory, or a factory build error, panics: custom
-// registration bugs must fail fast at startup, never per-request.
+// builtin-colliding factory, a factory build error, or a non-absolute or
+// unresolvable engine.exec_allowlist entry panics: configuration bugs must
+// fail fast at startup, never per-request.
 func NewExecutors(limits Limits, funcs *jsfunc.Registry, deps Dependencies) map[model.NodeType]Executor {
 	httpEx := NewHTTPExecutor(limits)
 	pollerEx := NewPollerExecutor(httpEx, funcs)
@@ -115,7 +119,7 @@ func NewExecutors(limits Limits, funcs *jsfunc.Registry, deps Dependencies) map[
 		model.NodeTypeScript:       &ScriptExecutor{funcs: funcs},
 		model.NodeTypeConditions:   &ConditionExecutor{funcs: funcs},
 		model.NodeTypeInput:        &InputExecutor{funcs: funcs},
-		model.NodeTypeExternalCall: &ExternalCallExecutor{http: httpEx, cmd: &CommandExecutor{allowlist: limits.ExecAllowlist, maxOutput: limits.MaxOutputBytes}},
+		model.NodeTypeExternalCall: &ExternalCallExecutor{http: httpEx, cmd: NewCommandExecutor(limits.ExecAllowlist, limits.MaxOutputBytes)},
 		model.NodeTypeOutput:       &OutputExecutor{publisher: deps.Output},
 		model.NodeTypePoller:       pollerEx,
 	}
