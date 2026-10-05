@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,8 +113,14 @@ func TestRunShutsDownGracefully(t *testing.T) {
 	host := freePort(t)
 	cfg := &configuration.Config{
 		Infra: configuration.Infra{
-			HTTP:       configuration.HTTP{Host: host},
-			PostgreSQL: configuration.PostgreSQL{DSN: dsn},
+			HTTP: configuration.HTTP{Host: host},
+			PostgreSQL: configuration.PostgreSQL{
+				DSN:             dsn,
+				MaxOpenConns:    25,
+				MaxIdleConns:    25,
+				ConnMaxLifetime: 5 * time.Minute,
+				ConnMaxIdleTime: 5 * time.Minute,
+			},
 		},
 		Worker: configuration.Worker{
 			Pool: configuration.WorkerPool{Size: 4},
@@ -144,6 +151,77 @@ func TestRunShutsDownGracefully(t *testing.T) {
 
 	if _, err := net.DialTimeout("tcp", host, 500*time.Millisecond); err == nil {
 		t.Error("server still listening after graceful shutdown")
+	}
+}
+
+// TestDatabaseOptions pins the config→pool mapping: explicit config values
+// reach database.New unchanged, and a Load-defaulted config never yields
+// zero pool fields (the original bug class: a bare database.Options{DSN}
+// reaching New from production).
+func TestDatabaseOptions(t *testing.T) {
+	explicit := &configuration.Config{
+		Infra: configuration.Infra{
+			PostgreSQL: configuration.PostgreSQL{
+				DSN:             "explicit-dsn",
+				MaxOpenConns:    10,
+				MaxIdleConns:    4,
+				ConnMaxLifetime: 10 * time.Minute,
+				ConnMaxIdleTime: 2 * time.Minute,
+			},
+		},
+	}
+	opts := databaseOptions(explicit)
+	if opts.DSN != "explicit-dsn" || opts.MaxOpenConns != 10 || opts.MaxIdleConns != 4 ||
+		opts.ConnMaxLifetime != 10*time.Minute || opts.ConnMaxIdleTime != 2*time.Minute {
+		t.Fatalf("databaseOptions() = %+v, want explicit config values verbatim", opts)
+	}
+
+	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", "default-dsn")
+	loaded, err := configuration.Load(configuration.WithConfigFile(filepath.Join(t.TempDir(), "does-not-exist.yaml")))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	def := databaseOptions(loaded)
+	if def.DSN != "default-dsn" {
+		t.Errorf("DSN = %q, want default-dsn", def.DSN)
+	}
+	if def.MaxOpenConns == 0 || def.MaxIdleConns == 0 || def.ConnMaxLifetime == 0 || def.ConnMaxIdleTime == 0 {
+		t.Errorf("databaseOptions() from defaults = %+v, want all pool fields non-zero", def)
+	}
+	if def.MaxOpenConns != 25 {
+		t.Errorf("MaxOpenConns = %d, want 25", def.MaxOpenConns)
+	}
+}
+
+// TestDatabasePoolCeiling proves the production pool is bounded: options
+// built by databaseOptions from a default config open a pool whose
+// MaxOpenConnections is 25. No load needed — the ceiling is a setting
+// assertion, deterministic and fast.
+func TestDatabasePoolCeiling(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_DSN_APP")
+	if dsn == "" {
+		dsn = os.Getenv("TEST_DATABASE_DSN")
+	}
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
+	}
+
+	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", dsn)
+	cfg, err := configuration.Load(configuration.WithConfigFile(filepath.Join(t.TempDir(), "does-not-exist.yaml")))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	db, err := database.New(databaseOptions(cfg))
+	if err != nil {
+		t.Fatalf("database.New() error = %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("db.DB() error = %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	if got := sqlDB.Stats().MaxOpenConnections; got != 25 {
+		t.Errorf("Stats().MaxOpenConnections = %d, want 25", got)
 	}
 }
 

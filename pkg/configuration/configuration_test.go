@@ -762,6 +762,97 @@ engine:
 	}
 }
 
+func TestLoadPostgreSQLPoolDefaults(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	pg := cfg.Infra.PostgreSQL
+	if pg.MaxOpenConns != 25 || pg.MaxIdleConns != 25 ||
+		pg.ConnMaxLifetime != 5*time.Minute || pg.ConnMaxIdleTime != 5*time.Minute {
+		t.Errorf("postgresql pool = %+v, want 25/25/5m/5m", pg)
+	}
+}
+
+func TestLoadPostgreSQLPoolFromFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+    max_open_conns: 10
+    max_idle_conns: 4
+    conn_max_lifetime: 10m
+    conn_max_idle_time: 2m
+`)
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	pg := cfg.Infra.PostgreSQL
+	if pg.MaxOpenConns != 10 || pg.MaxIdleConns != 4 ||
+		pg.ConnMaxLifetime != 10*time.Minute || pg.ConnMaxIdleTime != 2*time.Minute {
+		t.Errorf("postgresql pool = %+v, want 10/4/10m/2m from file", pg)
+	}
+}
+
+func TestLoadPostgreSQLPoolEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+    max_open_conns: 10
+    max_idle_conns: 4
+    conn_max_lifetime: 10m
+    conn_max_idle_time: 2m
+`)
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_MAX_OPEN_CONNS", "50")
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_MAX_IDLE_CONNS", "10")
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_CONN_MAX_LIFETIME", "1h")
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_CONN_MAX_IDLE_TIME", "30s")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	pg := cfg.Infra.PostgreSQL
+	if pg.MaxOpenConns != 50 || pg.MaxIdleConns != 10 ||
+		pg.ConnMaxLifetime != time.Hour || pg.ConnMaxIdleTime != 30*time.Second {
+		t.Errorf("postgresql pool = %+v, want 50/10/1h/30s from environment", pg)
+	}
+}
+
+func TestLoadRejectsInvalidPostgreSQLPool(t *testing.T) {
+	cases := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"max_open_conns", "max_open_conns", "max_open_conns: 0"},
+		{"max_idle_conns", "max_idle_conns", "max_open_conns: 10\n    max_idle_conns: 99"},
+		{"conn_max_lifetime", "conn_max_lifetime", "conn_max_lifetime: -5s"},
+		{"conn_max_idle_time", "conn_max_idle_time", "conn_max_idle_time: -5s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+    `+tc.value+`
+`)
+			_, err := configuration.Load(configuration.WithConfigFile(path))
+			if err == nil {
+				t.Fatalf("Load() error = nil, want rejection for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "infra.postgresql."+tc.key) {
+				t.Errorf("error = %q, want it to name infra.postgresql.%s", err, tc.key)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidConsumerRetry(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -136,6 +136,21 @@ func checkAuthWiring(verifier auth.Verifier, authSvc service.AuthService, actor 
 	return nil
 }
 
+// databaseOptions builds the production pool settings from the loaded
+// configuration. It starts from database.DefaultOptions so the pool ceiling
+// is never left at the database/sql zero values (unbounded); the DSN and
+// the four pool knobs come from config, which Load already defaulted and
+// validated.
+func databaseOptions(cfg *configuration.Config) database.Options {
+	opts := database.DefaultOptions()
+	opts.DSN = cfg.Infra.PostgreSQL.DSN
+	opts.MaxOpenConns = cfg.Infra.PostgreSQL.MaxOpenConns
+	opts.MaxIdleConns = cfg.Infra.PostgreSQL.MaxIdleConns
+	opts.ConnMaxLifetime = cfg.Infra.PostgreSQL.ConnMaxLifetime
+	opts.ConnMaxIdleTime = cfg.Infra.PostgreSQL.ConnMaxIdleTime
+	return opts
+}
+
 // run starts the HTTP server and the dispatcher, and blocks until ctx is
 // cancelled, then shuts down gracefully. It returns nil on a clean shutdown.
 func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) error {
@@ -143,7 +158,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	// and render, so they are installed once here before any workflow runs.
 	envsnapshot.SetOverride(cfg.Engine.EnvDenyExtra, cfg.Engine.EnvAllowExceptions)
 
-	db, err := database.New(database.Options{DSN: cfg.Infra.PostgreSQL.DSN})
+	db, err := database.New(databaseOptions(cfg))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}

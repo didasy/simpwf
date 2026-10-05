@@ -249,6 +249,10 @@ system audit user. Key settings:
 | `infra.http.host`                                        | `localhost:9999`       | Compose overrides to `0.0.0.0:8080`                                                                             |
 | `infra.http.swagger_enabled`                             | `true`                 | Serves UI at `/swagger/index.html`                                                                              |
 | `infra.postgresql.dsn`                                   | local `gorm` DSN       | pgx/postgres wire format                                                                                        |
+| `infra.postgresql.max_open_conns`                        | `25`                   | Per-replica pool ceiling; exhaustion queues (`SIMPWF_INFRA_POSTGRESQL_MAX_OPEN_CONNS`)                          |
+| `infra.postgresql.max_idle_conns`                        | `25`                   | Warm idle cap per replica (`SIMPWF_INFRA_POSTGRESQL_MAX_IDLE_CONNS`)                                            |
+| `infra.postgresql.conn_max_lifetime`                     | `5m`                   | Max connection age before recycle (`SIMPWF_INFRA_POSTGRESQL_CONN_MAX_LIFETIME`); `0` = unlimited                |
+| `infra.postgresql.conn_max_idle_time`                    | `5m`                   | Max idle time before eviction (`SIMPWF_INFRA_POSTGRESQL_CONN_MAX_IDLE_TIME`); `0` = unlimited                   |
 | `infra.redis.dsn`                                        | `""` (disabled)        | e.g. `redis://localhost:6379/0`; unreachable broker fails startup                                               |
 | `infra.rabbitmq.dsn`                                     | `""` (disabled)        | e.g. `amqp://simpwf:simpwf@localhost:5672/`; queues default to `simpwf.input`, `simpwf.output`, `simpwf.status` |
 | `engine.default_node_timeout` / `max_node_timeout`       | `30s` / `5m`           | Caps script, `external_call`, and `output` nodes                                                                |
