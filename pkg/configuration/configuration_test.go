@@ -54,7 +54,7 @@ func TestLoadEnvOnly(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFileOverridesEnv(t *testing.T) {
+func TestLoadEnvOverridesConfigFile(t *testing.T) {
 	path := writeConfig(t, `
 infra:
   http:
@@ -62,21 +62,92 @@ infra:
     swagger_enabled: false
   postgresql:
     dsn: "file-dsn"
+worker:
+  pool:
+    size: 4
 `)
 	setenv(t, "SIMPWF_INFRA_HTTP_HOST", "env-host:5678")
+	setenv(t, "SIMPWF_WORKER_POOL_SIZE", "7")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Infra.HTTP.Host != "env-host:5678" {
+		t.Errorf("host = %q, want env-host:5678 (env must take priority over file)", cfg.Infra.HTTP.Host)
+	}
+	if cfg.Worker.Pool.Size != 7 {
+		t.Errorf("worker.pool.size = %d, want 7 from environment", cfg.Worker.Pool.Size)
+	}
+	if cfg.Infra.PostgreSQL.DSN != "file-dsn" {
+		t.Errorf("dsn = %q, want file-dsn (file backs keys absent from env)", cfg.Infra.PostgreSQL.DSN)
+	}
+	if cfg.Infra.HTTP.SwaggerEnabled {
+		t.Error("swagger_enabled = true, want false from config file")
+	}
+}
+
+// Keys the file omits still resolve from the environment when a file is
+// present. Under the old file-XOR-env switch these fell back to defaults;
+// the merge reads them from env.
+func TestLoadEnvSuppliesKeysMissingFromFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+`)
+	setenv(t, "SIMPWF_WORKER_POOL_SIZE", "7")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Worker.Pool.Size != 7 {
+		t.Errorf("worker.pool.size = %d, want 7 from environment", cfg.Worker.Pool.Size)
+	}
+}
+
+// The SIMPWF_API_TOKEN alias keeps working with a file present: the
+// explicit binding wins over the file value.
+func TestLoadAPITokenAliasOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+auth:
+  enabled: true
+  api_token: "file-token"
+`)
+	setenv(t, "SIMPWF_API_TOKEN", "env-token")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Auth.APIToken != "env-token" {
+		t.Errorf("auth.api_token = %q, want env-token from SIMPWF_API_TOKEN", cfg.Auth.APIToken)
+	}
+}
+
+// A set-but-empty variable is treated as unset (Viper's default), so the
+// file value stands. This pins the behavior operators get when a compose
+// file interpolates an unset variable to "".
+func TestLoadEmptyEnvFallsBackToFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  http:
+    host: "file-host:1234"
+  postgresql:
+    dsn: "file-dsn"
+`)
+	setenv(t, "SIMPWF_INFRA_HTTP_HOST", "")
 
 	cfg, err := configuration.Load(configuration.WithConfigFile(path))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if cfg.Infra.HTTP.Host != "file-host:1234" {
-		t.Errorf("host = %q, want file-host:1234 (file must take priority over env)", cfg.Infra.HTTP.Host)
-	}
-	if cfg.Infra.PostgreSQL.DSN != "file-dsn" {
-		t.Errorf("dsn = %q, want file-dsn", cfg.Infra.PostgreSQL.DSN)
-	}
-	if cfg.Infra.HTTP.SwaggerEnabled {
-		t.Error("swagger_enabled = true, want false from config file")
+		t.Errorf("host = %q, want file-host:1234 (empty env must fall back to file)", cfg.Infra.HTTP.Host)
 	}
 }
 
@@ -96,21 +167,69 @@ func TestLoadDefaultsApplied(t *testing.T) {
 	if cfg.Worker.Pool.Size != 1000 {
 		t.Errorf("default pool size = %d, want 1000", cfg.Worker.Pool.Size)
 	}
-	if cfg.Worker.ExpiryDuration != 5*time.Minute {
-		t.Errorf("default expiry = %v, want 5m", cfg.Worker.ExpiryDuration)
-	}
 }
 
-func TestLoadDurationFromEnv(t *testing.T) {
+func TestLoadDispatcherTuningDefaults(t *testing.T) {
 	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
-	setenv(t, "SIMPWF_WORKER_EXPIRY_DURATION", "10s")
 
 	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Worker.ExpiryDuration != 10*time.Second {
-		t.Errorf("expiry = %v, want 10s", cfg.Worker.ExpiryDuration)
+	if cfg.Worker.StatusPool.Size != 20 {
+		t.Errorf("worker.status_pool.size = %d, want 20", cfg.Worker.StatusPool.Size)
+	}
+	if cfg.Engine.PollInterval != 200*time.Millisecond {
+		t.Errorf("engine.poll_interval = %v, want 200ms", cfg.Engine.PollInterval)
+	}
+	if cfg.Engine.HeartbeatInterval != 5*time.Second {
+		t.Errorf("engine.heartbeat_interval = %v, want 5s", cfg.Engine.HeartbeatInterval)
+	}
+}
+
+func TestLoadDispatcherTuningFromEnv(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_WORKER_STATUS_POOL_SIZE", "7")
+	setenv(t, "SIMPWF_ENGINE_POLL_INTERVAL", "50ms")
+	setenv(t, "SIMPWF_ENGINE_HEARTBEAT_INTERVAL", "9s")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Worker.StatusPool.Size != 7 {
+		t.Errorf("worker.status_pool.size = %d, want 7", cfg.Worker.StatusPool.Size)
+	}
+	if cfg.Engine.PollInterval != 50*time.Millisecond {
+		t.Errorf("engine.poll_interval = %v, want 50ms", cfg.Engine.PollInterval)
+	}
+	if cfg.Engine.HeartbeatInterval != 9*time.Second {
+		t.Errorf("engine.heartbeat_interval = %v, want 9s", cfg.Engine.HeartbeatInterval)
+	}
+}
+
+func TestLoadRejectsNonPositiveDispatcherTuning(t *testing.T) {
+	cases := []struct {
+		env    string
+		name   string
+		values []string
+	}{
+		{"SIMPWF_WORKER_STATUS_POOL_SIZE", "worker.status_pool.size", []string{"0", "-2"}},
+		{"SIMPWF_ENGINE_POLL_INTERVAL", "engine.poll_interval", []string{"0", "-5s"}},
+		{"SIMPWF_ENGINE_HEARTBEAT_INTERVAL", "engine.heartbeat_interval", []string{"0", "-5s"}},
+	}
+	for _, tc := range cases {
+		for _, value := range tc.values {
+			t.Run(tc.env+"="+value, func(t *testing.T) {
+				setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+				setenv(t, tc.env, value)
+				if _, err := configuration.Load(configuration.WithConfigFile(missingPath(t))); err == nil {
+					t.Errorf("%s = %q: error = nil, want a rejection", tc.env, value)
+				} else if !strings.Contains(err.Error(), tc.name) {
+					t.Errorf("%s = %q: error = %q, want mention of %s", tc.env, value, err, tc.name)
+				}
+			})
+		}
 	}
 }
 
@@ -136,7 +255,7 @@ func TestLoadRejectsInvalidPoolSize(t *testing.T) {
 
 func TestLoadRejectsInvalidDuration(t *testing.T) {
 	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
-	setenv(t, "SIMPWF_WORKER_EXPIRY_DURATION", "not-a-duration")
+	setenv(t, "SIMPWF_ENGINE_POLL_INTERVAL", "not-a-duration")
 
 	_, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
 	if err == nil {
