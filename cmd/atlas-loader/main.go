@@ -111,5 +111,10 @@ func foreignKeyDDL() string {
 	fmt.Fprintf(&b, "CREATE INDEX %q ON %q (%s) WHERE %s;\n",
 		"idx_status_update_outbox_ready", "status_update_outbox",
 		"\"next_attempt_at\"", "\"delivered_at\" IS NULL AND \"dead_at\" IS NULL")
+	// Partial index: the termination-pending set is ~empty. GORM tags cannot
+	// express WHERE predicates, so this lives here with the outbox precedent.
+	fmt.Fprintf(&b, "CREATE INDEX %q ON %q (%s) WHERE %s;\n",
+		"idx_workflow_instances_termination_pending", "workflow_instances",
+		"\"termination_pending\"", "\"termination_pending\" = TRUE")
 	return b.String()
 }

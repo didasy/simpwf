@@ -133,7 +133,7 @@ type CronScheduleModel struct {
 	Crontab              string         `gorm:"column:crontab;not null"`
 	Timezone             string         `gorm:"column:timezone;not null;default:'UTC'"`
 	Context              datatypes.JSON `gorm:"column:context;type:jsonb;not null;default:'{}'"`
-	Enabled              bool           `gorm:"column:enabled;not null"`
+	Enabled              bool           `gorm:"column:enabled;not null;index"`
 	CreatedBy            string         `gorm:"column:created_by;type:uuid;not null"`
 	UpdatedBy            string         `gorm:"column:updated_by;type:uuid;not null"`
 	CreatedAt            time.Time      `gorm:"column:created_at;not null"`
@@ -171,8 +171,8 @@ type WorkflowInstanceModel struct {
 	WorkflowDefinitionID string         `gorm:"column:workflow_definition_id;type:uuid;not null;index"`
 	ContextMode          string         `gorm:"column:context_mode;not null;default:'full'"`
 	Debug                bool           `gorm:"column:debug;not null;default:false"`
-	Status               string         `gorm:"column:status;not null;index"`
-	WaitingReason        string         `gorm:"column:waiting_reason;not null;default:''"`
+	Status               string         `gorm:"column:status;not null;index:idx_workflow_instances_claim,priority:1"`
+	WaitingReason        string         `gorm:"column:waiting_reason;not null;default:'';index:idx_workflow_instances_claim,priority:2"`
 	PauseRequested       bool           `gorm:"column:pause_requested;not null;default:false"`
 	TerminationPending   bool           `gorm:"column:termination_pending;not null;default:false"`
 	CurrentGroupID       *string        `gorm:"column:current_group_id;type:uuid"`
@@ -182,14 +182,14 @@ type WorkflowInstanceModel struct {
 	Counters             datatypes.JSON `gorm:"column:counters;type:jsonb;not null;default:'{}'"`
 	Revision             int64          `gorm:"column:revision;not null;default:0"`
 	LeasedBy             string         `gorm:"column:leased_by;not null;default:''"`
-	LeaseExpiry          *time.Time     `gorm:"column:lease_expiry"`
+	LeaseExpiry          *time.Time     `gorm:"column:lease_expiry;index:idx_workflow_instances_claim,priority:3"`
 	Error                string         `gorm:"column:error;not null;default:''"`
 	StartedAt            *time.Time     `gorm:"column:started_at"`
 	FinishedAt           *time.Time     `gorm:"column:finished_at"`
-	CreatedBy            string         `gorm:"column:created_by;type:uuid;not null"`
+	CreatedBy            string         `gorm:"column:created_by;type:uuid;not null;index:idx_workflow_instances_created_by,priority:1"`
 	UpdatedBy            string         `gorm:"column:updated_by;type:uuid;not null"`
-	CreatedAt            time.Time      `gorm:"column:created_at;not null"`
-	UpdatedAt            time.Time      `gorm:"column:updated_at;not null"`
+	CreatedAt            time.Time      `gorm:"column:created_at;not null;index:idx_workflow_instances_created_by,priority:2"`
+	UpdatedAt            time.Time      `gorm:"column:updated_at;not null;index:idx_workflow_instances_claim,priority:4"`
 }
 
 // TableName is the workflow_instances table.
