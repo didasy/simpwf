@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1512,5 +1513,70 @@ func TestEngineWhitespaceOutputPropertyDefaultsToNodeID(t *testing.T) {
 	ctx := instanceContext(t, db, instanceID)
 	if ctx[n1] != float64(42) {
 		t.Errorf("context[%q] = %v, want 42", n1, ctx[n1])
+	}
+}
+
+// TestEngineRejectsFunctionOutput proves a script returning a
+// non-JSON-serializable value fails its node with a clear error and leaves
+// the stored context intact: no silent "null", no wedge on the next
+// transition (CORR-1).
+func TestEngineRejectsFunctionOutput(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "fn", "return function(){};", n2, "a", nil),
+		nodeJSON(n2, "script", "done", "return 'done';", "", "b", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{"x": 1})
+	e, _ := testEngine(t, db, model.DefaultLimits())
+
+	// Two consecutive transitions: the second proves the instance is not
+	// wedged (no panic, no resurrection) after the rejection.
+	ctx := context.Background()
+	instances := repository.NewInstanceRepository(db)
+	for round := 0; round < 2; round++ {
+		claimed, err := instances.ClaimNext(ctx, "test-worker", time.Minute, 10)
+		if err != nil {
+			t.Fatalf("round %d: ClaimNext() error = %v", round+1, err)
+		}
+		for _, w := range claimed {
+			if err := e.Process(ctx, w); err != nil {
+				t.Fatalf("round %d: Process() error = %v", round+1, err)
+			}
+		}
+	}
+
+	cur, err := instances.GetByID(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Status != model.WorkflowFailed {
+		t.Errorf("status = %s, want failed", cur.Status)
+	}
+	if got := string(cur.Context); got == "null" {
+		t.Errorf("stored context = null, want pre-transition context")
+	}
+	wantCtx := map[string]any{"x": float64(1)}
+	if gotCtx := instanceContext(t, db, instanceID); !reflect.DeepEqual(gotCtx, wantCtx) {
+		t.Errorf("stored context = %v, want %v", gotCtx, wantCtx)
+	}
+
+	attempts, err := instances.ListNodeInstances(ctx, instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *model.NodeInstance
+	for i := range attempts {
+		if attempts[i].NodeID == n1 {
+			found = &attempts[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no attempt recorded for node %s", n1)
+	}
+	if found.Status != model.NodeFailed {
+		t.Errorf("node status = %s, want failed", found.Status)
+	}
+	if !strings.Contains(found.Error, "serializable") {
+		t.Errorf("node error = %q, want it to name the unserializable value", found.Error)
 	}
 }

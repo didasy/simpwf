@@ -230,7 +230,10 @@ uses; `config.e2e-oidc.yaml` is a working example.
 | `parallel_end`   | Barrier join: runs `combining_script` over branch contexts, continues past         | [ARCHITECTURE.md](ARCHITECTURE.md) |
 
 Every node type accepts `pre_script`/`post_script` hooks. Hook return
-values are ignored; only context mutations persist. Custom node types can
+values are ignored; only context mutations persist. Script return values
+and context mutations must be JSON-serializable — anything else (e.g. a
+function value) fails the node with an error and leaves the stored
+context untouched. Custom node types can
 be added without core edits — see [docs/custom-nodes.md](docs/custom-nodes.md)
 and the worked `s3fetch` example ([pkg/customnode/s3fetch/README.md](pkg/customnode/s3fetch/README.md)). See
 [ARCHITECTURE.md](ARCHITECTURE.md) for hook ordering, poller transports

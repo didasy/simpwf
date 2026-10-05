@@ -210,7 +210,11 @@ func (e *Engine) waitInput(ctx context.Context, sc *execScope, frame *model.Fram
 		}
 		attempt.ContextAfter = diff.JSON()
 	} else {
-		attempt.ContextBefore = marshal(preCtx)
+		ctxBefore, err := marshal(preCtx)
+		if err != nil {
+			return e.fail(ctx, sc, err)
+		}
+		attempt.ContextBefore = ctxBefore
 	}
 	attempt.StartedAt = &now
 	if err := e.instances.InsertNodeInstance(ctx, attempt); err != nil {
@@ -275,7 +279,11 @@ func (e *Engine) runNode(ctx context.Context, sc *execScope, g *workflowGraph, f
 		if sc.contextMode == "lean" {
 			attempt.ContextBefore = json.RawMessage("null")
 		} else {
-			attempt.ContextBefore = marshal(ctxMap)
+			ctxBefore, err := marshal(ctxMap)
+			if err != nil {
+				return e.fail(ctx, sc, err)
+			}
+			attempt.ContextBefore = ctxBefore
 		}
 		attempt.StartedAt = &now
 		if err := e.instances.InsertNodeInstance(ctx, *attempt); err != nil {
@@ -293,7 +301,11 @@ func (e *Engine) runNode(ctx context.Context, sc *execScope, g *workflowGraph, f
 		if sc.contextMode == "lean" {
 			attempt.ContextBefore = json.RawMessage("null")
 		} else {
-			attempt.ContextBefore = marshal(ctxMap)
+			ctxBefore, err := marshal(ctxMap)
+			if err != nil {
+				return e.fail(ctx, sc, err)
+			}
+			attempt.ContextBefore = ctxBefore
 		}
 		attempt.StartedAt = &now
 		if err := e.instances.InsertNodeInstance(ctx, *attempt); err != nil {
@@ -306,7 +318,11 @@ func (e *Engine) runNode(ctx context.Context, sc *execScope, g *workflowGraph, f
 		if sc.contextMode == "lean" {
 			attempt.ContextBefore = json.RawMessage("null")
 		} else {
-			attempt.ContextBefore = marshal(ctxMap)
+			ctxBefore, err := marshal(ctxMap)
+			if err != nil {
+				return e.fail(ctx, sc, err)
+			}
+			attempt.ContextBefore = ctxBefore
 		}
 		attempt.Output = json.RawMessage("null")
 		attempt.ContextAfter = json.RawMessage("null")
@@ -369,7 +385,11 @@ func (e *Engine) recover(ctx context.Context, sc *execScope, g *workflowGraph, f
 		if sc.contextMode == "lean" {
 			attempt.ContextBefore = json.RawMessage("null")
 		} else {
-			attempt.ContextBefore = marshal(ctxMap)
+			ctxBefore, err := marshal(ctxMap)
+			if err != nil {
+				return e.fail(ctx, sc, err)
+			}
+			attempt.ContextBefore = ctxBefore
 		}
 		attempt.StartedAt = &now
 		attempt.RecoveryResult = "retried"
@@ -424,7 +444,11 @@ func (e *Engine) recover(ctx context.Context, sc *execScope, g *workflowGraph, f
 	if sc.contextMode == "lean" {
 		attempt.ContextBefore = json.RawMessage("null")
 	} else {
-		attempt.ContextBefore = marshal(ctxMap)
+		ctxBefore, err := marshal(ctxMap)
+		if err != nil {
+			return e.fail(ctx, sc, err)
+		}
+		attempt.ContextBefore = ctxBefore
 	}
 	attempt.Output = json.RawMessage("null")
 	attempt.ContextAfter = json.RawMessage("null")
@@ -511,6 +535,9 @@ func (e *Engine) executeStep(ctx context.Context, sc *execScope, g *workflowGrap
 		if key == "" {
 			key = nc.ID
 		}
+		if outCtx == nil {
+			outCtx = map[string]any{}
+		}
 		outCtx[key] = res.Output
 		hookOutput = res.Output
 	}
@@ -523,7 +550,11 @@ func (e *Engine) executeStep(ctx context.Context, sc *execScope, g *workflowGrap
 
 	now := e.now()
 	attempt.Status = model.NodeFinished
-	attempt.Output = marshal(res.Output)
+	output, err := marshal(res.Output)
+	if err != nil {
+		return e.failNode(ctx, sc, attempt, startCtx, outCtx, err)
+	}
+	attempt.Output = output
 	if sc.contextMode == "lean" {
 		diff, err := contextdiff.DiffMaps(startCtx, outCtx)
 		if err != nil {
@@ -532,7 +563,11 @@ func (e *Engine) executeStep(ctx context.Context, sc *execScope, g *workflowGrap
 		attempt.ContextBefore = json.RawMessage("null")
 		attempt.ContextAfter = diff.JSON()
 	} else {
-		attempt.ContextAfter = marshal(outCtx)
+		ctxAfter, err := marshal(outCtx)
+		if err != nil {
+			return e.failNode(ctx, sc, attempt, startCtx, outCtx, err)
+		}
+		attempt.ContextAfter = ctxAfter
 	}
 	attempt.FinishedAt = &now
 	attempt.UpdatedAt = now
@@ -635,7 +670,11 @@ func (e *Engine) routeFailure(ctx context.Context, sc *execScope, g *workflowGra
 	attempt.Status = model.NodeFailed
 	attempt.Error = cause.Error()
 	if resOutput != nil {
-		attempt.Output = marshal(resOutput)
+		output, err := marshal(resOutput)
+		if err != nil {
+			return e.failNode(ctx, sc, attempt, startCtx, outCtx, err)
+		}
+		attempt.Output = output
 	} else {
 		attempt.Output = json.RawMessage("null")
 	}
@@ -647,7 +686,11 @@ func (e *Engine) routeFailure(ctx context.Context, sc *execScope, g *workflowGra
 		attempt.ContextBefore = json.RawMessage("null")
 		attempt.ContextAfter = diff.JSON()
 	} else {
-		attempt.ContextAfter = marshal(outCtx)
+		ctxAfter, err := marshal(outCtx)
+		if err != nil {
+			return e.failNode(ctx, sc, attempt, startCtx, outCtx, err)
+		}
+		attempt.ContextAfter = ctxAfter
 	}
 	attempt.FinishedAt = &now
 	attempt.UpdatedAt = now
@@ -707,7 +750,18 @@ func (e *Engine) failNode(ctx context.Context, sc *execScope, attempt *model.Nod
 		attempt.ContextBefore = json.RawMessage("null")
 		attempt.ContextAfter = diff.JSON()
 	} else {
-		attempt.ContextAfter = marshal(ctxMap)
+		ctxAfter, err := marshal(ctxMap)
+		if err != nil {
+			// ctxMap itself is unserializable (a rejected executor
+			// value was already merged in): fall back to the
+			// pre-transition context, which derives from stored JSON
+			// and is JSON-clean by construction. Never guess-persist.
+			ctxAfter, err = marshal(startCtx)
+			if err != nil {
+				return err
+			}
+		}
+		attempt.ContextAfter = ctxAfter
 	}
 	attempt.FinishedAt = &now
 	attempt.UpdatedAt = now
@@ -832,6 +886,10 @@ func (e *Engine) checkpoint(ctx context.Context, sc *execScope, frame *model.Fra
 			return err
 		}
 	}
+	ctxRaw, err := marshal(ctxMap)
+	if err != nil {
+		return err
+	}
 	cp := repository.Checkpoint{
 		InstanceID:           sc.instanceID,
 		WorkerID:             sc.leasedBy,
@@ -844,7 +902,7 @@ func (e *Engine) checkpoint(ctx context.Context, sc *execScope, frame *model.Fra
 		PauseRequested:       sc.pauseRequested,
 		Frame:                *frame,
 		Counters:             counters,
-		Context:              marshal(ctxMap),
+		Context:              ctxRaw,
 		Error:                errMsg,
 		FinishedAt:           finished,
 		History:              history,
@@ -909,9 +967,13 @@ func (e *Engine) branchCheckpoint(ctx context.Context, sc *execScope, frame *mod
 		return nil
 	}
 	if frame.CurrentNodeID == sc.endNodeID {
+		ctxRaw, err := marshal(ctxMap)
+		if err != nil {
+			return err
+		}
 		ready, err := e.parallel.CompleteBranch(ctx, repository.BranchCompletion{
 			BranchID: sc.branchID, WorkerID: sc.leasedBy, Revision: sc.revision,
-			Frame: *frame, Counters: counters, Context: marshal(ctxMap),
+			Frame: *frame, Counters: counters, Context: ctxRaw,
 		})
 		if errors.Is(err, repository.ErrLeaseLost) {
 			return nil
@@ -929,10 +991,14 @@ func (e *Engine) branchCheckpoint(ctx context.Context, sc *execScope, frame *mod
 		}
 		return nil
 	}
-	err := e.parallel.CheckpointBranch(ctx, repository.BranchCheckpoint{
+	ctxRaw, err := marshal(ctxMap)
+	if err != nil {
+		return err
+	}
+	err = e.parallel.CheckpointBranch(ctx, repository.BranchCheckpoint{
 		BranchID: sc.branchID, WorkerID: sc.leasedBy, Revision: sc.revision,
 		Status: model.ParallelBranchWaiting, WaitingReason: nextBranchReason(sc, reason),
-		Frame: *frame, Counters: counters, Context: marshal(ctxMap), Error: errMsg,
+		Frame: *frame, Counters: counters, Context: ctxRaw, Error: errMsg,
 	})
 	if errors.Is(err, repository.ErrLeaseLost) {
 		return nil
@@ -993,7 +1059,11 @@ func (e *Engine) historyForCommit(ctx context.Context, sc *execScope, commit *co
 	}
 	if e.lean.AnchorEvery > 0 && (len(history)+1)%e.lean.AnchorEvery == 0 {
 		row.IsAnchor = true
-		row.Snapshot = marshal(commit.end)
+		snapshot, err := marshal(commit.end)
+		if err != nil {
+			return nil, err
+		}
+		row.Snapshot = snapshot
 		row.Diff = json.RawMessage("null")
 	}
 	return row, nil
@@ -1096,12 +1166,14 @@ func newID() string {
 	return id.String()
 }
 
-func marshal(v any) json.RawMessage {
+// marshal encodes v for persistence. It returns an error instead of a
+// silent "null" so marshal failures surface as node failures (CORR-1).
+func marshal(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return json.RawMessage("null")
+		return nil, fmt.Errorf("engine: value is not JSON-serializable: %w", err)
 	}
-	return b
+	return b, nil
 }
 
 func unmarshalContext(raw json.RawMessage) (map[string]any, error) {
@@ -1112,9 +1184,18 @@ func unmarshalContext(raw json.RawMessage) (map[string]any, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("engine: parse instance context: %w", err)
 	}
+	if m == nil {
+		// A stored "null" unmarshals to a nil map; normalize so
+		// callers always get a writable context (CORR-1).
+		m = map[string]any{}
+	}
 	return m, nil
 }
 
 func cloneContextMap(ctxMap map[string]any) (map[string]any, error) {
-	return unmarshalContext(marshal(ctxMap))
+	raw, err := marshal(ctxMap)
+	if err != nil {
+		return nil, err
+	}
+	return unmarshalContext(raw)
 }

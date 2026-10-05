@@ -124,11 +124,18 @@ func (e *Engine) ProcessBranch(ctx context.Context, b model.ParallelBranch) erro
 func (e *Engine) cancelStaleBranch(ctx context.Context, cur model.ParallelBranch) error {
 	frame, _ := model.ParseFrame(cur.Frame)
 	counters, _ := model.ParseCounters(cur.Counters)
-	ctxMap, _ := unmarshalContext(cur.Context)
+	// Best-effort cursor preservation: fall back to the stored bytes
+	// whenever the context cannot be re-encoded.
+	ctxRaw := cur.Context
+	if ctxMap, uerr := unmarshalContext(cur.Context); uerr == nil {
+		if raw, merr := marshal(ctxMap); merr == nil {
+			ctxRaw = raw
+		}
+	}
 	err := e.parallel.CheckpointBranch(ctx, repository.BranchCheckpoint{
 		BranchID: cur.ID, WorkerID: cur.LeasedBy, Revision: cur.Revision,
 		Status: model.ParallelBranchCancelled, Frame: frame, Counters: counters,
-		Context: marshal(ctxMap),
+		Context: ctxRaw,
 	})
 	if errors.Is(err, repository.ErrLeaseLost) {
 		return nil
