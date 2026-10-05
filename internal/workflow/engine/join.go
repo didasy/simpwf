@@ -81,6 +81,10 @@ func (e *Engine) joinParallel(ctx context.Context, sc *execScope, g *workflowGra
 			return e.failJoin(ctx, sc, ex.ID, err)
 		}
 	}
+	ctxRaw, err := marshal(finalCtx)
+	if err != nil {
+		return e.failJoin(ctx, sc, ex.ID, err)
+	}
 	err = e.parallel.JoinParallel(ctx, repository.JoinCheckpoint{
 		Checkpoint: repository.Checkpoint{
 			InstanceID:           sc.instanceID,
@@ -94,7 +98,7 @@ func (e *Engine) joinParallel(ctx context.Context, sc *execScope, g *workflowGra
 			PauseRequested:       sc.pauseRequested,
 			Frame:                *frame,
 			Counters:             counters,
-			Context:              marshal(finalCtx),
+			Context:              ctxRaw,
 			History:              history,
 			FinishedAt:           finished,
 		},
@@ -181,6 +185,10 @@ func (e *Engine) joinNestedParallel(ctx context.Context, sc *execScope, g *workf
 		}
 	}
 
+	ctxRaw, err := marshal(finalCtx)
+	if err != nil {
+		return e.failJoin(ctx, sc, ex.ID, err)
+	}
 	err = e.parallel.JoinBranchParallel(ctx, repository.JoinBranchCheckpoint{
 		BranchCheckpoint: repository.BranchCheckpoint{
 			BranchID:      sc.branchID,
@@ -190,7 +198,7 @@ func (e *Engine) joinNestedParallel(ctx context.Context, sc *execScope, g *workf
 			WaitingReason: nextBranchReason(sc, model.WaitingReasonRunnable),
 			Frame:         *frame,
 			Counters:      counters,
-			Context:       marshal(finalCtx),
+			Context:       ctxRaw,
 		},
 		ExecutionID: ex.ID,
 	})

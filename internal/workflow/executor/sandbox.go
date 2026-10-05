@@ -176,5 +176,15 @@ func RunScript(ctx context.Context, opts ScriptOptions) (*ScriptResult, error) {
 	if err := vm.ExportTo(vm.Get("context"), &out); err != nil {
 		return nil, fmt.Errorf("executor: export context: %w", err)
 	}
-	return &ScriptResult{Context: out, Value: val.Export()}, nil
+	value := val.Export()
+	// The engine persists both values as JSON; reject anything that
+	// would not survive the round trip instead of persisting "null"
+	// and corrupting the instance (CORR-1).
+	if _, err := json.Marshal(value); err != nil {
+		return nil, fmt.Errorf("executor: script return value is not JSON-serializable: %w", err)
+	}
+	if _, err := json.Marshal(out); err != nil {
+		return nil, fmt.Errorf("executor: script context is not JSON-serializable: %w", err)
+	}
+	return &ScriptResult{Context: out, Value: value}, nil
 }

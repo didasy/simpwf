@@ -182,3 +182,28 @@ func TestRunScriptRequiresTimeout(t *testing.T) {
 		t.Error("RunScript without timeout error = nil, want error")
 	}
 }
+
+// TestRunScriptRejectsFunctionValue proves the sandbox boundary rejects
+// non-JSON-serializable values with a descriptive error (CORR-1).
+func TestRunScriptRejectsFunctionValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+	}{
+		{"return function", "return function(){};"},
+		{"function-valued context mutation", "context.f = function(){}; return 1;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := run(t, executor.ScriptOptions{
+				Source:  tc.source,
+				Context: map[string]any{},
+			})
+			if err == nil {
+				t.Fatalf("RunScript(%q) error = nil, want unserializable-value error", tc.source)
+			}
+			if !strings.Contains(err.Error(), "serializable") {
+				t.Errorf("RunScript(%q) error = %q, want it to name the unserializable value", tc.source, err)
+			}
+		})
+	}
+}

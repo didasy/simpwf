@@ -43,6 +43,10 @@ func (e *Executor) Execute(ctx context.Context, req executor.Request) (*executor
 HTTP *executor.HTTPExecutor; Funcs *jsfunc.Registry }` — same power as
 builtin executors.
 
+`Result.Output` (and any returned `Result.Context`) must be
+JSON-serializable: anything else fails the node with an error and
+leaves the stored context intact — the engine never persists it.
+
 ## Schema (mandatory, config-only)
 
 Every custom node type must supply `Schema json.RawMessage` describing
