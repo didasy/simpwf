@@ -539,3 +539,44 @@ auth:
 		t.Errorf("admin = %v, want file value [definitions:read]", cfg.Auth.RolePermissions["admin"])
 	}
 }
+
+func TestLoadSchedulerDefaults(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Scheduler.Enabled {
+		t.Error("scheduler.enabled = false, want true by default")
+	}
+	if cfg.Scheduler.RefreshInterval != 30*time.Second {
+		t.Errorf("scheduler.refresh_interval = %v, want 30s", cfg.Scheduler.RefreshInterval)
+	}
+}
+
+func TestLoadSchedulerFromEnv(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_SCHEDULER_ENABLED", "false")
+	setenv(t, "SIMPWF_SCHEDULER_REFRESH_INTERVAL", "10s")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Scheduler.Enabled {
+		t.Error("scheduler.enabled = true, want false from environment")
+	}
+	if cfg.Scheduler.RefreshInterval != 10*time.Second {
+		t.Errorf("scheduler.refresh_interval = %v, want 10s", cfg.Scheduler.RefreshInterval)
+	}
+}
+
+func TestLoadRejectsInvalidSchedulerRefreshInterval(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+	setenv(t, "SIMPWF_SCHEDULER_REFRESH_INTERVAL", "0s")
+
+	if _, err := configuration.Load(configuration.WithConfigFile(missingPath(t))); err == nil {
+		t.Fatal("Load() error = nil, want validation error for refresh_interval 0")
+	}
+}

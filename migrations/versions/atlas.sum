@@ -1,4 +1,4 @@
-h1:RZvPGhwrCzVUguZRnh7OlsHSTBtmTmWk9ni6Ie0ag74=
+h1:ybk2Xb3IKmZIzvOCKjXFkFkuWGDBB325wRixvq8949o=
 20260805024728.sql h1:ZxeSqFuGsHjUG5MjmjTMpZVyBjyQ4D+hOawuglmpnWY=
 20260805035830_add_node_id.sql h1:9+YSyAmpyKdjnTYAwJz5w+/OIPrdTg5exaN4qHytWIw=
 20260810091127_add_workflow_instance_audit_actors.sql h1:LYvdHYd3oI9Jd1isln3DuZamc50xaj0iKXxkR1uDQRg=
@@ -11,3 +11,5 @@ h1:RZvPGhwrCzVUguZRnh7OlsHSTBtmTmWk9ni6Ie0ag74=
 20260927120000_input_deliveries_instance_key_unique.sql h1:W9KRpKC34vvE/jG6CZM/zYQ9pWJr2y0l7Fs02gq3JT8=
 20261003185802_add_parallel_execution.sql h1:SBZp/lAjQthc122cpB/4hxBkQqfDMspkZynhLJqG7RU=
 20261003190849_add_parallel_branch_scope.sql h1:DCPE5ew32fBhV35jAXu1tENaDUAppM8mMPeegTG5jn0=
+20261004131248_add_cron_schedules.sql h1:iDWMIr0VbjYZoEz85s97ZbUyx/qX3CbRZ99Kghte4uE=
+20261004142839_add_schedule_fires.sql h1:lKCuAtN3+HqTnPUL2TwzTq9myxJSajtrOIE4wzHkx9Y=

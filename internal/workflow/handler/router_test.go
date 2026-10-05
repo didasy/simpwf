@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/pkg/configuration"
@@ -351,5 +352,74 @@ func TestRouterEnabledWithoutTokenFailsClosed(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status with a token = %d, want 401 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestRouterScheduleRoutesRequireSchedulesActions(t *testing.T) {
+	catalog := auth.NewCatalog(map[string][]string{
+		"reader": {auth.ActionSchedulesRead},
+		"writer": {auth.ActionSchedulesWrite},
+	})
+	routerFor := func(roles ...string) *gin.Engine {
+		return NewRouter(Deps{
+			Health:       NewHealth(fakePinger{}),
+			Schedules:    &fakeScheduleSvc{},
+			Auth:         &fakeAuthSvc{},
+			AuthSettings: configuration.Auth{},
+			OIDC:         stubVerifier{principal: auth.Principal{Subject: "s1", Issuer: testIssuer, UserID: testSystemUserID, Roles: roles}},
+			Catalog:      catalog,
+		})
+	}
+	bearer := map[string]string{BearerHeader: "Bearer x"}
+
+	// Reads need schedules:read.
+	w := performJSON(routerFor("reader"), http.MethodGet, "/v1/workflow/schedules", "", bearer)
+	if w.Code != http.StatusOK {
+		t.Errorf("reader GET list status = %d, want 200", w.Code)
+	}
+	w = performJSON(routerFor("writer"), http.MethodGet, "/v1/workflow/schedules", "", bearer)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("writer GET list status = %d, want 403", w.Code)
+	}
+	w = performJSON(routerFor("reader"), http.MethodGet, "/v1/workflow/schedules/"+scheduleID, "", bearer)
+	if w.Code != http.StatusOK {
+		t.Errorf("reader GET one status = %d, want 200", w.Code)
+	}
+	w = performJSON(routerFor("writer"), http.MethodGet, "/v1/workflow/schedules/"+scheduleID, "", bearer)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("writer GET one status = %d, want 403", w.Code)
+	}
+
+	// Writes need schedules:write.
+	body := `{"workflow_definition_id":"22222222-2222-7222-8222-222222222222","crontab":"*/5 * * * *"}`
+	w = performJSON(routerFor("writer"), http.MethodPost, "/v1/workflow/schedules", body, bearer)
+	if w.Code != http.StatusCreated {
+		t.Errorf("writer POST status = %d, want 201", w.Code)
+	}
+	w = performJSON(routerFor("reader"), http.MethodPost, "/v1/workflow/schedules", body, bearer)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("reader POST status = %d, want 403", w.Code)
+	}
+	w = performJSON(routerFor("reader"), http.MethodPost, "/v1/workflow/schedules/"+scheduleID+"/pause", "", bearer)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("reader POST pause status = %d, want 403", w.Code)
+	}
+	w = performJSON(routerFor("reader"), http.MethodPost, "/v1/workflow/schedules/"+scheduleID+"/resume", "", bearer)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("reader POST resume status = %d, want 403", w.Code)
+	}
+	w = performJSON(routerFor("writer"), http.MethodDelete, "/v1/workflow/schedules/"+scheduleID, "", bearer)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("writer DELETE status = %d, want 204", w.Code)
+	}
+	w = performJSON(routerFor("reader"), http.MethodDelete, "/v1/workflow/schedules/"+scheduleID, "", bearer)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("reader DELETE status = %d, want 403", w.Code)
+	}
+
+	// No credential at all is 401, not 403.
+	w = performJSON(routerFor("reader"), http.MethodGet, "/v1/workflow/schedules", "", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous GET status = %d, want 401", w.Code)
 	}
 }

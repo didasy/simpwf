@@ -85,6 +85,8 @@ func bootstrapSchema(t *testing.T, dsn string) {
 		&repository.WorkflowDefinitionModel{},
 		&repository.WorkflowDefinitionNodeRefModel{},
 		&repository.WorkflowRequestModel{},
+		&repository.CronScheduleModel{},
+		&repository.ScheduleFireModel{},
 		&repository.WorkflowInstanceModel{},
 		&repository.NodeInstanceModel{},
 		&repository.WorkflowInstanceEventModel{},
@@ -118,6 +120,7 @@ func TestRunShutsDownGracefully(t *testing.T) {
 			ExpiryDuration:   time.Minute,
 			MaxBlockingTasks: 4,
 		},
+		Scheduler: configuration.Scheduler{Enabled: true},
 	}
 	logger, err := NewLogger("info")
 	if err != nil {

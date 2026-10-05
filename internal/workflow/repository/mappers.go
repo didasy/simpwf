@@ -175,6 +175,38 @@ func WorkflowRequestFromModel(m WorkflowRequestModel) model.WorkflowRequest {
 	}
 }
 
+// CronScheduleToModel maps a domain cron schedule to persistence.
+func CronScheduleToModel(s model.CronSchedule) CronScheduleModel {
+	return CronScheduleModel{
+		ID:                   s.ID,
+		WorkflowDefinitionID: s.WorkflowDefinitionID,
+		Crontab:              s.Crontab,
+		Timezone:             s.Timezone,
+		Context:              jsonCol(s.Context, "{}"),
+		Enabled:              s.Enabled,
+		CreatedBy:            s.CreatedBy,
+		UpdatedBy:            s.UpdatedBy,
+		CreatedAt:            s.CreatedAt,
+		UpdatedAt:            s.UpdatedAt,
+	}
+}
+
+// CronScheduleFromModel maps a persistence cron schedule back to the domain.
+func CronScheduleFromModel(m CronScheduleModel) model.CronSchedule {
+	return model.CronSchedule{
+		ID:                   m.ID,
+		WorkflowDefinitionID: m.WorkflowDefinitionID,
+		Crontab:              m.Crontab,
+		Timezone:             m.Timezone,
+		Context:              json.RawMessage(m.Context),
+		Enabled:              m.Enabled,
+		CreatedBy:            m.CreatedBy,
+		UpdatedBy:            m.UpdatedBy,
+		CreatedAt:            m.CreatedAt,
+		UpdatedAt:            m.UpdatedAt,
+	}
+}
+
 // WorkflowInstanceToModel maps a domain instance to persistence.
 func WorkflowInstanceToModel(w model.WorkflowInstance) WorkflowInstanceModel {
 	return WorkflowInstanceModel{

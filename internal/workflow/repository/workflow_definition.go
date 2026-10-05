@@ -17,8 +17,8 @@ type WorkflowDefinitionRepository interface {
 	Create(ctx context.Context, def model.WorkflowDefinition) error
 	GetByID(ctx context.Context, id string) (model.WorkflowDefinition, error)
 	List(ctx context.Context, q DefinitionListQuery) ([]model.WorkflowDefinition, int64, error)
-	// Delete removes a definition unless a workflow request or instance
-	// references it (model.ErrConflict).
+	// Delete removes a definition unless a workflow request, instance, or
+	// cron schedule references it (model.ErrConflict).
 	Delete(ctx context.Context, id string) error
 	// SetNodeRefs replaces the node definitions referenced by a workflow
 	// definition (delete-conflict tracking).
@@ -119,6 +119,14 @@ func (r *gormWorkflowDefinitionRepository) Delete(ctx context.Context, id string
 		}
 		if instances > 0 {
 			return fmt.Errorf("%w: workflow definition %s is referenced by workflow instances", model.ErrConflict, id)
+		}
+		var schedules int64
+		if err := tx.Model(&CronScheduleModel{}).
+			Where("workflow_definition_id = ?", id).Count(&schedules).Error; err != nil {
+			return fmt.Errorf("workflow definition schedule check: %w", err)
+		}
+		if schedules > 0 {
+			return fmt.Errorf("%w: workflow definition %s is referenced by cron schedules", model.ErrConflict, id)
 		}
 		res := tx.Delete(&WorkflowDefinitionModel{}, "id = ?", id)
 		if res.Error != nil {

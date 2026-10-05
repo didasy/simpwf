@@ -15,6 +15,7 @@ require (
 	github.com/panjf2000/ants/v2 v2.12.1
 	github.com/rabbitmq/amqp091-go v1.13.0
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/viper v1.21.0

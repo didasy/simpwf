@@ -89,7 +89,7 @@ Malformed UUID → `400`. Unknown → `404`.
 
 ### `DELETE /v1/workflow/definition/{id}` → `204`
 
-Malformed UUID → `400`. Referenced by any request or instance → `409`. Unknown → `404`. Empty body.
+Malformed UUID → `400`. Referenced by any request, instance, or cron schedule → `409`. Unknown → `404`. Empty body.
 
 ## Secrets
 
@@ -311,6 +311,51 @@ stopped/cancelled, `"superseded by rollback"`). Context is restored from the tar
 re-arm as a fresh attempt (`waiting_reason: "input"`, fresh `Idempotency-Key` accepted); other targets become runnable.
 Targets before or after a completed parallel block are accepted: re-execution forks a fresh execution and old rows stay
 as history. Response `{status:"paused", current_node_id}`. Resume afterwards to re-execute.
+
+## Schedules
+
+Cron schedules bind a crontab expression to a workflow definition. While a schedule is enabled, the engine
+creates an instance of that definition with the stored context on every tick; the instance runs asynchronously
+through the normal dispatcher and shows up in the instance list. Single-scheduler operation in v1: run exactly
+one scheduler-enabled replica, or every tick fires once per replica. Auth: `schedules:read` for `GET`,
+`schedules:write` for create/delete/pause/resume.
+
+### `POST /v1/workflow/schedules` → `201`
+
+| Body field             | Required | Rule                                                                                                          |
+| ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `workflow_definition_id` | yes      | UUID of an existing definition. Unknown id → `404` (no `400` here; a malformed UUID can surface as `500`, same caveat as instances). |
+| `crontab`                | yes      | Standard 5-field cron (minute first) or `@descriptor`; see `fields.md`. Bad expression → `422`. Stored verbatim (an inline `TZ=`/`CRON_TZ=` prefix is kept); `timezone` carries the effective zone. |
+| `timezone`               | no       | IANA zone, default `UTC`. Unknown zone → `422`. An inline `TZ=`/`CRON_TZ=` prefix in `crontab` wins over this field. |
+| `context`                | no       | Object new instances start from. Non-object → `422`. Empty/`null` normalizes to `{}`.                             |
+| `enabled`                | no       | Boolean, default `true`. `false` creates the schedule paused.                                                     |
+
+Malformed JSON → `400`. Blank `workflow_definition_id`/`crontab` → `422`. Response is the full schedule
+(`id`, `workflow_definition_id`, `crontab`, `timezone`, `context`, `enabled`, `created_by`, `updated_by`,
+`created_at`, `updated_at`).
+
+### `GET /v1/workflow/schedules` → `200`
+
+`page` / `per_page` same rules as definitions; bad → `400`. No `order` param; fixed `-created_at` order (ties
+break by `id` ascending). Envelope `{items, page, per_page, total, total_pages}`.
+
+### `GET /v1/workflow/schedules/{id}` → `200`
+
+Malformed UUID → `400`. Unknown → `404`. Returns one schedule.
+
+### `DELETE /v1/workflow/schedules/{id}` → `204`
+
+Malformed UUID → `400`. Unknown → `404`. Empty body. Ticks stop; already-running instances are unaffected.
+
+### `POST /v1/workflow/schedules/{id}/pause` → `200`
+
+Disables the schedule. Malformed UUID → `400`. Unknown → `404`. Already paused → `200` idempotent. Response is
+the full schedule with `enabled: false`. Pausing stops future ticks; already-running instances are unaffected.
+
+### `POST /v1/workflow/schedules/{id}/resume` → `200`
+
+Re-enables a paused schedule. Malformed UUID → `400`. Unknown → `404`. Already enabled → `200` idempotent.
+Response is the full schedule with `enabled: true`.
 
 ## Statistics
 

@@ -11,7 +11,7 @@ caps are payload size and the per-field rules below, not length.
 ## Ids
 
 All ids are canonical lowercase UUIDv7 (`xxxxxxxx-xxxx-7xxx-8xxx-xxxxxxxxxxxx`). Uppercase, braced, or non-canonical
-forms are rejected wherever validated. Applies to: definition/instance/occurrence/lineage ids, `previous_version_id`,
+forms are rejected wherever validated. Applies to: definition/instance/schedule/occurrence/lineage ids, `previous_version_id`,
 `start_node_id`, every node `id`, `next_node`, `on_failure.next_node`, `keys` targets, `current_group_id`,
 `current_node_id`, list `id`/`lineage_id`/`workflow_definition_id` filters, `target_occurrence_id`. Exception: instance
 path ids on GET/controls are not format-checked; only send back ids the API gave you. A garbage id normally returns
@@ -94,6 +94,19 @@ Go duration strings (`"30s"`, `"5m"`, `"2s"`). Must parse and be positive. Node 
 `engine.max_node_timeout` (defaults: default `30s`, cap `5m`, conditions/inputs fixed at `condition_timeout` `5s`, not
 settable). Poller `delay` (default `5s`), `request_timeout` (default `30s`), `max_wait_time` (default `5m`), and
 status-update `retry_delay` (default `5s`) are never capped by the engine max.
+
+## Cron schedules
+
+Crontab dialect is standard 5-field cron, minute first (`minute hour day-of-month month day-of-week`), plus
+`@descriptors`. No seconds field: a 6-field spec → `422`.
+
+Descriptors: `@yearly`/`@annually`, `@monthly`, `@weekly`, `@daily`/`@midnight`, `@hourly`,
+`@every <duration>`. `@every` takes a Go duration (`@every 5m`); sub-second durations clamp to whole seconds
+and ticks land on second boundaries. Unknown descriptor → `422`.
+
+`timezone` is an IANA zone (`America/New_York`), default `UTC`; unknown zone → `422`. An inline `TZ=`/`CRON_TZ=`
+prefix in `crontab` wins over the field (case-sensitive, uppercase; it needs both a zone and a schedule, so a
+bare `CRON_TZ=UTC` → `422`). The stored `timezone` is the effective zone.
 
 ## Workflow content reference
 

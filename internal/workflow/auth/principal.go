@@ -47,6 +47,8 @@ const (
 	ActionInstancesControl = "instances:control"
 	ActionStatisticsRead   = "statistics:read"
 	ActionRolesRead        = "roles:read"
+	ActionSchedulesRead    = "schedules:read"
+	ActionSchedulesWrite   = "schedules:write"
 )
 
 // Principal is the authenticated caller of a request.
@@ -222,6 +224,8 @@ func KnownActions() []string {
 		ActionInstancesControl,
 		ActionStatisticsRead,
 		ActionRolesRead,
+		ActionSchedulesRead,
+		ActionSchedulesWrite,
 	}
 	sort.Strings(actions)
 	return actions

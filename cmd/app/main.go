@@ -40,6 +40,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/inputtransport"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"github.com/simpwf/workflow-engine/internal/workflow/scheduler"
 	"github.com/simpwf/workflow-engine/internal/workflow/service"
 	"github.com/simpwf/workflow-engine/internal/workflow/statusupdate"
 	"github.com/simpwf/workflow-engine/internal/workflow/transport"
@@ -424,12 +425,38 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 	}()
 
+	// Cron scheduler: creates an instance of the target definition on
+	// every tick of each enabled schedule. All enabled replicas fire and
+	// the fire claim keeps each tick to one instance (see the scheduler
+	// package); onChange refreshes the local entries after every
+	// mutation, and other replicas catch up on the refresh interval.
+	schedRepo := repository.NewScheduleRepository(db)
+	var onScheduleChange func()
+	if cfg.Scheduler.Enabled {
+		cronScheduler := scheduler.New(ctx, schedRepo, instSvc, "scheduler-"+hostname, scheduler.SchedulerOptions{
+			RefreshInterval: cfg.Scheduler.RefreshInterval,
+		})
+		onScheduleChange = cronScheduler.Refresh
+		if err := cronScheduler.Run(); err != nil {
+			return fmt.Errorf("scheduler: %w", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := cronScheduler.Shutdown(shutdownCtx); err != nil {
+				logger.Warnf("scheduler shutdown: %v", err)
+			}
+		}()
+	}
+	schedSvc := service.NewScheduleService(schedRepo, wfDefs, actor, onScheduleChange)
+
 	router := handler.NewRouter(handler.Deps{
 		Health:              handler.NewHealth(sqlDB),
 		NodeDefinitions:     nodeSvc,
 		WorkflowDefinitions: wfSvc,
 		Secrets:             secretSvc,
 		Instances:           instSvc,
+		Schedules:           schedSvc,
 		Statistics:          statsSvc,
 		Auth:                authSvc,
 		SwaggerEnabled:      cfg.Infra.HTTP.SwaggerEnabled,

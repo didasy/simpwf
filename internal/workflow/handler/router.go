@@ -21,6 +21,7 @@ type Deps struct {
 	WorkflowDefinitions service.WorkflowDefinitionService
 	Secrets             service.SecretService
 	Instances           service.InstanceService
+	Schedules           service.ScheduleService
 	Statistics          service.StatisticsService
 	Auth                service.AuthService
 	SwaggerEnabled      bool
@@ -182,6 +183,17 @@ func NewRouter(deps Deps) *gin.Engine {
 		gate(group, auth.ActionInstancesControl, http.MethodPost, "/:id/resume", instances.Resume)
 		gate(group, auth.ActionInstancesControl, http.MethodPost, "/:id/stop", instances.Stop)
 		gate(group, auth.ActionInstancesControl, http.MethodPost, "/:id/rollback", instances.Rollback)
+	}
+
+	if deps.Schedules != nil {
+		schedules := NewScheduleHandler(deps.Schedules)
+		group := v1.Group("/workflow/schedules")
+		gate(group, auth.ActionSchedulesWrite, http.MethodPost, "", schedules.Create)
+		gate(group, auth.ActionSchedulesRead, http.MethodGet, "", schedules.List)
+		gate(group, auth.ActionSchedulesRead, http.MethodGet, "/:id", schedules.Get)
+		gate(group, auth.ActionSchedulesWrite, http.MethodDelete, "/:id", schedules.Delete)
+		gate(group, auth.ActionSchedulesWrite, http.MethodPost, "/:id/pause", schedules.Pause)
+		gate(group, auth.ActionSchedulesWrite, http.MethodPost, "/:id/resume", schedules.Resume)
 	}
 
 	if deps.Statistics != nil {
