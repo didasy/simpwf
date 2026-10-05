@@ -130,6 +130,8 @@ type Engine struct {
 	EnvAllowExceptions []string `mapstructure:"env_allow_exceptions"`
 	// Parallel bounds parallel execution fan-out, nesting, and load.
 	Parallel Parallel `mapstructure:"parallel"`
+	// ConsumerRetry bounds broker input consumer supervision.
+	ConsumerRetry ConsumerRetry `mapstructure:"consumer_retry"`
 }
 
 // Parallel holds the parallel execution safety limits.
@@ -141,6 +143,18 @@ type Parallel struct {
 	// MaxActiveBranchesPerInstance caps concurrently active branches of one
 	// instance across all its parallel executions.
 	MaxActiveBranchesPerInstance int `mapstructure:"max_active_branches_per_instance"`
+}
+
+// ConsumerRetry holds the broker input consumer supervision budget. A
+// consumer that dies is retried with doubling backoff (InitialBackoff to
+// MaxBackoff, plus jitter) up to MaxAttempts consecutive failures, then
+// marked down until restart while /ready reports 503. An attempt living
+// past MinHealthyRun resets the consecutive-failure count.
+type ConsumerRetry struct {
+	MaxAttempts    int           `mapstructure:"max_attempts"`
+	InitialBackoff time.Duration `mapstructure:"initial_backoff"`
+	MaxBackoff     time.Duration `mapstructure:"max_backoff"`
+	MinHealthyRun  time.Duration `mapstructure:"min_healthy_run"`
 }
 
 // System holds the configured audit actor (no auth yet).
@@ -246,6 +260,12 @@ func Load(opts ...Option) (*Config, error) {
 	// config.yaml.
 	_ = v.BindEnv("engine.env_deny_extra", "SIMPWF_ENGINE_ENV_DENY_EXTRA")
 	_ = v.BindEnv("engine.env_allow_exceptions", "SIMPWF_ENGINE_ENV_ALLOW_EXCEPTIONS")
+	// Consumer retry knobs are operator toggles and must override
+	// config.yaml.
+	_ = v.BindEnv("engine.consumer_retry.max_attempts", "SIMPWF_ENGINE_CONSUMER_RETRY_MAX_ATTEMPTS")
+	_ = v.BindEnv("engine.consumer_retry.initial_backoff", "SIMPWF_ENGINE_CONSUMER_RETRY_INITIAL_BACKOFF")
+	_ = v.BindEnv("engine.consumer_retry.max_backoff", "SIMPWF_ENGINE_CONSUMER_RETRY_MAX_BACKOFF")
+	_ = v.BindEnv("engine.consumer_retry.min_healthy_run", "SIMPWF_ENGINE_CONSUMER_RETRY_MIN_HEALTHY_RUN")
 
 	if _, err := os.Stat(path); err == nil {
 		v.SetConfigFile(path)
@@ -349,6 +369,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.parallel.max_depth", 4)
 	v.SetDefault("engine.parallel.max_branches_per_parallel", 32)
 	v.SetDefault("engine.parallel.max_active_branches_per_instance", 128)
+	v.SetDefault("engine.consumer_retry.max_attempts", 3)
+	v.SetDefault("engine.consumer_retry.initial_backoff", "1s")
+	v.SetDefault("engine.consumer_retry.max_backoff", "30s")
+	v.SetDefault("engine.consumer_retry.min_healthy_run", "30s")
 	v.SetDefault("system.user_id", "00000000-0000-7000-8000-000000000001")
 	v.SetDefault("system.name", "system")
 	v.SetDefault("system.email", "system@localhost")
@@ -396,6 +420,18 @@ func (c *Config) validate() error {
 	}
 	if c.Engine.Parallel.MaxActiveBranchesPerInstance <= 0 {
 		return errors.New("configuration: engine.parallel.max_active_branches_per_instance must be > 0")
+	}
+	if c.Engine.ConsumerRetry.MaxAttempts <= 0 {
+		return errors.New("configuration: engine.consumer_retry.max_attempts must be > 0")
+	}
+	if c.Engine.ConsumerRetry.InitialBackoff <= 0 {
+		return errors.New("configuration: engine.consumer_retry.initial_backoff must be > 0")
+	}
+	if c.Engine.ConsumerRetry.MaxBackoff < c.Engine.ConsumerRetry.InitialBackoff {
+		return errors.New("configuration: engine.consumer_retry.max_backoff must be >= engine.consumer_retry.initial_backoff")
+	}
+	if c.Engine.ConsumerRetry.MinHealthyRun <= 0 {
+		return errors.New("configuration: engine.consumer_retry.min_healthy_run must be > 0")
 	}
 	if err := validateEnvPatterns("engine.env_deny_extra", c.Engine.EnvDenyExtra); err != nil {
 		return err

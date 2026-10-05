@@ -340,25 +340,57 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	// consumer wait defer is registered before the dispatcher defers so
 	// shutdown waits for in-flight deliveries before closing the brokers.
 	var consumers sync.WaitGroup
+	monitors := make(map[string]handler.ConsumerMonitor)
+	retry := inputtransport.CappedOptions{
+		MaxAttempts:    cfg.Engine.ConsumerRetry.MaxAttempts,
+		InitialBackoff: cfg.Engine.ConsumerRetry.InitialBackoff,
+		MaxBackoff:     cfg.Engine.ConsumerRetry.MaxBackoff,
+		MinHealthyRun:  cfg.Engine.ConsumerRetry.MinHealthyRun,
+		Sleep:          inputtransport.SleepInterruptible,
+		Now:            time.Now,
+	}
 	if redisClient != nil {
-		redisInput := inputtransport.NewRedisInput(redisClient, instSvc)
+		redisDSN := cfg.Infra.Redis.DSN
+		redisStatus := inputtransport.NewConsumerStatus("redis")
+		monitors["redis"] = redisStatus
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := redisInput.Run(ctx); err != nil && ctx.Err() == nil {
-				logger.Warnf("redis input consumer stopped: %v", err)
-			}
+			inputtransport.SuperviseCapped(ctx, redisStatus, func(runCtx context.Context) error {
+				// A dedicated connection per attempt: the shared
+				// publisher client is untouched by retry churn, and a
+				// dead client is discarded instead of reused.
+				rc, err := transport.NewRedisClient(runCtx, redisDSN)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = rc.Close() }()
+				return inputtransport.NewRedisInput(rc, instSvc).Run(runCtx)
+			}, retry)
 		}()
 		logger.Info("redis input consumer started")
 	}
 	if rabbitClient != nil {
-		rabbitInput := inputtransport.NewRabbitInput(rabbitClient, instSvc, "input-"+hostname)
+		rabbitDSN := cfg.Infra.RabbitMQ.DSN
+		inputQueue := cfg.Infra.RabbitMQ.InputQueue
+		outputQueue := cfg.Infra.RabbitMQ.OutputQueue
+		statusQueue := cfg.Infra.RabbitMQ.StatusQueue
+		consumerTag := "input-" + hostname
+		rabbitStatus := inputtransport.NewConsumerStatus("rabbitmq")
+		monitors["rabbitmq"] = rabbitStatus
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := rabbitInput.Run(ctx); err != nil && ctx.Err() == nil {
-				logger.Warnf("rabbitmq input consumer stopped: %v", err)
-			}
+			inputtransport.SuperviseCapped(ctx, rabbitStatus, func(runCtx context.Context) error {
+				// amqp never heals a broken connection, so each
+				// attempt dials a fresh client and discards it.
+				rc, err := transport.NewRabbitClient(runCtx, rabbitDSN, inputQueue, outputQueue, statusQueue)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = rc.Close() }()
+				return inputtransport.NewRabbitInput(rc, instSvc, consumerTag).Run(runCtx)
+			}, retry)
 		}()
 		logger.Info("rabbitmq input consumer started")
 	}
@@ -455,7 +487,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 	schedSvc := service.NewScheduleService(schedRepo, wfDefs, actor, onScheduleChange)
 
 	router := handler.NewRouter(handler.Deps{
-		Health:              handler.NewHealth(sqlDB),
+		Health:              handler.NewHealth(sqlDB).WithConsumers(monitors),
 		NodeDefinitions:     nodeSvc,
 		WorkflowDefinitions: wfSvc,
 		Secrets:             secretSvc,
