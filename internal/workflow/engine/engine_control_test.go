@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -273,5 +274,225 @@ func TestEngineStopInterruptsPoller(t *testing.T) {
 		if !types[want] {
 			t.Errorf("event type %q missing; got %v", want, types)
 		}
+	}
+}
+
+// blockingExecutor blocks inside Execute until release closes, so a control
+// write can land deterministically mid-execution. started (buffered) fires
+// on entry; calls counts executions for the exactly-once assertion.
+type blockingExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	out     any
+	calls   *int32
+}
+
+func (b blockingExecutor) Execute(ctx context.Context, _ executor.Request) (*executor.Result, error) {
+	atomic.AddInt32(b.calls, 1)
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+		return &executor.Result{Output: b.out}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func waitNodeStarted(t *testing.T, started chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("node execution never started")
+	}
+}
+
+func waitProcessDone(t *testing.T, done chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Process did not return")
+		return nil
+	}
+}
+
+func assertExecutedOnce(t *testing.T, instances repository.InstanceRepository, instanceID string, calls *int32) {
+	t.Helper()
+	ctx := context.Background()
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Errorf("executor calls = %d, want exactly 1", got)
+	}
+	rows, err := instances.ListNodeInstances(ctx, instanceID)
+	if err != nil {
+		t.Fatalf("ListNodeInstances() error = %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("node occurrences = %d, want 1", len(rows))
+	}
+	if rows[0].Attempt != 1 {
+		t.Errorf("attempt = %d, want 1", rows[0].Attempt)
+	}
+}
+
+// TestEnginePauseMidExecutionRedrives: a Pause landing mid-execution must not
+// wedge the instance. The worker retries the commit only (no re-execution),
+// merging the fresh pause flag, so the instance reaches paused without any
+// restart and the node executes exactly once.
+func TestEnginePauseMidExecutionRedrives(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		customNodeJSON(n1, "midflight1", map[string]any{}, n2, "out", nil),
+		nodeJSON(n2, "script", "done", "return 2;", "", "out2", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	var calls int32
+	ex := blockingExecutor{started: make(chan struct{}, 1), release: make(chan struct{}), out: "paused-ok", calls: &calls}
+	e, cleanup := testEngineWithCustom(t, db, model.DefaultLimits(), "midflight1", ex)
+	defer cleanup()
+	instances := repository.NewInstanceRepository(db)
+	ctx := context.Background()
+
+	claimed, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v", len(claimed), err)
+	}
+	processDone := make(chan error, 1)
+	go func() { processDone <- e.Process(context.Background(), claimed[0]) }()
+
+	waitNodeStarted(t, ex.started)
+	deferred, err := instances.Pause(ctx, instanceID)
+	if err != nil || !deferred {
+		t.Fatalf("Pause(running) = deferred %v, err %v, want deferred", deferred, err)
+	}
+	close(ex.release)
+
+	if err := waitProcessDone(t, processDone); err != nil {
+		t.Fatalf("Process() error = %v, want nil after mid-flight pause", err)
+	}
+	stored, _ := instances.GetByID(ctx, instanceID)
+	if stored.Status != model.WorkflowPaused {
+		t.Errorf("status = %s, want paused after mid-flight pause", stored.Status)
+	}
+	assertExecutedOnce(t, instances, instanceID, &calls)
+
+	if err := instances.Resume(ctx, instanceID); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	resumed, _ := instances.GetByID(ctx, instanceID)
+	if resumed.Status != model.WorkflowWaiting {
+		t.Fatalf("status = %s, want waiting after resume", resumed.Status)
+	}
+	reclaimed, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("re-claim = %d, err %v, want 1 (no wedge)", len(reclaimed), err)
+	}
+	if err := e.Process(ctx, reclaimed[0]); err != nil {
+		t.Fatalf("Process() after resume error = %v", err)
+	}
+	final, _ := instances.GetByID(ctx, instanceID)
+	if final.Status != model.WorkflowFinished {
+		t.Errorf("status = %s, want finished after redrive", final.Status)
+	}
+}
+
+// TestEngineResumeMidExecutionClearsPause: a Resume (pause-clear) landing
+// mid-execution must also commit cleanly, with the fresh flag winning in the
+// clear direction — the instance commits waiting, not paused.
+func TestEngineResumeMidExecutionClearsPause(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		customNodeJSON(n1, "midflight2", map[string]any{}, n2, "out", nil),
+		nodeJSON(n2, "script", "done", "return 2;", "", "out2", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	var calls int32
+	ex := blockingExecutor{started: make(chan struct{}, 1), release: make(chan struct{}), out: "resumed-ok", calls: &calls}
+	e, cleanup := testEngineWithCustom(t, db, model.DefaultLimits(), "midflight2", ex)
+	defer cleanup()
+	instances := repository.NewInstanceRepository(db)
+	ctx := context.Background()
+
+	claimed, err := instances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v", len(claimed), err)
+	}
+	deferred, err := instances.Pause(ctx, instanceID)
+	if err != nil || !deferred {
+		t.Fatalf("Pause(running) = deferred %v, err %v, want deferred", deferred, err)
+	}
+	processDone := make(chan error, 1)
+	go func() { processDone <- e.Process(context.Background(), claimed[0]) }()
+
+	waitNodeStarted(t, ex.started)
+	if err := instances.Resume(ctx, instanceID); err != nil {
+		t.Fatalf("Resume(running) error = %v", err)
+	}
+	close(ex.release)
+
+	if err := waitProcessDone(t, processDone); err != nil {
+		t.Fatalf("Process() error = %v, want nil after mid-flight resume", err)
+	}
+	stored, _ := instances.GetByID(ctx, instanceID)
+	if stored.Status != model.WorkflowWaiting {
+		t.Errorf("status = %s, want waiting after mid-flight resume", stored.Status)
+	}
+	assertExecutedOnce(t, instances, instanceID, &calls)
+}
+
+// conflictInstances forces ErrRevisionConflict on every Checkpoint call so
+// the exhaustion path is deterministic (no control-write spam timing).
+type conflictInstances struct {
+	repository.InstanceRepository
+	checkpointCalls *int32
+}
+
+func (d *conflictInstances) Checkpoint(_ context.Context, _ repository.Checkpoint) error {
+	atomic.AddInt32(d.checkpointCalls, 1)
+	return repository.ErrRevisionConflict
+}
+
+// TestEngineCheckpointExhaustionReleasesLease: under persistent conflict the
+// worker must never return the conflict error while holding the lease (the
+// wedge). It degrades to a redrive: lease released, row reclaimable.
+func TestEngineCheckpointExhaustionReleasesLease(t *testing.T) {
+	db := setupEngineDB(t)
+	wfID := createWorkflow(t, db, n1,
+		nodeJSON(n1, "script", "inc", "return 1;", n2, "out", nil),
+		nodeJSON(n2, "script", "done", "return 2;", "", "out2", nil),
+	)
+	instanceID := insertInstance(t, db, wfID, n1, map[string]any{})
+	realInstances := repository.NewInstanceRepository(db)
+	var checkpointCalls int32
+	decorated := &conflictInstances{InstanceRepository: realInstances, checkpointCalls: &checkpointCalls}
+	e := engine.NewEngine(decorated, repository.NewParallelRepository(db),
+		executor.NewExecutors(executor.Limits{}, nil, executor.Dependencies{}),
+		executor.NewHookRunner(nil), model.DefaultLimits(), testLoader(db), sysUserID, model.LeanOptions{})
+	ctx := context.Background()
+
+	claimed, err := realInstances.ClaimNext(ctx, "worker-1", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, err %v", len(claimed), err)
+	}
+	if err := e.Process(ctx, claimed[0]); err != nil {
+		t.Fatalf("Process() error = %v, want nil (release, never wedge)", err)
+	}
+	if got := atomic.LoadInt32(&checkpointCalls); got != 3 {
+		t.Errorf("checkpoint attempts = %d, want 3 (initial + 2 retries)", got)
+	}
+	stored, _ := realInstances.GetByID(ctx, instanceID)
+	if stored.Status != model.WorkflowRunning {
+		t.Errorf("status = %s, want running (released, not parked)", stored.Status)
+	}
+	if stored.LeasedBy != "" {
+		t.Errorf("leased_by = %q, want released", stored.LeasedBy)
+	}
+	reclaimed, err := realInstances.ClaimNext(ctx, "worker-2", time.Minute, 10)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("re-claim = %d, err %v, want 1 (redrivable)", len(reclaimed), err)
 	}
 }

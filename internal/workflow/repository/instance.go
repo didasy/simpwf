@@ -250,6 +250,11 @@ type InstanceRepository interface {
 	// ResolveTermination clears the termination-pending flag and releases
 	// the instance lease. Idempotent.
 	ResolveTermination(ctx context.Context, instanceID string) error
+	// ReleaseLease releases a running instance's lease held by workerID and
+	// expires it immediately so the next ClaimNext redrives the instance.
+	// It touches only the caller's own lease; a lost race (0 rows
+	// affected) is not an error.
+	ReleaseLease(ctx context.Context, instanceID, workerID string) error
 	// SweepTermination clears termination-pending flags of stopped instances
 	// whose node attempts are no longer running (their cleanup already
 	// completed or there was nothing to cancel).
@@ -919,6 +924,21 @@ func (r *instanceRepo) ResolveTermination(ctx context.Context, instanceID string
 		return res.Error
 	}
 	return nil
+}
+
+// ReleaseLease clears the caller's own lease on a running instance. The
+// expiry is set in the past (not NULL) because ClaimNext reclaims running
+// rows only while lease_expiry < now(); a NULL expiry would never match.
+func (r *instanceRepo) ReleaseLease(ctx context.Context, instanceID, workerID string) error {
+	now := time.Now().UTC()
+	return r.db.WithContext(ctx).Model(&WorkflowInstanceModel{}).
+		Where("id = ? AND leased_by = ? AND status = ?", instanceID, workerID, string(model.WorkflowRunning)).
+		Updates(map[string]any{
+			"leased_by":    "",
+			"lease_expiry": now.Add(-time.Second),
+			"revision":     gorm.Expr("revision + 1"),
+			"updated_at":   now,
+		}).Error
 }
 
 func (r *instanceRepo) SweepTermination(ctx context.Context) error {
