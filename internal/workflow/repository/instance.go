@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/defcache"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/pkg/ids"
 	"gorm.io/gorm"
@@ -310,8 +311,9 @@ type InstanceContextReader interface {
 }
 
 type instanceRepo struct {
-	db        *gorm.DB
-	replayMax int
+	db                *gorm.DB
+	replayMax         int
+	statusUpdateCache *statusUpdateCache
 }
 
 // NewInstanceRepository builds the GORM-backed instance repository.
@@ -326,7 +328,7 @@ func NewInstanceRepositoryWithOptions(db *gorm.DB, opts model.LeanOptions) Insta
 	if replayMax <= 0 {
 		replayMax = defaultHistoryReplayMax
 	}
-	return &instanceRepo{db: db, replayMax: replayMax}
+	return &instanceRepo{db: db, replayMax: replayMax, statusUpdateCache: defcache.New[string, *model.StatusUpdateConfig](statusUpdateCacheSize)}
 }
 
 func (r *instanceRepo) Insert(ctx context.Context, w model.WorkflowInstance) error {
@@ -643,14 +645,14 @@ func (r *instanceRepo) Checkpoint(ctx context.Context, c Checkpoint) error {
 	}
 	now := time.Now().UTC()
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return execInstanceCheckpointTx(ctx, tx, c, frame, counters, now)
+		return execInstanceCheckpointTx(ctx, tx, c, frame, counters, now, r.statusUpdateCache)
 	})
 }
 
 // execInstanceCheckpointTx runs the fenced parent write (state, history,
 // outbox) inside the caller's transaction so multi-row commits like the
 // parallel join stay atomic.
-func execInstanceCheckpointTx(ctx context.Context, tx *gorm.DB, c Checkpoint, frame, counters []byte, now time.Time) error {
+func execInstanceCheckpointTx(ctx context.Context, tx *gorm.DB, c Checkpoint, frame, counters []byte, now time.Time, cache *statusUpdateCache) error {
 	res := tx.Exec(checkpointSQL,
 		string(c.Status), string(c.WaitingReason), c.PauseRequested,
 		frame, counters, jsonCol(c.Context, "{}"), c.Error,
@@ -668,7 +670,7 @@ func execInstanceCheckpointTx(ctx context.Context, tx *gorm.DB, c Checkpoint, fr
 	}
 	from := statusWithReason{status: c.FromStatus, waitingReason: c.FromWaitingReason}
 	to := statusWithReason{status: c.Status, waitingReason: c.WaitingReason}
-	return enqueueStatusUpdateTx(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, c.Context, now)
+	return enqueueStatusUpdateTx(ctx, tx, c.InstanceID, c.WorkflowDefinitionID, c.Revision+1, from, to, transitionEvents(from, to), c.Error, c.Context, now, cache)
 }
 
 // diagnoseInstanceFenceTx is the receiver-free fence diagnosis shared by
@@ -1317,7 +1319,7 @@ func (r *instanceRepo) failBranchInput(ctx context.Context, c InputCompletion, d
 		if fin.RowsAffected == 0 {
 			return ErrStatusConflict
 		}
-		failedParent, err := failBranchCascadeTx(ctx, tx, b, c.Error, now)
+		failedParent, err := failBranchCascadeTx(ctx, tx, b, c.Error, now, r.statusUpdateCache)
 		if err != nil {
 			return err
 		}

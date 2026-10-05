@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/defcache"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -138,12 +139,13 @@ type ParallelRepository interface {
 }
 
 type parallelRepo struct {
-	db *gorm.DB
+	db                *gorm.DB
+	statusUpdateCache *statusUpdateCache
 }
 
 // NewParallelRepository builds the parallel execution repository.
 func NewParallelRepository(db *gorm.DB) ParallelRepository {
-	return &parallelRepo{db: db}
+	return &parallelRepo{db: db, statusUpdateCache: defcache.New[string, *model.StatusUpdateConfig](statusUpdateCacheSize)}
 }
 
 const forkParentSQL = `
@@ -252,7 +254,7 @@ func (r *parallelRepo) Fork(ctx context.Context, f ForkParallel) (*model.Paralle
 		if debug {
 			to.status = model.WorkflowPaused
 		}
-		return enqueueStatusUpdateTx(ctx, tx, f.InstanceID, f.WorkflowDefinitionID, f.Revision+1, from, to, transitionEvents(from, to), "", f.Context, now)
+		return enqueueStatusUpdateTx(ctx, tx, f.InstanceID, f.WorkflowDefinitionID, f.Revision+1, from, to, transitionEvents(from, to), "", f.Context, now, r.statusUpdateCache)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -555,7 +557,7 @@ func (r *parallelRepo) FailBranch(ctx context.Context, branchID, workerID string
 		if leaf.Status != string(model.ParallelBranchRunning) && leaf.Status != string(model.ParallelBranchWaiting) {
 			return ErrStatusConflict
 		}
-		fp, err := failBranchCascadeTx(ctx, tx, leaf, errMsg, time.Now().UTC())
+		fp, err := failBranchCascadeTx(ctx, tx, leaf, errMsg, time.Now().UTC(), r.statusUpdateCache)
 		if err != nil {
 			return err
 		}
@@ -573,7 +575,7 @@ func (r *parallelRepo) FailBranch(ctx context.Context, branchID, workerID string
 // climbs through nested owners, and a parked top-level parent fails with the
 // leaf error. Callers lock and validate the leaf first; lease checks stay
 // with them because parked branches fail without holding a lease.
-func failBranchCascadeTx(ctx context.Context, tx *gorm.DB, leaf ParallelBranchModel, errMsg string, now time.Time) (bool, error) {
+func failBranchCascadeTx(ctx context.Context, tx *gorm.DB, leaf ParallelBranchModel, errMsg string, now time.Time, cache *statusUpdateCache) (bool, error) {
 	failedParent := false
 	if err := tx.Model(&ParallelBranchModel{}).Where("id = ?", leaf.ID).Updates(map[string]any{
 		"status":       string(model.ParallelBranchFailed),
@@ -681,7 +683,7 @@ func failBranchCascadeTx(ctx context.Context, tx *gorm.DB, leaf ParallelBranchMo
 	}
 	from := statusWithReason{status: model.WorkflowStatus(preStatus), waitingReason: model.WaitingReasonParallel}
 	to := statusWithReason{status: model.WorkflowFailed}
-	if err := enqueueStatusUpdateTx(ctx, tx, ex.InstanceID, parent.WorkflowDefinitionID, parent.Revision, from, to, transitionEvents(from, to), parentErr, parent.Context, now); err != nil {
+	if err := enqueueStatusUpdateTx(ctx, tx, ex.InstanceID, parent.WorkflowDefinitionID, parent.Revision, from, to, transitionEvents(from, to), parentErr, parent.Context, now, cache); err != nil {
 		return false, err
 	}
 	return failedParent, nil
@@ -767,7 +769,7 @@ func (r *parallelRepo) JoinParallel(ctx context.Context, j JoinCheckpoint) error
 		if ex.Status != string(model.ParallelReadyToJoin) {
 			return ErrStatusConflict
 		}
-		if err := execInstanceCheckpointTx(ctx, tx, j.Checkpoint, frame, counters, now); err != nil {
+		if err := execInstanceCheckpointTx(ctx, tx, j.Checkpoint, frame, counters, now, r.statusUpdateCache); err != nil {
 			return err
 		}
 		return tx.Model(&ParallelExecutionModel{}).Where("id = ?", ex.ID).Updates(map[string]any{

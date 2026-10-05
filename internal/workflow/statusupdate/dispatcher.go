@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/panjf2000/ants/v2"
+	"github.com/simpwf/workflow-engine/internal/workflow/defcache"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 )
@@ -14,6 +15,19 @@ import (
 // ConfigLoader resolves the immutable status_update configuration of a
 // workflow definition.
 type ConfigLoader func(ctx context.Context, definitionID string) (*model.StatusUpdateConfig, error)
+
+// CachedLoader memoizes inner by definition ID. Definitions are immutable,
+// so a loaded config — including the nil "not configured" negative — stays
+// valid forever; load errors are never cached and retry on the next event.
+// The cached configs are shared and must not be mutated.
+func CachedLoader(inner ConfigLoader, maxEntries int) ConfigLoader {
+	cache := defcache.New[string, *model.StatusUpdateConfig](maxEntries)
+	return func(ctx context.Context, definitionID string) (*model.StatusUpdateConfig, error) {
+		return cache.GetOrCompute(definitionID, func() (*model.StatusUpdateConfig, error) {
+			return inner(ctx, definitionID)
+		})
+	}
+}
 
 // Publisher delivers a claimed event to its transport. Implementations must
 // return an error on any non-successful delivery so the dispatcher can

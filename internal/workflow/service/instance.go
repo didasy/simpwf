@@ -268,6 +268,9 @@ type Canceller interface {
 // are recognized.
 type WorkflowMaterializer interface {
 	Materialize(ctx context.Context, wc *model.WorkflowContent) (*model.WorkflowContent, error)
+	// Resolve loads a stored definition by ID and returns its cached
+	// materialized tree. The returned tree is shared and READ-ONLY.
+	Resolve(ctx context.Context, defID string) (*model.WorkflowContent, error)
 }
 
 // InstanceService is the use-case boundary for workflow instances. Read
@@ -648,15 +651,7 @@ func (s *instanceService) pendingInput(ctx context.Context, inst *model.Workflow
 	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
 		return nil
 	}
-	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
-	if err != nil {
-		return nil
-	}
-	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
-	if err != nil {
-		return nil
-	}
-	wc, err = s.materializer.Materialize(ctx, wc)
+	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
 	if err != nil {
 		return nil
 	}
@@ -793,15 +788,7 @@ func toStringMap(v any) map[string]any {
 // materialized, so the status view degrades to omitting the map instead of
 // failing the whole call.
 func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowInstance) map[string]NodeOccurrence {
-	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
-	if err != nil {
-		return nil
-	}
-	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
-	if err != nil {
-		return nil
-	}
-	wc, err = s.materializer.Materialize(ctx, wc)
+	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
 	if err != nil {
 		return nil
 	}
@@ -1472,17 +1459,11 @@ func (s *instanceService) Rollback(ctx context.Context, req RollbackRequest) (*R
 		return nil, fmt.Errorf("%w: occurrence %q ran inside a parallel branch; roll back to a node before or after the parallel block", model.ErrInvalid, req.TargetOccurrenceID)
 	}
 
-	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
+	// Resolve pre-shapes errors exactly as the triple did: fetch failures
+	// pass through, content failures arrive as model.ErrInvalid.
+	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
 	if err != nil {
 		return nil, err
-	}
-	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
-	}
-	wc, err = s.materializer.Materialize(ctx, wc)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
 	target, err := findNode(wc.Nodes, occ.NodeID)
 	if err != nil {
@@ -1692,17 +1673,11 @@ func groupStack(wc *model.WorkflowContent, id string) ([]string, error) {
 // definition an instance was created from, so a delivery decision reads
 // the same node tree the engine executes.
 func (s *instanceService) contentGraph(ctx context.Context, inst *model.WorkflowInstance) (*contentGraph, error) {
-	wf, err := s.wfDefs.GetByID(ctx, inst.WorkflowDefinitionID)
+	// Resolve pre-shapes errors exactly as the triple did: fetch failures
+	// pass through, content failures arrive as model.ErrInvalid.
+	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
 	if err != nil {
 		return nil, err
-	}
-	wc, err := model.ParseWorkflowContent(wf.Content, s.limits)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
-	}
-	wc, err = s.materializer.Materialize(ctx, wc)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", model.ErrInvalid, err)
 	}
 	return &contentGraph{wc: wc}, nil
 }
