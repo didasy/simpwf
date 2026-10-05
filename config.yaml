@@ -72,6 +72,21 @@ engine:
     max_depth: 4
     max_branches_per_parallel: 32
     max_active_branches_per_instance: 128
+  # Broker input consumer supervision. A consumer that dies is retried with
+  # doubling backoff (initial_backoff..max_backoff, plus jitter) up to
+  # max_attempts consecutive failures, then marked down until restart while
+  # /ready reports 503. An attempt living past min_healthy_run resets the
+  # count, so slow flapping never exhausts the budget. max_attempts: 1
+  # restores run-once behavior (any blip parks the pod until restart).
+  # Operator overrides: SIMPWF_ENGINE_CONSUMER_RETRY_MAX_ATTEMPTS,
+  # SIMPWF_ENGINE_CONSUMER_RETRY_INITIAL_BACKOFF,
+  # SIMPWF_ENGINE_CONSUMER_RETRY_MAX_BACKOFF,
+  # SIMPWF_ENGINE_CONSUMER_RETRY_MIN_HEALTHY_RUN.
+  consumer_retry:
+    max_attempts: 3
+    initial_backoff: 1s
+    max_backoff: 30s
+    min_healthy_run: 30s
   http_allowlist:
     - "127.0.0.1:8080"
     - "api.example.com"

@@ -699,3 +699,96 @@ func TestLoadRejectsInvalidSchedulerRefreshInterval(t *testing.T) {
 		t.Fatal("Load() error = nil, want validation error for refresh_interval 0")
 	}
 }
+
+func TestLoadConsumerRetryDefaults(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	r := cfg.Engine.ConsumerRetry
+	if r.MaxAttempts != 3 || r.InitialBackoff != time.Second || r.MaxBackoff != 30*time.Second || r.MinHealthyRun != 30*time.Second {
+		t.Errorf("consumer_retry = %+v, want 3/1s/30s/30s", r)
+	}
+}
+
+func TestLoadConsumerRetryFromFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  consumer_retry:
+    max_attempts: 5
+    initial_backoff: 2s
+    max_backoff: 1m
+    min_healthy_run: 45s
+`)
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	r := cfg.Engine.ConsumerRetry
+	if r.MaxAttempts != 5 || r.InitialBackoff != 2*time.Second || r.MaxBackoff != time.Minute || r.MinHealthyRun != 45*time.Second {
+		t.Errorf("consumer_retry = %+v, want 5/2s/1m/45s", r)
+	}
+}
+
+func TestLoadConsumerRetryEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  consumer_retry:
+    max_attempts: 5
+    initial_backoff: 2s
+    max_backoff: 1m
+    min_healthy_run: 45s
+`)
+	setenv(t, "SIMPWF_ENGINE_CONSUMER_RETRY_MAX_ATTEMPTS", "7")
+	setenv(t, "SIMPWF_ENGINE_CONSUMER_RETRY_INITIAL_BACKOFF", "500ms")
+	setenv(t, "SIMPWF_ENGINE_CONSUMER_RETRY_MAX_BACKOFF", "10s")
+	setenv(t, "SIMPWF_ENGINE_CONSUMER_RETRY_MIN_HEALTHY_RUN", "20s")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	r := cfg.Engine.ConsumerRetry
+	if r.MaxAttempts != 7 || r.InitialBackoff != 500*time.Millisecond || r.MaxBackoff != 10*time.Second || r.MinHealthyRun != 20*time.Second {
+		t.Errorf("consumer_retry = %+v, want 7/500ms/10s/20s from environment", r)
+	}
+}
+
+func TestLoadRejectsInvalidConsumerRetry(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"max_attempts", "max_attempts: 0"},
+		{"initial_backoff", "initial_backoff: 0s"},
+		{"max_backoff", "initial_backoff: 5s\n    max_backoff: 1s"},
+		{"min_healthy_run", "min_healthy_run: 0s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  consumer_retry:
+    `+tc.value+`
+`)
+			_, err := configuration.Load(configuration.WithConfigFile(path))
+			if err == nil {
+				t.Fatalf("Load() error = nil, want rejection for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "configuration: ") || !strings.Contains(err.Error(), "engine.consumer_retry."+tc.name) {
+				t.Errorf("error = %q, want a configuration: engine.consumer_retry.%s error", err, tc.name)
+			}
+		})
+	}
+}
