@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +14,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/statusupdate"
-	"github.com/simpwf/workflow-engine/pkg/database"
+	"github.com/simpwf/workflow-engine/internal/workflow/testdb"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -29,25 +28,7 @@ const (
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	ctx := context.Background()
-	dsn := os.Getenv("TEST_DATABASE_DSN_STATUSUPDATE")
-	if dsn == "" {
-		dsn = os.Getenv("TEST_DATABASE_DSN")
-	}
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
-	}
-	opts := database.DefaultOptions()
-	opts.DSN = dsn
-	db, err := database.New(opts)
-	if err != nil {
-		t.Fatalf("database.New() error = %v", err)
-	}
-	t.Cleanup(func() {
-		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
-	})
+	db := testdb.Open(t, "statusupdate")
 	if err := db.AutoMigrate(
 		&repository.UserModel{},
 		&repository.NodeDefinitionModel{},

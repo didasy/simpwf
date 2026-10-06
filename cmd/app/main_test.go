@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"github.com/simpwf/workflow-engine/internal/workflow/testdb"
 	"github.com/simpwf/workflow-engine/pkg/configuration"
 	"github.com/simpwf/workflow-engine/pkg/database"
 	"github.com/sirupsen/logrus"
@@ -148,13 +148,7 @@ func bootstrapSchema(t *testing.T, dsn string) {
 }
 
 func TestRunShutsDownGracefully(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_DSN_APP")
-	if dsn == "" {
-		dsn = os.Getenv("TEST_DATABASE_DSN")
-	}
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
-	}
+	dsn := testdb.RequireDSN(t, "app")
 	bootstrapSchema(t, dsn)
 
 	host := freePort(t)
@@ -245,13 +239,7 @@ func TestDatabaseOptions(t *testing.T) {
 // MaxOpenConnections is 25. No load needed — the ceiling is a setting
 // assertion, deterministic and fast.
 func TestDatabasePoolCeiling(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_DSN_APP")
-	if dsn == "" {
-		dsn = os.Getenv("TEST_DATABASE_DSN")
-	}
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
-	}
+	dsn := testdb.RequireDSN(t, "app")
 
 	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", dsn)
 	cfg, err := configuration.Load(configuration.WithConfigFile(filepath.Join(t.TempDir(), "does-not-exist.yaml")))

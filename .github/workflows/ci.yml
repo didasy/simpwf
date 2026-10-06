@@ -23,29 +23,66 @@ jobs:
           --health-timeout 2s
           --health-retries 30
     env:
+      # dbname is credentials-only and ignored: internal/workflow/testdb
+      # auto-provisions one scratch database per suite from this DSN.
       TEST_DATABASE_DSN: host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable
-      TEST_DATABASE_DSN_ENGINE: host=localhost user=gorm password=gorm dbname=simpwf_test_engine port=9921 sslmode=disable
-      TEST_DATABASE_DSN_SERVICE: host=localhost user=gorm password=gorm dbname=simpwf_test_service port=9921 sslmode=disable
-      TEST_DATABASE_DSN_APP: host=localhost user=gorm password=gorm dbname=simpwf_test_app port=9921 sslmode=disable
-      TEST_DATABASE_DSN_STATUSUPDATE: host=localhost user=gorm password=gorm dbname=simpwf_test_statusupdate port=9921 sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
-      - name: Create scratch test databases
-        run: |
-          for db in simpwf_test_engine simpwf_test_service simpwf_test_app simpwf_test_statusupdate; do
-            PGPASSWORD=gorm createdb -h localhost -p 9921 -U gorm "$db"
-          done
       - name: gofmt
         run: test -z "$(gofmt -l .)"
       - name: go vet
         run: go vet ./...
+      - name: No DB skips outside testdb helper
+        run: |
+          if grep -rn 't\.Skip("TEST_DATABASE_DSN' --include='*_test.go' internal pkg cmd | grep -v 'internal/workflow/testdb/'; then
+            echo "DB tests must route skips through internal/workflow/testdb (fail-loud full mode, SHORT-MODE-SKIP under -short)"
+            exit 1
+          fi
       - name: go test
         run: go test ./... -count=1
       - name: go test -race
         run: go test -race ./... -count=1
+      - name: Per-package coverage floors (DB suites)
+        # Floors = measured 2026-10-06 minus 5pp slack. Measured with live
+        # Postgres and a single TEST_DATABASE_DSN: service 82.5, engine 71.8,
+        # repository 76.4, statusupdate 80.7, app 58.8, database 82.4.
+        run: |
+          go test -coverprofile=/tmp/cover.out ./... -count=1
+          awk '
+            BEGIN {
+              floors["internal/workflow/service"] = 77
+              floors["internal/workflow/engine"] = 66
+              floors["internal/workflow/repository"] = 71
+              floors["internal/workflow/statusupdate"] = 75
+              floors["cmd/app"] = 53
+              floors["pkg/database"] = 77
+            }
+            NR > 1 {
+              file = $1
+              pkg = ""
+              for (p in floors) {
+                if (index(file, p "/") > 0) { pkg = p; break }
+              }
+              if (pkg == "") { next }
+              stmts[pkg] += $2
+              if ($3 > 0) { covered[pkg] += $2 }
+            }
+            END {
+              fail = 0
+              for (p in floors) {
+                pct = (stmts[p] > 0) ? 100 * covered[p] / stmts[p] : 0
+                printf "%s: %.1f%% (floor %d%%)\n", p, pct, floors[p]
+                if (pct < floors[p]) {
+                  printf "FAIL: %s %.1f%% below floor %d%%\n", p, pct, floors[p]
+                  fail = 1
+                }
+              }
+              if (fail) { exit 1 }
+            }
+          ' /tmp/cover.out
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:

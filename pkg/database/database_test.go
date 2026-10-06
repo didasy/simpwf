@@ -1,11 +1,11 @@
 package database_test
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/testdb"
 	"github.com/simpwf/workflow-engine/pkg/database"
 )
 
@@ -27,10 +27,7 @@ func TestNewRejectsUnreachableDatabase(t *testing.T) {
 }
 
 func TestNewConnectsAndAppliesPoolOptions(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_DSN")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
-	}
+	dsn := testdb.RequireDSN(t, "database")
 
 	opts := database.DefaultOptions()
 	opts.DSN = dsn

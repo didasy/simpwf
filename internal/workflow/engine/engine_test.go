@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/simpwf/workflow-engine/internal/workflow/executor"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
-	"github.com/simpwf/workflow-engine/pkg/database"
+	"github.com/simpwf/workflow-engine/internal/workflow/testdb"
 	"github.com/simpwf/workflow-engine/pkg/ids"
 	"gorm.io/gorm"
 )
@@ -30,25 +29,7 @@ func setupEngineDB(t *testing.T) *gorm.DB {
 	// Engine tests run in parallel with repository tests against the same
 	// Postgres instance; they need their own database so the per-test
 	// truncation never clobbers another package's fixtures.
-	dsn := os.Getenv("TEST_DATABASE_DSN_ENGINE")
-	if dsn == "" {
-		dsn = os.Getenv("TEST_DATABASE_DSN")
-	}
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
-	}
-	opts := database.DefaultOptions()
-	opts.DSN = dsn
-	db, err := database.New(opts)
-	if err != nil {
-		t.Fatalf("database.New() error = %v", err)
-	}
-	t.Cleanup(func() {
-		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
-	})
+	db := testdb.Open(t, "engine")
 	if err := db.AutoMigrate(
 		&repository.UserModel{},
 		&repository.NodeDefinitionModel{},

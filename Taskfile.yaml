@@ -8,10 +8,6 @@ vars:
   # Atlas needs a driver-qualified URL (postgres://); the bare host=... DSN is pgx-only.
   ATLAS_DEV_URL: 'postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable'
   TEST_DSN: '{{.DSN}}'
-  TEST_DSN_ENGINE: 'host=localhost user=gorm password=gorm dbname=simpwf_test_engine port=9921 sslmode=disable'
-  TEST_DSN_SERVICE: 'host=localhost user=gorm password=gorm dbname=simpwf_test_service port=9921 sslmode=disable'
-  TEST_DSN_APP: 'host=localhost user=gorm password=gorm dbname=simpwf_test_app port=9921 sslmode=disable'
-  TEST_DSN_STATUSUPDATE: 'host=localhost user=gorm password=gorm dbname=simpwf_test_statusupdate port=9921 sslmode=disable'
 
 tasks:
   build:
@@ -25,14 +21,14 @@ tasks:
       - go run ./cmd/app -config config.yaml
 
   test:
-    desc: Run the full test suite (needs a local PostgreSQL on :9921)
+    desc: Run the full test suite (needs PostgreSQL on :9921; single DSN auto-provisions suite DBs, or run go test -short ./... with no DB)
     cmds:
-      - TEST_DATABASE_DSN='{{.TEST_DSN}}' TEST_DATABASE_DSN_ENGINE='{{.TEST_DSN_ENGINE}}' TEST_DATABASE_DSN_SERVICE='{{.TEST_DSN_SERVICE}}' TEST_DATABASE_DSN_APP='{{.TEST_DSN_APP}}' TEST_DATABASE_DSN_STATUSUPDATE='{{.TEST_DSN_STATUSUPDATE}}' go test ./... -count=1
+      - TEST_DATABASE_DSN='{{.TEST_DSN}}' go test ./... -count=1
 
   test-race:
-    desc: Run the full suite under the race detector
+    desc: Run the full suite under the race detector (same DB setup as test)
     cmds:
-      - TEST_DATABASE_DSN='{{.TEST_DSN}}' TEST_DATABASE_DSN_ENGINE='{{.TEST_DSN_ENGINE}}' TEST_DATABASE_DSN_SERVICE='{{.TEST_DSN_SERVICE}}' TEST_DATABASE_DSN_APP='{{.TEST_DSN_APP}}' TEST_DATABASE_DSN_STATUSUPDATE='{{.TEST_DSN_STATUSUPDATE}}' go test -race ./... -count=1
+      - TEST_DATABASE_DSN='{{.TEST_DSN}}' go test -race ./... -count=1
 
   vet:
     desc: Run go vet
