@@ -1,10 +1,8 @@
 version: "2"
 
 run:
-  # The repository targets Go 1.26 (ariga.io/atlas requires >= 1.26.4), but
-  # some linter builds ship compiled with Go 1.25. Pinning the analysis
-  # language version keeps golangci-lint usable across toolchains.
-  go: "1.25"
+  # Tracks the go directive in go.mod (drift guard in CI enforces this).
+  go: "1.27"
 
 linters:
   default: standard

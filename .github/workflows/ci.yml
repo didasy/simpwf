@@ -89,7 +89,13 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
-          version: v2.12
+          # goinstall builds the linter with this repo's Go toolchain
+          # (setup-go reads go.mod). Prebuilt binaries lag the toolchain and
+          # panic on packages requiring a newer Go version. v2.14.0 is the
+          # verified floor: its staticcheck parses Go 1.27 stdlib sources,
+          # while v2.12.x panics in buildir.
+          install-mode: goinstall
+          version: v2.14.0
           args: --timeout 5m
 
   migrate:
@@ -140,6 +146,15 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      - name: Go toolchain drift guard
+        run: |
+          # go.mod, Dockerfile, and .golangci.yml must agree on the Go minor
+          # version. Skew panics prebuilt linters and stale build images.
+          mod="$(grep -m1 -oP '^go \K[0-9]+\.[0-9]+' go.mod)"
+          img="$(grep -m1 -oP 'golang:\K[0-9]+\.[0-9]+' Dockerfile)"
+          cfg="$(grep -m1 -oP '^\s+go: "\K[0-9]+\.[0-9]+' .golangci.yml)"
+          echo "go.mod=$mod Dockerfile=$img .golangci.yml=$cfg"
+          test "$mod" = "$img" && test "$mod" = "$cfg"
       - name: govulncheck (reachable vulnerabilities fail the build)
         run: go tool govulncheck ./...
       - name: osv-scanner (all known vulnerabilities fail the build)
