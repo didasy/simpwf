@@ -3,14 +3,17 @@ package service
 import (
 	"context"
 
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 )
 
 // StatisticsService is the use-case boundary for workflow statistics.
 type StatisticsService interface {
 	// Summary aggregates instance counts (terminal and active) over the
-	// creation-time window.
-	Summary(ctx context.Context, q repository.StatisticsQuery) (repository.StatisticsResult, error)
+	// creation-time window, scoped to the caller's own runs. The service
+	// principal, an admin, and an unauthenticated caller (authentication
+	// disabled) see the unscoped aggregate.
+	Summary(ctx context.Context, q repository.StatisticsQuery, p auth.Principal) (repository.StatisticsResult, error)
 }
 
 type statisticsService struct {
@@ -22,6 +25,6 @@ func NewStatisticsService(instances repository.InstanceRepository) StatisticsSer
 	return &statisticsService{instances: instances}
 }
 
-func (s *statisticsService) Summary(ctx context.Context, q repository.StatisticsQuery) (repository.StatisticsResult, error) {
-	return s.instances.StatisticsSummary(ctx, q)
+func (s *statisticsService) Summary(ctx context.Context, q repository.StatisticsQuery, p auth.Principal) (repository.StatisticsResult, error) {
+	return s.instances.StatisticsSummary(ctx, ownedStatistics(q, p))
 }

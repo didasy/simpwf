@@ -110,3 +110,70 @@ func TestStatisticsSummaryCounts(t *testing.T) {
 		t.Errorf("empty window RunsPerDay = %+v, want empty", empty.RunsPerDay)
 	}
 }
+
+func TestStatisticsSummaryOwnerScoping(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	ctx := context.Background()
+	repo := repository.NewInstanceRepository(db)
+
+	const otherUserID = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa"
+	now := time.Now().UTC().Truncate(time.Second)
+	other := repository.UserToModel(model.User{ID: otherUserID, Name: "other", Email: "other@localhost", CreatedAt: now, UpdatedAt: now})
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+
+	day1 := now.Add(-48 * time.Hour)
+	day2 := now.Add(-24 * time.Hour)
+	mk := func(id, owner string, status model.WorkflowStatus, created time.Time) model.WorkflowInstance {
+		w := newTestInstance(id, status, "")
+		w.CreatedBy = owner
+		w.CreatedAt = created
+		w.UpdatedAt = created
+		return w
+	}
+
+	// Owner fixtureUserID: 2 finished on day1. Owner otherUserID: 1 failed
+	// on day1, 1 waiting on day2.
+	insertInstance(t, db, mk("66666666-6666-7666-8666-666666666666", fixtureUserID, model.WorkflowFinished, day1))
+	insertInstance(t, db, mk("67676767-6767-7676-8676-676767676767", fixtureUserID, model.WorkflowFinished, day1))
+	insertInstance(t, db, mk("68686868-6868-7686-8686-686868686868", otherUserID, model.WorkflowFailed, day1))
+	insertInstance(t, db, mk("69696969-6969-7696-8696-696969696969", otherUserID, model.WorkflowWaiting, day2))
+
+	from := day1.Add(-time.Hour)
+	to := now.Add(time.Hour)
+
+	mine, err := repo.StatisticsSummary(ctx, repository.StatisticsQuery{From: &from, To: &to, CreatedBy: fixtureUserID})
+	if err != nil {
+		t.Fatalf("StatisticsSummary(mine) error = %v", err)
+	}
+	if mine.TotalRuns != 2 || mine.FinishedRuns != 2 || mine.FailedRuns != 0 {
+		t.Errorf("mine finished/failed/total = %d/%d/%d, want 2/0/2",
+			mine.FinishedRuns, mine.FailedRuns, mine.TotalRuns)
+	}
+	if len(mine.RunsPerDay) != 1 || mine.RunsPerDay[0].Total != 2 || mine.RunsPerDay[0].Finished != 2 {
+		t.Errorf("mine RunsPerDay = %+v, want one day1 bucket with total/finished 2/2", mine.RunsPerDay)
+	}
+
+	theirs, err := repo.StatisticsSummary(ctx, repository.StatisticsQuery{From: &from, To: &to, CreatedBy: otherUserID})
+	if err != nil {
+		t.Fatalf("StatisticsSummary(theirs) error = %v", err)
+	}
+	if theirs.TotalRuns != 2 || theirs.FailedRuns != 1 || theirs.ActiveRuns != 1 {
+		t.Errorf("theirs failed/active/total = %d/%d/%d, want 1/1/2",
+			theirs.FailedRuns, theirs.ActiveRuns, theirs.TotalRuns)
+	}
+	if len(theirs.RunsPerDay) != 2 || theirs.RunsPerDay[0].Total != 1 || theirs.RunsPerDay[1].Total != 1 {
+		t.Errorf("theirs RunsPerDay = %+v, want two single-run buckets", theirs.RunsPerDay)
+	}
+
+	// No owner set: the pre-scoping unscoped aggregate over all rows.
+	all, err := repo.StatisticsSummary(ctx, repository.StatisticsQuery{From: &from, To: &to})
+	if err != nil {
+		t.Fatalf("StatisticsSummary(all) error = %v", err)
+	}
+	if all.TotalRuns != 4 {
+		t.Errorf("unscoped TotalRuns = %d, want 4", all.TotalRuns)
+	}
+}

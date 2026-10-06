@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/simpwf/workflow-engine/internal/workflow/auth"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
 	"github.com/simpwf/workflow-engine/internal/workflow/service"
 )
@@ -12,7 +13,7 @@ import (
 // statisticsServiceContract is the subset of service.StatisticsService the
 // handler needs. It mirrors the interface so tests can fake it.
 type statisticsServiceContract interface {
-	Summary(ctx context.Context, q repository.StatisticsQuery) (repository.StatisticsResult, error)
+	Summary(ctx context.Context, q repository.StatisticsQuery, p auth.Principal) (repository.StatisticsResult, error)
 }
 
 // StatisticsHandler serves the statistics routes.
@@ -45,7 +46,7 @@ func (h *StatisticsHandler) Summary(c *gin.Context) {
 		WriteProblem(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := h.svc.Summary(c.Request.Context(), q.Window)
+	res, err := h.svc.Summary(c.Request.Context(), q.Window, requestPrincipalValue(c))
 	if err != nil {
 		WriteError(c, err)
 		return

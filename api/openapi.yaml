@@ -457,6 +457,8 @@ paths:
         started_at in milliseconds over terminal runs with both timestamps
         set. active_runs counts waiting+running+paused instances in the same
         window. runs_per_day buckets are ordered by date (default descending).
+        With authentication enabled the aggregate covers only the caller's
+        own runs; the service principal and the admin role see all runs.
       parameters:
         - $ref: "#/components/parameters/CreatedFrom"
         - $ref: "#/components/parameters/CreatedTo"
