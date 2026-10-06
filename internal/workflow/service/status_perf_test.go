@@ -61,6 +61,7 @@ func seedParallelShape(t testing.TB, db *gorm.DB, svc service.InstanceService, w
 	}
 	if w == nil {
 		t.Fatal("seed instance was not claimed")
+		return ""
 	}
 	prepo := repository.NewParallelRepository(db)
 	mkBranches := func(n int) []repository.ForkBranch {
