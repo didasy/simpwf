@@ -1,0 +1,6 @@
+# Supply-chain surface (CICD-1): dependency pins, CI, images, schema.
+go.mod go.sum @didasy
+.github/workflows/ @didasy
+.github/CODEOWNERS @didasy
+Dockerfile docker-compose.yml Taskfile.yaml @didasy
+migrations/ @didasy

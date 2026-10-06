@@ -14,7 +14,7 @@ jobs:
       pull-requests: write # Needed to post coverage comments on PRs
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:65b16a8b326e0cfbdf33fa7e783f2a0cb352a61448616ccccfd616ef42aa0f65
         env:
           POSTGRES_USER: gorm
           POSTGRES_PASSWORD: gorm
@@ -31,16 +31,16 @@ jobs:
       # auto-provisions one scratch database per suite from this DSN.
       TEST_DATABASE_DSN: host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 10 # Required to find previous git notes for delta checks
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.x"
+          go-version-file: go.mod
 
       - name: Run Go Coverage Action
-        uses: gwatts/go-coverage-action@v2
+        uses: gwatts/go-coverage-action@2845595538a59d63d1bf55f109c14e104c6f7cb3 # v2
         with:
           coverage-threshold: 75
           fail-coverage: always

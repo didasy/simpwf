@@ -96,7 +96,7 @@ tasks:
         export PGPASSWORD=gorm
         psql -h localhost -p 9921 -U gorm -d postgres -c 'DROP DATABASE IF EXISTS simpwf_e2e WITH (FORCE)' >/dev/null
         psql -h localhost -p 9921 -U gorm -d postgres -c 'CREATE DATABASE simpwf_e2e' >/dev/null
-        docker run --rm --network host -v "$PWD/migrations:/migrations:ro" arigaio/atlas:1.3.0 \
+        docker run --rm --network host -v "$PWD/migrations:/migrations:ro" arigaio/atlas:1.3.0@sha256:aa51fd9b86d27a4dde60e51e4ceeaf5b8080b5b37b94c6c591cd9f9526a32dc1 \
           migrate apply \
           --url "postgres://gorm:gorm@localhost:9921/simpwf_e2e?sslmode=disable" \
           --dir "file:///migrations/versions" >/dev/null
