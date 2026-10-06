@@ -873,6 +873,76 @@ func TestListBranchIDs(t *testing.T) {
 	}
 }
 
+func TestListBranchesByExecutionIDs(t *testing.T) {
+	db := setupTestDB(t)
+	seedInstanceFixture(t, db)
+	truncateParallel(t, db)
+	ctx := context.Background()
+	id := "01950000-0000-7000-8000-0000000000b1"
+	insertLeasedInstance(t, db, id)
+
+	repo := repository.NewParallelRepository(db)
+	// Three branches inserted out of index order: read-back must follow
+	// branch_index, proving the ORDER BY rather than insertion order.
+	top := parallelFork(id)
+	top.Branches = []repository.ForkBranch{
+		{Name: "c", BranchIndex: 2, StartNodeID: parallelTestNodeB, Frame: model.NewFrame(parallelTestNodeB), Context: json.RawMessage(`{"v":1}`)},
+		{Name: "a", BranchIndex: 0, StartNodeID: parallelTestNodeA, Frame: model.NewFrame(parallelTestNodeA), Context: json.RawMessage(`{"v":1}`)},
+		{Name: "b", BranchIndex: 1, StartNodeID: parallelTestNodeB, Frame: model.NewFrame(parallelTestNodeB), Context: json.RawMessage(`{"v":1}`)},
+	}
+	outer, branches, err := repo.Fork(ctx, top)
+	if err != nil {
+		t.Fatalf("Fork() error = %v", err)
+	}
+	parent := claimBranchByID(t, repo, ctx, branches[1].ID)
+	nested := nestedForkFor(id, parent)
+	nested.Branches = []repository.ForkBranch{
+		{Name: "y", BranchIndex: 1, StartNodeID: parallelTestNestedB, Frame: model.NewFrame(parallelTestNestedB), Context: parent.Context},
+		{Name: "x", BranchIndex: 0, StartNodeID: parallelTestNestedA, Frame: model.NewFrame(parallelTestNestedA), Context: parent.Context},
+		{Name: "z", BranchIndex: 2, StartNodeID: parallelTestNestedB, Frame: model.NewFrame(parallelTestNestedB), Context: parent.Context},
+	}
+	inner, _, err := repo.Fork(ctx, nested)
+	if err != nil {
+		t.Fatalf("nested Fork() error = %v", err)
+	}
+
+	got, err := repo.ListBranchesByExecutionIDs(ctx, []string{outer.ID, inner.ID})
+	if err != nil {
+		t.Fatalf("ListBranchesByExecutionIDs() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("groups = %d, want 2", len(got))
+	}
+	assertBranchOrder(t, got[outer.ID], outer.ID, []string{"a", "b", "c"})
+	assertBranchOrder(t, got[inner.ID], inner.ID, []string{"x", "y", "z"})
+
+	// Unknown ids yield an empty map, not an error; executions without
+	// branches simply have no entry.
+	unknown, err := repo.ListBranchesByExecutionIDs(ctx, []string{"01950000-0000-7000-8000-0000000000b2"})
+	if err != nil || len(unknown) != 0 {
+		t.Fatalf("unknown = %v, %v", unknown, err)
+	}
+	for _, ids := range [][]string{nil, {}} {
+		empty, err := repo.ListBranchesByExecutionIDs(ctx, ids)
+		if err != nil || len(empty) != 0 {
+			t.Fatalf("empty input = %v, %v", empty, err)
+		}
+	}
+}
+
+func assertBranchOrder(t *testing.T, branches []model.ParallelBranch, executionID string, wantNames []string) {
+	t.Helper()
+	if len(branches) != len(wantNames) {
+		t.Fatalf("execution %s branches = %d, want %d", executionID, len(branches), len(wantNames))
+	}
+	for i, name := range wantNames {
+		b := branches[i]
+		if b.Name != name || b.BranchIndex != i || b.ParallelExecutionID != executionID {
+			t.Fatalf("branches[%d] = %+v, want name %q index %d", i, b, name, i)
+		}
+	}
+}
+
 func TestStopParkedParallelReportsNoPending(t *testing.T) {
 	db := setupTestDB(t)
 	seedInstanceFixture(t, db)

@@ -86,6 +86,11 @@ type ParallelRepository interface {
 	GetBranch(ctx context.Context, id string) (*model.ParallelBranch, error)
 	// ListBranches returns an execution's branches ordered by branch_index.
 	ListBranches(ctx context.Context, executionID string) ([]model.ParallelBranch, error)
+	// ListBranchesByExecutionIDs returns many executions' branches in one
+	// query, grouped by execution id with each group ordered by
+	// branch_index. Executions without branches have no entry. An empty
+	// id list returns an empty map without querying.
+	ListBranchesByExecutionIDs(ctx context.Context, executionIDs []string) (map[string][]model.ParallelBranch, error)
 	// ListBranchIDs returns every branch id of an instance, used to fan
 	// termination cancels out to in-flight branch workers.
 	ListBranchIDs(ctx context.Context, instanceID string) ([]string, error)
@@ -317,6 +322,23 @@ func (r *parallelRepo) ListBranches(ctx context.Context, executionID string) ([]
 	out := make([]model.ParallelBranch, len(models))
 	for i := range models {
 		out[i] = ParallelBranchFromModel(models[i])
+	}
+	return out, nil
+}
+
+func (r *parallelRepo) ListBranchesByExecutionIDs(ctx context.Context, executionIDs []string) (map[string][]model.ParallelBranch, error) {
+	out := make(map[string][]model.ParallelBranch, len(executionIDs))
+	if len(executionIDs) == 0 {
+		return out, nil
+	}
+	var models []ParallelBranchModel
+	if err := r.db.WithContext(ctx).Where("parallel_execution_id IN ?", executionIDs).
+		Order("parallel_execution_id").Order("branch_index").Find(&models).Error; err != nil {
+		return nil, err
+	}
+	for i := range models {
+		b := ParallelBranchFromModel(models[i])
+		out[b.ParallelExecutionID] = append(out[b.ParallelExecutionID], b)
 	}
 	return out, nil
 }

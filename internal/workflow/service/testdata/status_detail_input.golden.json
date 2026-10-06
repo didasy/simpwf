@@ -1,0 +1,103 @@
+{
+  "Instance": {
+    "ID": "<INST>",
+    "WorkflowDefinitionID": "<WF>",
+    "ContextMode": "full",
+    "Debug": false,
+    "Status": "waiting",
+    "WaitingReason": "input",
+    "PauseRequested": false,
+    "TerminationPending": false,
+    "CurrentGroupID": "",
+    "CurrentNodeID": "",
+    "Frame": {
+      "current_node_id": "11111111-1111-7111-8111-111111111101"
+    },
+    "Context": {
+      "env": {}
+    },
+    "Counters": {
+      "total": 0
+    },
+    "Revision": 2,
+    "LeasedBy": "",
+    "LeaseExpiry": "<TS>",
+    "Error": "",
+    "StartedAt": "<TS>",
+    "FinishedAt": null,
+    "CreatedBy": "11111111-1111-7111-8111-111111111111",
+    "UpdatedBy": "11111111-1111-7111-8111-111111111111",
+    "CreatedAt": "<TS>",
+    "UpdatedAt": "<TS>"
+  },
+  "CurrentNodeInstanceID": "<OCC-101>",
+  "Attempt": 1,
+  "Nodes": {
+    "11111111-1111-7111-8111-111111111101": {
+      "OccurrenceID": "<OCC-101>",
+      "Status": "running",
+      "Attempt": 1,
+      "Rollbackable": false
+    }
+  },
+  "PendingInput": {
+    "NodeID": "11111111-1111-7111-8111-111111111101",
+    "Channel": "http",
+    "OutputProperty": "user",
+    "Form": {
+      "schema": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        }
+      },
+      "ui": {
+        "order": [
+          "email"
+        ]
+      }
+    },
+    "AllowedRoles": null,
+    "RecordActor": false,
+    "Public": false
+  },
+  "Parallel": [
+    {
+      "ID": "33333333-3333-7333-8333-333333333311",
+      "ParentBranchID": null,
+      "Depth": 1,
+      "StartNodeID": "33333333-3333-7333-8333-333333333314",
+      "EndNodeID": "33333333-3333-7333-8333-333333333315",
+      "Status": "waiting_for_branches",
+      "BranchCount": 2,
+      "CompletedCount": 0,
+      "Branches": [
+        {
+          "ID": "33333333-3333-7333-8333-333333333312",
+          "Name": "a",
+          "BranchIndex": 0,
+          "StartNodeID": "33333333-3333-7333-8333-333333333316",
+          "Status": "waiting",
+          "WaitingReason": "input",
+          "Error": "",
+          "UpdatedAt": "<TS>"
+        },
+        {
+          "ID": "33333333-3333-7333-8333-333333333313",
+          "Name": "b",
+          "BranchIndex": 1,
+          "StartNodeID": "33333333-3333-7333-8333-333333333317",
+          "Status": "pending",
+          "WaitingReason": "",
+          "Error": "",
+          "UpdatedAt": "<TS>"
+        }
+      ]
+    }
+  ]
+}

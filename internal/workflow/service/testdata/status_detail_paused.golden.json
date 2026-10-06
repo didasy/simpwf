@@ -1,0 +1,89 @@
+{
+  "Instance": {
+    "ID": "<INST>",
+    "WorkflowDefinitionID": "<WF>",
+    "ContextMode": "full",
+    "Debug": false,
+    "Status": "paused",
+    "WaitingReason": "",
+    "PauseRequested": false,
+    "TerminationPending": false,
+    "CurrentGroupID": "",
+    "CurrentNodeID": "",
+    "Frame": {
+      "current_node_id": "11111111-1111-7111-8111-111111111102"
+    },
+    "Context": {
+      "env": {},
+      "out1": 1,
+      "x": 1
+    },
+    "Counters": {
+      "nodes": {
+        "11111111-1111-7111-8111-111111111101": 1
+      },
+      "total": 1
+    },
+    "Revision": 3,
+    "LeasedBy": "",
+    "LeaseExpiry": "<TS>",
+    "Error": "",
+    "StartedAt": "<TS>",
+    "FinishedAt": null,
+    "CreatedBy": "11111111-1111-7111-8111-111111111111",
+    "UpdatedBy": "11111111-1111-7111-8111-111111111111",
+    "CreatedAt": "<TS>",
+    "UpdatedAt": "<TS>"
+  },
+  "CurrentNodeInstanceID": null,
+  "Attempt": 0,
+  "Nodes": {
+    "11111111-1111-7111-8111-111111111101": {
+      "OccurrenceID": "<OCC-101>",
+      "Status": "finished",
+      "Attempt": 1,
+      "Rollbackable": true
+    },
+    "11111111-1111-7111-8111-111111111102": {
+      "OccurrenceID": null,
+      "Status": "not_started",
+      "Attempt": null,
+      "Rollbackable": false
+    }
+  },
+  "PendingInput": null,
+  "Parallel": [
+    {
+      "ID": "33333333-3333-7333-8333-333333333311",
+      "ParentBranchID": null,
+      "Depth": 1,
+      "StartNodeID": "33333333-3333-7333-8333-333333333314",
+      "EndNodeID": "33333333-3333-7333-8333-333333333315",
+      "Status": "completed",
+      "BranchCount": 2,
+      "CompletedCount": 2,
+      "Branches": [
+        {
+          "ID": "33333333-3333-7333-8333-333333333312",
+          "Name": "a",
+          "BranchIndex": 0,
+          "StartNodeID": "33333333-3333-7333-8333-333333333316",
+          "Status": "completed",
+          "WaitingReason": "",
+          "Error": "",
+          "UpdatedAt": "<TS>"
+        },
+        {
+          "ID": "33333333-3333-7333-8333-333333333313",
+          "Name": "b",
+          "BranchIndex": 1,
+          "StartNodeID": "33333333-3333-7333-8333-333333333317",
+          "Status": "completed",
+          "WaitingReason": "",
+          "Error": "",
+          "UpdatedAt": "<TS>"
+        }
+      ]
+    }
+  ]
+}

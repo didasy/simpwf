@@ -29,7 +29,7 @@ const svcSysUserID = "11111111-1111-7111-8111-111111111111"
 
 var svcLimits = model.NodeLimits{DefaultTimeout: 5 * time.Second, MaxTimeout: 10 * time.Second, ConditionTimeout: 2 * time.Second}
 
-func setupSvcDB(t *testing.T) *gorm.DB {
+func setupSvcDB(t testing.TB) *gorm.DB {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_DSN_SERVICE")
 	if dsn == "" {
@@ -118,7 +118,7 @@ func svcNodeJSON(id, typ, name, script, next string, extra map[string]any) strin
 	return string(b)
 }
 
-func svcCreateWorkflow(t *testing.T, db *gorm.DB, start string, nodes ...string) string {
+func svcCreateWorkflow(t testing.TB, db *gorm.DB, start string, nodes ...string) string {
 	t.Helper()
 	raw := fmt.Sprintf(`{"start_node_id":%q,"nodes":[%s]}`, start, joinAll(nodes))
 	return svcCreateWorkflowRaw(t, db, raw)
@@ -130,7 +130,7 @@ func svcCreateWorkflowWithMode(t *testing.T, db *gorm.DB, start, mode string, no
 	return svcCreateWorkflowRaw(t, db, raw)
 }
 
-func svcCreateWorkflowRaw(t *testing.T, db *gorm.DB, raw string) string {
+func svcCreateWorkflowRaw(t testing.TB, db *gorm.DB, raw string) string {
 	t.Helper()
 	wf := model.WorkflowDefinition{
 		ID: svcNewID(), Name: "svc-flow", Version: 1, LineageID: svcNewID(),
