@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -35,6 +36,52 @@ func TestNewLogger(t *testing.T) {
 func TestNewLoggerRejectsInvalidLevel(t *testing.T) {
 	if _, err := NewLogger("loud"); err == nil {
 		t.Fatal("NewLogger() error = nil, want error for invalid level")
+	}
+}
+
+// TestExecutorLimitsSharesBulkhead pins that the composition root threads
+// one bulkhead built from the configured caps into the executor limits, so
+// executors, pollers, publishers, and custom nodes share it process-wide.
+func TestExecutorLimitsSharesBulkhead(t *testing.T) {
+	cfg := &configuration.Config{}
+	cfg.Engine.HTTPAllowlist = []string{"example.com"}
+	cfg.Engine.ExecAllowlist = []string{"/bin/echo"}
+	cfg.Engine.MaxOutputBytes = 1024
+	cfg.Engine.HTTPMaxInFlight = 3
+	cfg.Engine.HTTPMaxInFlightPerHost = 2
+
+	limits := executorLimits(cfg)
+	if limits.MaxRedirects != 5 {
+		t.Errorf("MaxRedirects = %d, want default 5", limits.MaxRedirects)
+	}
+	if limits.HTTPBulkhead == nil {
+		t.Fatal("HTTPBulkhead is nil, want the shared instance")
+	}
+	if limits.HTTPMaxInFlight != 3 || limits.HTTPMaxInFlightPerHost != 2 {
+		t.Errorf("caps = %d/%d, want 3/2 from config",
+			limits.HTTPMaxInFlight, limits.HTTPMaxInFlightPerHost)
+	}
+
+	// The bulkhead honors the configured global cap: 3 distinct-host
+	// slots admit, the 4th sheds.
+	ctx := context.Background()
+	var releases []func()
+	for i := 0; i < 3; i++ {
+		release, err := limits.HTTPBulkhead.Acquire(ctx, fmt.Sprintf("h%d.example", i))
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if _, err := limits.HTTPBulkhead.Acquire(short, "other.example"); !errors.Is(err, executor.ErrHTTPOverloaded) {
+		t.Fatalf("over-cap acquire err = %v, want ErrHTTPOverloaded", err)
 	}
 }
 

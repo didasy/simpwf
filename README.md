@@ -262,6 +262,8 @@ system audit user. Key settings:
 | `engine.parallel.max_active_branches_per_instance`       | `128`                  | Max live branches per instance across all executions                                                            |
 | `engine.http_allowlist`                                  | loopback + examples    | `"*"` allows any target (development only, logs a warning)                                                      |
 | `engine.exec_allowlist`                                  | `/bin/echo`, `/bin/ls` | Absolute paths only (bare names fail startup); direct argv, never a shell                                       |
+| `engine.http_max_in_flight`                              | `128`                  | Process-wide outbound HTTP cap shared by nodes, pollers, publishers, custom nodes                               |
+| `engine.http_max_in_flight_per_host`                     | `16`                   | Per-host outbound HTTP cap; fleet-wide concurrency is replicas x this                                           |
 | `auth.enabled` / `api_token`                             | `false`                | When enabled, `/v1` requires `X-Api-Token` (the service principal)                                              |
 | `auth.oidc.*`                                            | disabled               | OIDC resource server; needs `issuer` and `client_id`                                                            |
 | `auth.role_permissions` / `SIMPWF_AUTH_ROLE_PERMISSIONS` | file / `{}`            | Role-to-action catalog as YAML map or JSON object; env overrides file; invalid JSON fails startup               |

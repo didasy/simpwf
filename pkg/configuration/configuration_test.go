@@ -762,6 +762,101 @@ engine:
 	}
 }
 
+func TestLoadHTTPBulkheadDefaults(t *testing.T) {
+	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(missingPath(t)))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Engine.HTTPMaxInFlight != 128 || cfg.Engine.HTTPMaxInFlightPerHost != 16 {
+		t.Errorf("http bulkhead = %d/%d, want 128/16", cfg.Engine.HTTPMaxInFlight, cfg.Engine.HTTPMaxInFlightPerHost)
+	}
+}
+
+func TestLoadHTTPBulkheadFromFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  http_max_in_flight: 64
+  http_max_in_flight_per_host: 8
+`)
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Engine.HTTPMaxInFlight != 64 || cfg.Engine.HTTPMaxInFlightPerHost != 8 {
+		t.Errorf("http bulkhead = %d/%d, want 64/8 from file", cfg.Engine.HTTPMaxInFlight, cfg.Engine.HTTPMaxInFlightPerHost)
+	}
+}
+
+func TestLoadHTTPBulkheadEnvOverridesFile(t *testing.T) {
+	path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  http_max_in_flight: 64
+  http_max_in_flight_per_host: 8
+`)
+	setenv(t, "SIMPWF_ENGINE_HTTP_MAX_IN_FLIGHT", "32")
+	setenv(t, "SIMPWF_ENGINE_HTTP_MAX_IN_FLIGHT_PER_HOST", "4")
+
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Engine.HTTPMaxInFlight != 32 || cfg.Engine.HTTPMaxInFlightPerHost != 4 {
+		t.Errorf("http bulkhead = %d/%d, want 32/4 from environment", cfg.Engine.HTTPMaxInFlight, cfg.Engine.HTTPMaxInFlightPerHost)
+	}
+}
+
+func TestLoadRejectsInvalidHTTPBulkhead(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"http_max_in_flight", "http_max_in_flight: 0"},
+		{"http_max_in_flight", "http_max_in_flight: -2"},
+		{"http_max_in_flight_per_host", "http_max_in_flight_per_host: 0"},
+		{"http_max_in_flight_per_host", "http_max_in_flight_per_host: -3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			path := writeConfig(t, `
+infra:
+  postgresql:
+    dsn: "file-dsn"
+engine:
+  `+tc.value+`
+`)
+			_, err := configuration.Load(configuration.WithConfigFile(path))
+			if err == nil {
+				t.Fatalf("Load() error = nil, want rejection for %s", tc.value)
+			}
+			if !strings.Contains(err.Error(), "engine."+tc.name) {
+				t.Errorf("error = %q, want it to name engine.%s", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestShippedConfigHTTPBulkheadCaps(t *testing.T) {
+	path := filepath.Join("..", "..", "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("shipped config not available: %v", err)
+	}
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load(%s) error = %v", path, err)
+	}
+	if cfg.Engine.HTTPMaxInFlight != 128 || cfg.Engine.HTTPMaxInFlightPerHost != 16 {
+		t.Errorf("shipped http bulkhead = %d/%d, want 128/16", cfg.Engine.HTTPMaxInFlight, cfg.Engine.HTTPMaxInFlightPerHost)
+	}
+}
+
 func TestLoadPostgreSQLPoolDefaults(t *testing.T) {
 	setenv(t, "SIMPWF_INFRA_POSTGRESQL_DSN", testDSN)
 

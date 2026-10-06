@@ -23,11 +23,14 @@ import (
 
 // HTTPExecutor performs outbound HTTP calls under the configured target
 // allowlist. Every request (including redirects) is validated against the
-// allowlist and DNS, so scripts cannot exfiltrate context data.
+// allowlist and DNS, so scripts cannot exfiltrate context data. Every call
+// is admitted through the shared bulkhead, so outbound concurrency stays
+// bounded process-wide.
 type HTTPExecutor struct {
 	allowlist    []string
 	maxRedirects int
 	maxBody      int
+	bulkhead     *HTTPBulkhead
 }
 
 type httpConfig struct {
@@ -39,11 +42,18 @@ type httpConfig struct {
 
 // NewHTTPExecutor builds a standalone outbound HTTP client enforcing the
 // executor security policy (scheme, allowlist, DNS, redirect revalidation).
+// A nil limits.HTTPBulkhead builds a private default bulkhead from the
+// configured caps, so existing constructions stay bounded with zero churn.
 func NewHTTPExecutor(limits Limits) *HTTPExecutor {
+	bulkhead := limits.HTTPBulkhead
+	if bulkhead == nil {
+		bulkhead = NewHTTPBulkhead(limits.HTTPMaxInFlight, limits.HTTPMaxInFlightPerHost)
+	}
 	return &HTTPExecutor{
 		allowlist:    limits.HTTPAllowlist,
 		maxRedirects: limits.MaxRedirects,
 		maxBody:      limits.MaxOutputBytes,
+		bulkhead:     bulkhead,
 	}
 }
 
@@ -61,6 +71,9 @@ func (e *HTTPExecutor) Execute(ctx context.Context, req Request) (*Result, error
 	}
 	body, status, respHeaders, err := e.Do(ctx, cfg.method, cfg.target, headers, cfg.body, nodeTimeout(req.Node))
 	if err != nil {
+		if errors.Is(err, ErrHTTPOverloaded) {
+			return nil, &NodeError{Node: req.Node, Reason: "http-overload", Err: err}
+		}
 		return nil, &NodeError{Node: req.Node, Reason: "http", Err: err}
 	}
 	var parsed any
@@ -84,10 +97,22 @@ func (e *HTTPExecutor) Execute(ctx context.Context, req Request) (*Result, error
 	return res, nil
 }
 
+// maxHTTPRetries bounds transparent retries of 429/503 on GET/HEAD.
+const maxHTTPRetries = 2
+
 // Do performs an outbound HTTP request under the executor's security policy
 // and returns the raw response body, status code, and headers. A non-nil
 // body defaults the Content-Type to application/json when no header sets
-// one. The timeout covers the whole request lifecycle including redirects.
+// one. The timeout covers the whole request lifecycle including redirects,
+// bulkhead admission, and any Retry-After backoff.
+//
+// Admission sheds load: when no bulkhead slot frees before the timeout, Do
+// fails with ErrHTTPOverloaded instead of hanging. A 429/503 on GET/HEAD
+// retries up to maxHTTPRetries times with the Retry-After delay honored
+// (500ms/1s exponential when the header is absent or invalid); permits are
+// released while backing off, and when the delay exceeds the remaining
+// budget the last response is returned as-is. Other methods never retry
+// transparently. Each caller keeps its own upstream call and response.
 func (e *HTTPExecutor) Do(ctx context.Context, method, target string, headers map[string]string, body []byte, timeout time.Duration) ([]byte, int, http.Header, error) {
 	parsed, err := url.Parse(target)
 	if err != nil {
@@ -112,7 +137,40 @@ func (e *HTTPExecutor) Do(ctx context.Context, method, target string, headers ma
 		},
 	}
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, method, target, bytes.NewReader(body))
+	release, err := e.bulkhead.Acquire(reqCtx, parsed.Host)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	upper := strings.ToUpper(strings.TrimSpace(method))
+	retryable := upper == http.MethodGet || upper == http.MethodHead
+	for attempt := 0; ; attempt++ {
+		out, status, respHeaders, err := e.roundTrip(reqCtx, client, method, target, headers, body)
+		if err != nil {
+			release()
+			return nil, 0, nil, err
+		}
+		if !retryable || (status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable) || attempt >= maxHTTPRetries {
+			release()
+			return out, status, respHeaders, nil
+		}
+		backoff := retryBackoff(respHeaders.Get("Retry-After"), attempt)
+		release()
+		if !sleepForRetry(reqCtx, backoff) {
+			return out, status, respHeaders, nil
+		}
+		release, err = e.bulkhead.Acquire(reqCtx, parsed.Host)
+		if err != nil {
+			// The budget expired while re-admitting. The upstream 429/503
+			// already in hand routes better than a shed error, so keep it.
+			return out, status, respHeaders, nil
+		}
+	}
+}
+
+// roundTrip issues one HTTP request. The caller must hold a bulkhead slot.
+func (e *HTTPExecutor) roundTrip(ctx context.Context, client *http.Client, method, target string, headers map[string]string, body []byte) ([]byte, int, http.Header, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -134,6 +192,36 @@ func (e *HTTPExecutor) Do(ctx context.Context, method, target string, headers ma
 		return nil, 0, nil, err
 	}
 	return out, resp.StatusCode, resp.Header, nil
+}
+
+// retryBackoff returns the Retry-After delay when the header parses, else
+// 500ms/1s exponential by zero-based attempt.
+func retryBackoff(header string, attempt int) time.Duration {
+	if d, ok := parseRetryAfter(header); ok {
+		return d
+	}
+	return 500 * time.Millisecond << attempt
+}
+
+// sleepForRetry sleeps d unless ctx expires first or d exceeds the remaining
+// budget. It reports whether the caller should retry.
+func sleepForRetry(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if time.Now().Add(d).After(deadline) {
+			return false
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (e *HTTPExecutor) build(ctx context.Context, req Request) (*httpConfig, error) {

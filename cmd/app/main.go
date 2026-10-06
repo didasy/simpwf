@@ -155,6 +155,25 @@ func databaseOptions(cfg *configuration.Config) database.Options {
 	return opts
 }
 
+// executorLimits maps engine config to executor limits. It builds the one
+// shared HTTP bulkhead from the configured caps so nodes, pollers, the
+// status publisher, and custom nodes are all admitted process-wide.
+func executorLimits(cfg *configuration.Config) executor.Limits {
+	maxRedirects := cfg.Engine.MaxRedirects
+	if maxRedirects <= 0 {
+		maxRedirects = 5
+	}
+	return executor.Limits{
+		HTTPAllowlist:          cfg.Engine.HTTPAllowlist,
+		ExecAllowlist:          cfg.Engine.ExecAllowlist,
+		MaxOutputBytes:         cfg.Engine.MaxOutputBytes,
+		MaxRedirects:           maxRedirects,
+		HTTPBulkhead:           executor.NewHTTPBulkhead(cfg.Engine.HTTPMaxInFlight, cfg.Engine.HTTPMaxInFlightPerHost),
+		HTTPMaxInFlight:        cfg.Engine.HTTPMaxInFlight,
+		HTTPMaxInFlightPerHost: cfg.Engine.HTTPMaxInFlightPerHost,
+	}
+}
+
 // run starts the HTTP server and the dispatcher, and blocks until ctx is
 // cancelled, then shuts down gracefully. It returns nil on a clean shutdown.
 func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) error {
@@ -266,16 +285,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		limits.MaxParallelDepth = cfg.Engine.Parallel.MaxDepth
 	}
 
-	maxRedirects := cfg.Engine.MaxRedirects
-	if maxRedirects <= 0 {
-		maxRedirects = 5
-	}
-	execLimits := executor.Limits{
-		HTTPAllowlist:  cfg.Engine.HTTPAllowlist,
-		ExecAllowlist:  cfg.Engine.ExecAllowlist,
-		MaxOutputBytes: cfg.Engine.MaxOutputBytes,
-		MaxRedirects:   maxRedirects,
-	}
+	execLimits := executorLimits(cfg)
 
 	nodeSvc := service.NewNodeDefinitionService(nodeDefs, nodeLimits, actor)
 	wfSvc := service.NewWorkflowDefinitionService(wfDefs, nodeDefs, nodeLimits, actor)

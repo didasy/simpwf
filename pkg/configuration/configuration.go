@@ -118,15 +118,17 @@ type Engine struct {
 	// PollInterval paces both dispatchers' claim loops; HeartbeatInterval
 	// paces the engine dispatcher's lease-renewal loop (the status
 	// dispatcher has no heartbeat loop).
-	PollInterval       time.Duration `mapstructure:"poll_interval"`
-	HeartbeatInterval  time.Duration `mapstructure:"heartbeat_interval"`
-	MaxOutputBytes     int           `mapstructure:"max_output_bytes"`
-	MaxRedirects       int           `mapstructure:"max_redirects"`
-	HTTPAllowlist      []string      `mapstructure:"http_allowlist"`
-	ExecAllowlist      []string      `mapstructure:"exec_allowlist"`
-	LeanContextDefault bool          `mapstructure:"lean_context_default"`
-	LeanAnchorEvery    int           `mapstructure:"lean_anchor_every"`
-	LeanReplayMax      int           `mapstructure:"lean_replay_max"`
+	PollInterval           time.Duration `mapstructure:"poll_interval"`
+	HeartbeatInterval      time.Duration `mapstructure:"heartbeat_interval"`
+	MaxOutputBytes         int           `mapstructure:"max_output_bytes"`
+	MaxRedirects           int           `mapstructure:"max_redirects"`
+	HTTPMaxInFlight        int           `mapstructure:"http_max_in_flight"`
+	HTTPMaxInFlightPerHost int           `mapstructure:"http_max_in_flight_per_host"`
+	HTTPAllowlist          []string      `mapstructure:"http_allowlist"`
+	ExecAllowlist          []string      `mapstructure:"exec_allowlist"`
+	LeanContextDefault     bool          `mapstructure:"lean_context_default"`
+	LeanAnchorEvery        int           `mapstructure:"lean_anchor_every"`
+	LeanReplayMax          int           `mapstructure:"lean_replay_max"`
 	// EnvDenyExtra and EnvAllowExceptions adjust the hardcoded env snapshot
 	// deny list: extra adds patterns, allow narrows it with exceptions. They
 	// never replace the defaults, so a misconfiguration cannot silently open
@@ -271,6 +273,10 @@ func Load(opts ...Option) (*Config, error) {
 	_ = v.BindEnv("engine.consumer_retry.initial_backoff", "SIMPWF_ENGINE_CONSUMER_RETRY_INITIAL_BACKOFF")
 	_ = v.BindEnv("engine.consumer_retry.max_backoff", "SIMPWF_ENGINE_CONSUMER_RETRY_MAX_BACKOFF")
 	_ = v.BindEnv("engine.consumer_retry.min_healthy_run", "SIMPWF_ENGINE_CONSUMER_RETRY_MIN_HEALTHY_RUN")
+	// HTTP bulkhead caps are operator toggles and must override
+	// config.yaml.
+	_ = v.BindEnv("engine.http_max_in_flight", "SIMPWF_ENGINE_HTTP_MAX_IN_FLIGHT")
+	_ = v.BindEnv("engine.http_max_in_flight_per_host", "SIMPWF_ENGINE_HTTP_MAX_IN_FLIGHT_PER_HOST")
 
 	if _, err := os.Stat(path); err == nil {
 		v.SetConfigFile(path)
@@ -368,6 +374,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("engine.heartbeat_interval", "5s")
 	v.SetDefault("engine.max_output_bytes", 0)
 	v.SetDefault("engine.max_redirects", 0)
+	v.SetDefault("engine.http_max_in_flight", 128)
+	v.SetDefault("engine.http_max_in_flight_per_host", 16)
 	v.SetDefault("engine.http_allowlist", []string{})
 	v.SetDefault("engine.exec_allowlist", []string{})
 	v.SetDefault("engine.lean_context_default", false)
@@ -426,6 +434,12 @@ func (c *Config) validate() error {
 	}
 	if c.Engine.HeartbeatInterval <= 0 {
 		return errors.New("configuration: engine.heartbeat_interval must be > 0")
+	}
+	if c.Engine.HTTPMaxInFlight <= 0 {
+		return errors.New("configuration: engine.http_max_in_flight must be > 0")
+	}
+	if c.Engine.HTTPMaxInFlightPerHost <= 0 {
+		return errors.New("configuration: engine.http_max_in_flight_per_host must be > 0")
 	}
 	if c.Engine.LeanAnchorEvery <= 0 {
 		return errors.New("configuration: engine.lean_anchor_every must be > 0")
