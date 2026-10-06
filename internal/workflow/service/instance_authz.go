@@ -69,3 +69,29 @@ func ownedInstances(q repository.InstanceListQuery, p auth.Principal) repository
 	q.CreatedBy = p.UserID
 	return q
 }
+
+// ownedStatistics constrains a statistics aggregate to the caller's own
+// rows. Like ownedInstances, the service principal and a caller with no
+// user id (authentication disabled) keep the unscoped aggregate. An admin
+// also keeps the unscoped aggregate: statistics stay deployment-wide for
+// the operator role, while the instance list stays scoped.
+func ownedStatistics(q repository.StatisticsQuery, p auth.Principal) repository.StatisticsQuery {
+	if p.Service || p.UserID == "" || isAdmin(p) {
+		return q
+	}
+	q.CreatedBy = p.UserID
+	return q
+}
+
+// isAdmin reports whether the principal carries the admin role. The role
+// name is the check rather than a wildcard permission because the shipped
+// configuration grants admin by enumerating every action, so a wildcard
+// check would not recognize the real admin.
+func isAdmin(p auth.Principal) bool {
+	for _, role := range p.Roles {
+		if role == "admin" {
+			return true
+		}
+	}
+	return false
+}

@@ -17,6 +17,11 @@ type StatisticsQuery struct {
 	From  *time.Time
 	To    *time.Time
 	Order string
+	// CreatedBy scopes the aggregate to one owner. The service sets it
+	// from the authenticated principal, so a caller cannot widen the
+	// result set by naming another user: the field is not parsed from
+	// the query string.
+	CreatedBy string
 }
 
 // RunsPerDayPoint is one calendar-day bucket (Date is YYYY-MM-DD).
@@ -75,6 +80,9 @@ func (r *instanceRepo) StatisticsSummary(ctx context.Context, q StatisticsQuery)
 	if q.To != nil {
 		base = base.Where("created_at <= ?", *q.To)
 	}
+	if q.CreatedBy != "" {
+		base = base.Where("created_by = ?", q.CreatedBy)
+	}
 
 	var agg statisticsAggRow
 	if err := base.Select(`COUNT(*) AS total,` +
@@ -114,6 +122,9 @@ func (r *instanceRepo) StatisticsSummary(ctx context.Context, q StatisticsQuery)
 	}
 	if q.To != nil {
 		dayQuery = dayQuery.Where("created_at <= ?", *q.To)
+	}
+	if q.CreatedBy != "" {
+		dayQuery = dayQuery.Where("created_by = ?", q.CreatedBy)
 	}
 	var dayRows []statisticsDayRow
 	if err := dayQuery.Select(`DATE(created_at) AS day, status, COUNT(*) AS n`).
