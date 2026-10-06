@@ -624,8 +624,26 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string, p auth
 		return nil, err
 	}
 	d := &StatusDetail{Instance: *redactInstanceView(inst)}
-	d.Nodes = s.statusNodes(ctx, inst)
-	d.Parallel = s.statusParallel(ctx, inst.ID)
+	// Single-pass fetch: the materialized tree, the executions, and the
+	// branches each load once and are shared by every section below.
+	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
+	if err != nil {
+		wc = nil
+	}
+	exs, exErr := s.parallel.ListExecutions(ctx, inst.ID)
+	var branchesByEx map[string][]model.ParallelBranch
+	branchesErr := exErr
+	if exErr == nil && len(exs) > 0 {
+		ids := make([]string, 0, len(exs))
+		for _, ex := range exs {
+			ids = append(ids, ex.ID)
+		}
+		branchesByEx, branchesErr = s.parallel.ListBranchesByExecutionIDs(ctx, ids)
+	}
+	d.Nodes = s.statusNodes(ctx, inst, wc, exs, exErr)
+	if exErr == nil && branchesErr == nil {
+		d.Parallel = statusParallel(exs, branchesByEx)
+	}
 	frame, err := model.ParseFrame(inst.Frame)
 	if err != nil {
 		return d, nil
@@ -640,19 +658,19 @@ func (s *instanceService) GetStatusDetail(ctx context.Context, id string, p auth
 	nodeInstanceID := attempt.ID
 	d.CurrentNodeInstanceID = &nodeInstanceID
 	d.Attempt = attempt.Attempt
-	d.PendingInput = s.pendingInput(ctx, inst, frame.CurrentNodeID)
+	d.PendingInput = pendingInput(wc, inst, frame.CurrentNodeID)
 	return d, nil
 }
 
 // pendingInput resolves the waiting-input contract for status responses. It
 // returns nil unless the instance waits on an input node, and on any graph
-// load failure (status never fails for graph reasons).
-func (s *instanceService) pendingInput(ctx context.Context, inst *model.WorkflowInstance, currentNodeID string) *PendingInput {
+// load failure (status never fails for graph reasons). The tree is the one
+// GetStatusDetail already resolved; a nil tree means that load failed.
+func pendingInput(wc *model.WorkflowContent, inst *model.WorkflowInstance, currentNodeID string) *PendingInput {
 	if inst.Status != model.WorkflowWaiting || inst.WaitingReason != model.WaitingReasonInput {
 		return nil
 	}
-	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
-	if err != nil {
+	if wc == nil {
 		return nil
 	}
 	graph := &contentGraph{wc: wc}
@@ -786,14 +804,15 @@ func toStringMap(v any) map[string]any {
 // statusNodes builds the graph-node-id → occurrence map for the status
 // response. It returns nil when the definition cannot be loaded, parsed, or
 // materialized, so the status view degrades to omitting the map instead of
-// failing the whole call.
-func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowInstance) map[string]NodeOccurrence {
-	wc, err := s.materializer.Resolve(ctx, inst.WorkflowDefinitionID)
-	if err != nil {
+// failing the whole call. The tree and executions are the ones GetStatusDetail
+// already fetched; a nil tree means that load failed, and a non-nil exErr
+// leaves the rollback gate to the endpoint, which rechecks authoritatively.
+func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowInstance, wc *model.WorkflowContent, exs []model.ParallelExecution, exErr error) map[string]NodeOccurrence {
+	if wc == nil {
 		return nil
 	}
-	ids := flattenNodeIDs(wc.Nodes)
-	if len(ids) == 0 {
+	nodeMap := flattenNodeMap(wc.Nodes)
+	if len(nodeMap) == 0 {
 		return nil
 	}
 	occs, err := s.instances.ListNodeInstances(ctx, inst.ID)
@@ -810,7 +829,7 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 		// Mirror the rollback endpoint: live parallel branches block
 		// every target. A load failure leaves the gate to the
 		// endpoint, which rechecks authoritatively.
-		if live, err := s.hasLiveParallel(ctx, inst.ID); err == nil && live {
+		if exErr == nil && hasLiveExecution(exs) {
 			instanceGate = false
 		}
 	}
@@ -823,12 +842,8 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 			leanSet = leanOccurrenceSet(rows)
 		}
 	}
-	out := make(map[string]NodeOccurrence, len(ids))
-	for _, id := range ids {
-		nc, err := findNode(wc.Nodes, id)
-		if err != nil {
-			continue
-		}
+	out := make(map[string]NodeOccurrence, len(nodeMap))
+	for id, nc := range nodeMap {
 		occ, ok := byNode[id]
 		if !ok {
 			out[id] = NodeOccurrence{Status: "not_started"}
@@ -849,21 +864,18 @@ func (s *instanceService) statusNodes(ctx context.Context, inst *model.WorkflowI
 	return out
 }
 
-// statusParallel builds the parallel execution tree for the status
-// response. It returns nil when the instance never forked or when the rows
-// cannot be loaded, so the status view degrades to omitting the section
-// instead of failing the whole call.
-func (s *instanceService) statusParallel(ctx context.Context, instanceID string) []ParallelExecutionView {
-	exs, err := s.parallel.ListExecutions(ctx, instanceID)
-	if err != nil || len(exs) == 0 {
+// statusParallel assembles the parallel execution tree for the status
+// response from one execution list and one batched branch map. It returns
+// nil when the instance never forked. Executions missing from the branch
+// map render an empty branch list. GetStatusDetail degrades execution or
+// branch load failures to a nil section instead of calling this.
+func statusParallel(exs []model.ParallelExecution, branchesByEx map[string][]model.ParallelBranch) []ParallelExecutionView {
+	if len(exs) == 0 {
 		return nil
 	}
 	out := make([]ParallelExecutionView, 0, len(exs))
 	for _, ex := range exs {
-		branches, err := s.parallel.ListBranches(ctx, ex.ID)
-		if err != nil {
-			return nil
-		}
+		branches := branchesByEx[ex.ID]
 		v := ParallelExecutionView{
 			ID:             ex.ID,
 			ParentBranchID: ex.ParentBranchID,
@@ -892,19 +904,24 @@ func (s *instanceService) statusParallel(ctx context.Context, instanceID string)
 	return out
 }
 
-// flattenNodeIDs lists every graph node id in the materialized tree,
-// including group nodes themselves and their nested children.
-func flattenNodeIDs(nodes []*model.NodeContent) []string {
-	var out []string
-	for _, n := range nodes {
-		if n == nil {
-			continue
-		}
-		out = append(out, n.ID)
-		if n.Group != nil {
-			out = append(out, flattenNodeIDs(n.Group.Nodes)...)
+// flattenNodeMap indexes every graph node in the materialized tree by id,
+// including group nodes themselves and their nested children. Nil nodes
+// are tolerated, matching the old flatten-then-lookup walk.
+func flattenNodeMap(nodes []*model.NodeContent) map[string]*model.NodeContent {
+	out := make(map[string]*model.NodeContent)
+	var walk func(ns []*model.NodeContent)
+	walk = func(ns []*model.NodeContent) {
+		for _, n := range ns {
+			if n == nil {
+				continue
+			}
+			out[n.ID] = n
+			if n.Group != nil {
+				walk(n.Group.Nodes)
+			}
 		}
 	}
+	walk(nodes)
 	return out
 }
 
@@ -1586,14 +1603,20 @@ func (s *instanceService) hasLiveParallel(ctx context.Context, instanceID string
 	if err != nil {
 		return false, err
 	}
+	return hasLiveExecution(exs), nil
+}
+
+// hasLiveExecution is the pure core of hasLiveParallel: the status path
+// calls it on the already-fetched executions instead of reloading them.
+func hasLiveExecution(exs []model.ParallelExecution) bool {
 	for _, ex := range exs {
 		switch ex.Status {
 		case model.ParallelExecutionCompleted, model.ParallelExecutionFailed, model.ParallelExecutionCancelled:
 		default:
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // resolveRollbackContext restores the full context for a rollback target.
