@@ -77,6 +77,15 @@ engine:
   heartbeat_interval: 5s
   max_output_bytes: 1048576
   max_redirects: 5
+  # Outbound HTTP bulkhead: process-wide caps shared by external_call
+  # nodes, HTTP pollers, the status publisher, and custom nodes. Fleet
+  # math: 10 replicas x 16/host = 160 concurrent calls per host
+  # fleet-wide; the global cap backstops the default pools. Both must
+  # be > 0.
+  # Operator overrides: SIMPWF_ENGINE_HTTP_MAX_IN_FLIGHT,
+  # SIMPWF_ENGINE_HTTP_MAX_IN_FLIGHT_PER_HOST.
+  http_max_in_flight: 128
+  http_max_in_flight_per_host: 16
   # Operator overrides: SIMPWF_ENGINE_LEAN_CONTEXT_DEFAULT,
   # SIMPWF_ENGINE_LEAN_ANCHOR_EVERY, SIMPWF_ENGINE_LEAN_REPLAY_MAX.
   lean_context_default: false

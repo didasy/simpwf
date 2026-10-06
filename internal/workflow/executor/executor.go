@@ -27,6 +27,18 @@ type Limits struct {
 	MaxOutputBytes int
 	// MaxRedirects caps outbound HTTP redirects.
 	MaxRedirects int
+	// HTTPBulkhead is the shared outbound HTTP admission bulkhead. Nil
+	// means NewHTTPExecutor builds a private default instance from the
+	// caps below, so existing constructions stay bounded with zero churn.
+	HTTPBulkhead *HTTPBulkhead
+	// HTTPMaxInFlight caps total process-wide outbound HTTP in-flight.
+	// Values <= 0 fall back to DefaultHTTPMaxInFlight. Ignored when
+	// HTTPBulkhead is non-nil.
+	HTTPMaxInFlight int
+	// HTTPMaxInFlightPerHost caps outbound HTTP in-flight per host.
+	// Values <= 0 fall back to DefaultHTTPMaxInFlightPerHost. Ignored
+	// when HTTPBulkhead is non-nil.
+	HTTPMaxInFlightPerHost int
 }
 
 // Request is the input to a node execution.
