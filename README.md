@@ -553,7 +553,7 @@ broker DSN dead-letters. Full payload and ordering guarantees are in
 ## Development
 
 ```bash
-task test        # full suite (needs PostgreSQL on :9921 + scratch DBs, see [Taskfile.yaml](Taskfile.yaml))
+task test        # full suite (needs PostgreSQL on :9921, see Testing below)
 task test-race   # full suite under the race detector
 task lint        # golangci-lint
 task vet         # go vet
@@ -562,6 +562,16 @@ task swagger     # regenerate docs/ from API annotations
 task migrate-up      # atlas migrate apply
 task migrate-diff    # new migration from GORM models
 task migrate-lint    # validate migration directory
+```
+
+Testing contract: the full suite needs PostgreSQL. One `TEST_DATABASE_DSN`
+auto-creates the six per-suite scratch databases on first run (the role needs
+CREATEDB once; afterwards the existence check is a no-op). Without Postgres,
+`go test -short ./...` skips the DB suites loudly instead of failing. Local
+Postgres one-liner:
+
+```bash
+docker run -d --name simpwf-pg -e POSTGRES_USER=gorm -e POSTGRES_PASSWORD=gorm -e POSTGRES_DB=gorm -p 9921:5432 postgres:16
 ```
 
 Validation before opening a PR:
@@ -578,7 +588,8 @@ atlas migrate validate --config file://migrations/atlas.hcl --env gorm \
 
 CI (`.github/workflows/`) runs gofmt, vet, tests, race tests, lint, and
 Atlas validate plus apply on pushes to `main`/`master` and on pull requests. A
-coverage workflow tracks a 75% floor, and the badge at the top of this
+coverage workflow tracks a 75% total floor plus per-package floors for the
+DB suites, and the badge at the top of this
 file is refreshed automatically; leave that badge line in place.
 
 ## Project layout

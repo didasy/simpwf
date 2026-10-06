@@ -5,14 +5,13 @@ package repository
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/simpwf/workflow-engine/internal/workflow/defcache"
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
-	"github.com/simpwf/workflow-engine/pkg/database"
+	"github.com/simpwf/workflow-engine/internal/workflow/testdb"
 	"gorm.io/gorm"
 )
 
@@ -36,22 +35,7 @@ const statusCacheContent = `{
 // test truncates first, so no reset is needed here.
 func setupStatusCacheDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_DSN")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_DSN not set; skipping live database test")
-	}
-	opts := database.DefaultOptions()
-	opts.DSN = dsn
-	db, err := database.New(opts)
-	if err != nil {
-		t.Fatalf("database.New() error = %v", err)
-	}
-	t.Cleanup(func() {
-		sqlDB, err := db.DB()
-		if err == nil {
-			_ = sqlDB.Close()
-		}
-	})
+	db := testdb.Open(t, "repository")
 	if err := db.AutoMigrate(
 		&UserModel{},
 		&WorkflowDefinitionModel{},
