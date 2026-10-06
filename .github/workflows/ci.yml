@@ -5,12 +5,15 @@ on:
     branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:65b16a8b326e0cfbdf33fa7e783f2a0cb352a61448616ccccfd616ef42aa0f65
         env:
           POSTGRES_USER: gorm
           POSTGRES_PASSWORD: gorm
@@ -27,10 +30,10 @@ jobs:
       # auto-provisions one scratch database per suite from this DSN.
       TEST_DATABASE_DSN: host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.x"
+          go-version-file: go.mod
       - name: gofmt
         run: test -z "$(gofmt -l .)"
       - name: go vet
@@ -84,16 +87,22 @@ jobs:
             }
           ' /tmp/cover.out
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
-          version: v2.12
+          # goinstall builds the linter with this repo's Go toolchain
+          # (setup-go reads go.mod). Prebuilt binaries lag the toolchain and
+          # panic on packages requiring a newer Go version. v2.14.0 is the
+          # verified floor: its staticcheck parses Go 1.27 stdlib sources,
+          # while v2.12.x panics in buildir.
+          install-mode: goinstall
+          version: v2.14.0
           args: --timeout 5m
 
   migrate:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:65b16a8b326e0cfbdf33fa7e783f2a0cb352a61448616ccccfd616ef42aa0f65
         env:
           POSTGRES_USER: gorm
           POSTGRES_PASSWORD: gorm
@@ -106,11 +115,11 @@ jobs:
           --health-timeout 2s
           --health-retries 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.x"
-      - uses: ariga/setup-atlas@v0
+          go-version-file: go.mod
+      - uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0
         with:
           version: v1.3.0
       - name: Atlas validate (replay migration directory on a clean DB)
@@ -125,3 +134,33 @@ jobs:
             --config file://migrations/atlas.hcl --env gorm \
             --url 'postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable' \
             --var dev_url='postgres://gorm:gorm@localhost:9921/gorm?sslmode=disable'
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: go.mod/go.sum tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: Go toolchain drift guard
+        run: |
+          # go.mod, Dockerfile, and .golangci.yml must agree on the Go minor
+          # version. Skew panics prebuilt linters and stale build images.
+          mod="$(grep -m1 -oP '^go \K[0-9]+\.[0-9]+' go.mod)"
+          img="$(grep -m1 -oP 'golang:\K[0-9]+\.[0-9]+' Dockerfile)"
+          cfg="$(grep -m1 -oP '^\s+go: "\K[0-9]+\.[0-9]+' .golangci.yml)"
+          echo "go.mod=$mod Dockerfile=$img .golangci.yml=$cfg"
+          test "$mod" = "$img" && test "$mod" = "$cfg"
+      - name: govulncheck (reachable vulnerabilities fail the build)
+        run: go tool govulncheck ./...
+      - name: osv-scanner (all known vulnerabilities fail the build)
+        run: go tool osv-scanner --lockfile=go.mod .
+      - name: SBOM (SPDX JSON artifact)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: ./
+          format: spdx-json

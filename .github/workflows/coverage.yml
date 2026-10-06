@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:65b16a8b326e0cfbdf33fa7e783f2a0cb352a61448616ccccfd616ef42aa0f65
         env:
           POSTGRES_USER: gorm
           POSTGRES_PASSWORD: gorm
@@ -29,13 +29,13 @@ jobs:
       # auto-provisions one scratch database per suite from this DSN.
       TEST_DATABASE_DSN: host=localhost user=gorm password=gorm dbname=gorm port=9921 sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.BADGE_BYPASS_PAT }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.x"
+          go-version-file: go.mod
       - name: Run tests with coverage
         run: |
           go test ./... -covermode=count -coverprofile=coverage.out
@@ -43,11 +43,11 @@ jobs:
           mv coverage.tmp coverage.out
           go tool cover -func=coverage.out -o=coverage.out
       - name: Go Coverage Badge
-        uses: tj-actions/coverage-badge-go@v3
+        uses: tj-actions/coverage-badge-go@481919ec72da287775fef015fd9011dc75a5db05 # v3
         with:
           filename: coverage.out
       - name: Verify changed files
-        uses: tj-actions/verify-changed-files@v16
+        uses: tj-actions/verify-changed-files@54e20d3c522fbeed99ebaf2e38a1eb33214c58ba # v16
         id: verify-changed-files
         with:
           files: README.md
@@ -60,7 +60,7 @@ jobs:
           git commit -m "chore: update coverage badge"
       - name: Push badge
         if: steps.verify-changed-files.outputs.files_changed == 'true'
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@881a6320fdb16eb5318c5054f31c218aec2b324c # master
         with:
           github_token: ${{ secrets.BADGE_BYPASS_PAT }}
           branch: main
