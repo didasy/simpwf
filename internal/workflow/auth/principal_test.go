@@ -257,8 +257,20 @@ func TestSystemPrincipalIsService(t *testing.T) {
 	if p.UserID != "11111111-1111-7111-8111-111111111111" {
 		t.Errorf("UserID = %q, want the configured system user", p.UserID)
 	}
+	if len(p.Roles) != 1 || p.Roles[0] != "admin" {
+		t.Errorf("Roles = %v, want [admin]", p.Roles)
+	}
 	perms := p.Permissions(testCatalog)
-	if len(perms) != 1 || !perms[auth.WildcardAction] {
-		t.Errorf("Permissions() = %v, want only the wildcard", perms)
+	want := auth.KnownActions()
+	if len(perms) != len(want) {
+		t.Fatalf("Permissions() has %d actions, want %d (%v)", len(perms), len(want), perms)
+	}
+	for _, action := range want {
+		if !perms[action] {
+			t.Errorf("Permissions() is missing %q (%v)", action, perms)
+		}
+	}
+	if perms[auth.WildcardAction] {
+		t.Errorf("Permissions() contains the wildcard (%v), want only the known actions", perms)
 	}
 }

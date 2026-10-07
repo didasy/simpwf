@@ -137,7 +137,7 @@ func problemDetail(t *testing.T, w *httptest.ResponseRecorder) string {
 
 // A valid API token is the service principal, so it must reach a route that
 // demands a resource-action a user could not hold.
-func TestRequireAuthServicePrincipalCarriesWildcard(t *testing.T) {
+func TestRequireAuthServicePrincipalCarriesAdminRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	catalog := auth.NewCatalog(map[string][]string{"reader": {auth.ActionInputDeliver}})
 	r := gin.New()
@@ -152,6 +152,9 @@ func TestRequireAuthServicePrincipalCarriesWildcard(t *testing.T) {
 			}
 			if !p.Service || p.UserID != testSystemUserID {
 				t.Errorf("principal = %+v, want service principal %s", p, testSystemUserID)
+			}
+			if len(p.Roles) != 1 || p.Roles[0] != "admin" {
+				t.Errorf("principal roles = %v, want [admin]", p.Roles)
 			}
 			c.JSON(http.StatusOK, gin.H{"ok": true})
 		})

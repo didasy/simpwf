@@ -2612,7 +2612,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "permissions": {
-                    "description": "Permission is the union of the caller's role permissions, or [\"*\"]\nfor the service principal.",
+                    "description": "Permission is the union of the caller's role permissions. The service\nprincipal reports every known action.",
                     "type": "array",
                     "items": {
                         "type": "string"

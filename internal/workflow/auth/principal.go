@@ -23,8 +23,9 @@ const (
 	permissionsContextKey
 )
 
-// WildcardAction is the action of the service principal. It authorizes every
-// resource-action and skips the per-node role gate.
+// WildcardAction is a catalog spelling of the bypass: a role granted it
+// authorizes every resource-action. The service principal bypasses on its
+// own flag instead.
 const WildcardAction = "*"
 
 // Resource-action permissions. One action per route, so a role grants a
@@ -73,11 +74,15 @@ type Principal struct {
 }
 
 // Permissions returns the union of the permissions granted by the
-// principal's roles. A service principal holds the wildcard only.
+// principal's roles. A service principal holds every known action, so a
+// listing of its permissions shows what the bypass covers. The bypass
+// itself lives in HasPermission, not in this set.
 func (p Principal) Permissions(catalog Catalog) map[string]bool {
 	out := make(map[string]bool)
 	if p.Service {
-		out[WildcardAction] = true
+		for _, action := range KnownActions() {
+			out[action] = true
+		}
 		return out
 	}
 	for _, role := range p.Roles {
@@ -89,9 +94,9 @@ func (p Principal) Permissions(catalog Catalog) map[string]bool {
 }
 
 // HasPermission reports whether the principal may perform action. A service
-// principal may perform anything, which is exactly what the wildcard means.
-// A role granted the wildcard in the catalog may also perform anything, so
-// admin: ["*"] is a configuration spelling of the same bypass.
+// principal may perform anything. A role granted the wildcard in the
+// catalog may also perform anything, so admin: ["*"] is a configuration
+// spelling of the same bypass.
 // A role name that is not in the catalog grants nothing, so an unknown
 // claim role denies by default while still matching an input node's
 // allowed_roles.
@@ -262,10 +267,13 @@ func (c Catalog) Seed() Seed {
 
 // SystemPrincipal is the service principal used by the API-token path and by
 // the broker input consumers, which carry no credential of their own. The
-// caller supplies the audit actor the bypass acts as.
+// caller supplies the audit actor the bypass acts as. It carries the admin
+// role so identity listings name a role; authorization still bypasses on
+// the Service flag rather than on that role.
 func SystemPrincipal(userID string) Principal {
 	return Principal{
 		Name:    "system",
+		Roles:   []string{"admin"},
 		Service: true,
 		UserID:  userID,
 	}

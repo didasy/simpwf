@@ -177,7 +177,7 @@ func toRoleResponse(r model.Role, perms []string) RoleResponse {
 
 // sortedPermissions lists the actions a principal effectively holds, so a
 // frontend can hide controls the caller cannot use. A service principal
-// reports the wildcard.
+// reports every known action.
 func sortedPermissions(catalog auth.Catalog, p auth.Principal) []string {
 	perms := p.Permissions(catalog)
 	out := make([]string, 0, len(perms))

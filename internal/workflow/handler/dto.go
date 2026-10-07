@@ -127,8 +127,8 @@ type AuthMeResponse struct {
 	Roles []string `json:"roles"`
 	// Service marks the API-token principal, which bypasses authorization.
 	Service bool `json:"service"`
-	// Permission is the union of the caller's role permissions, or ["*"]
-	// for the service principal.
+	// Permission is the union of the caller's role permissions. The service
+	// principal reports every known action.
 	Permission []string `json:"permissions"`
 }
 

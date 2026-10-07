@@ -227,13 +227,13 @@ func TestRouterAuthMeRequiresCredentialOnly(t *testing.T) {
 // rather than null: a frontend can iterate it without a nil check.
 func TestRouterAuthMeReportsEmptyRolesAsArray(t *testing.T) {
 	r := NewRouter(Deps{
-		Health:       NewHealth(fakePinger{}),
-		Auth:         &fakeAuthSvc{},
-		AuthSettings: authConfigForTest(),
+		Health: NewHealth(fakePinger{}),
+		Auth:   &fakeAuthSvc{},
+		OIDC:   stubVerifier{principal: auth.Principal{Subject: "s1", Issuer: testIssuer}},
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me", nil)
-	req.Header.Set(APIKeyHeader, "test-token")
+	req.Header.Set(BearerHeader, "Bearer token")
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -249,6 +249,48 @@ func TestRouterAuthMeReportsEmptyRolesAsArray(t *testing.T) {
 	}
 	if len(*body.Roles) != 0 {
 		t.Errorf("roles = %v, want an empty array", *body.Roles)
+	}
+}
+
+// The API token authenticates as the service principal, which reports the
+// admin role and every known action while keeping the service bypass.
+func TestRouterAuthMeServiceTokenReportsAdmin(t *testing.T) {
+	r := NewRouter(Deps{
+		Health:       NewHealth(fakePinger{}),
+		Auth:         &fakeAuthSvc{},
+		AuthSettings: authConfigForTest(),
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me", nil)
+	req.Header.Set(APIKeyHeader, "test-token")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var body struct {
+		Roles       []string `json:"roles"`
+		Service     bool     `json:"service"`
+		Permissions []string `json:"permissions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /v1/auth/me: %v", err)
+	}
+	if len(body.Roles) != 1 || body.Roles[0] != "admin" {
+		t.Errorf("roles = %v, want [admin]", body.Roles)
+	}
+	if !body.Service {
+		t.Error("service = false, want true")
+	}
+	// KnownActions is sorted and /auth/me sorts its output the same way,
+	// so the two lists compare in order.
+	want := auth.KnownActions()
+	if len(body.Permissions) != len(want) {
+		t.Fatalf("permissions has %d actions, want %d (%v)", len(body.Permissions), len(want), body.Permissions)
+	}
+	for i, action := range want {
+		if body.Permissions[i] != action {
+			t.Fatalf("permissions = %v, want %v", body.Permissions, want)
+		}
 	}
 }
 
