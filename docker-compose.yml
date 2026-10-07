@@ -1,4 +1,4 @@
-# Local stack: PostgreSQL + Atlas migrations + Redis + RabbitMQ + RustFS (S3) + app.
+# Local stack: PostgreSQL + Atlas migrations + Redis + RabbitMQ + RustFS (S3) + app + UI (via proxy).
 # Redis and RabbitMQ are optional: the app starts them only when their DSNs
 # are configured. The migrate service waits for a healthy database; the app
 # waits for the migration plus healthy brokers before starting the API,
@@ -7,6 +7,7 @@
 #
 #   docker compose up --build
 #   curl http://localhost:8080/health/ready
+#   UI: http://localhost:8081 (proxy serves simpwf-ui at /, engine API at /api)
 #   RabbitMQ management UI: http://localhost:15672 (simpwf/simpwf)
 #   RustFS console: http://localhost:9001 (rustfsadmin/rustfsadmin)
 
@@ -200,6 +201,45 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # SimpWF UI (https://github.com/LotusOrb/simpwf-ui). Served through the
+  # proxy below: the engine sends no CORS headers, so the UI must call the
+  # API same-origin. SIMPWF_UI_API=/api resolves against the proxy origin.
+  ui:
+    image: ghcr.io/lotusorb/simpwf-ui:0.3.0@sha256:880c24fa3bcaaa9a7e988ee18de580fc3579499282467bbd814a5401f96bfdb6
+    environment:
+      SIMPWF_UI_NAME: "${SIMPWF_UI_NAME:-Simpwf}"
+      SIMPWF_UI_API: "${SIMPWF_UI_API:-/api}"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/config.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # Single-origin front door: / serves the UI, /api proxies to the engine.
+  proxy:
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    volumes:
+      - ./deploy/ui-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8081:80"
+    depends_on:
+      ui:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/health/ready"]
       interval: 5s
       timeout: 3s
       retries: 20
