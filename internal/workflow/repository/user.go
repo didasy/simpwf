@@ -87,8 +87,11 @@ func (r *userRepository) UpsertBySubject(ctx context.Context, u model.User) (str
 			Columns: []clause.Column{{Name: "subject"}, {Name: "issuer"}},
 			// TargetWhere is the index predicate that conflict inference
 			// needs. The sibling Where field would land after DO UPDATE SET
-			// and constrain the update instead.
-			TargetWhere: clause.Where{Exprs: []clause.Expression{clause.Neq{Column: clause.Column{Name: "subject"}, Value: ""}}},
+			// and constrain the update instead. The empty string renders as
+			// a literal, not a bind parameter: a generic plan cannot prove
+			// a parameterised predicate matches the partial index, so every
+			// warm connection would fail the upsert with 42P10.
+			TargetWhere: clause.Where{Exprs: []clause.Expression{clause.Neq{Column: clause.Column{Name: "subject"}, Value: clause.Expr{SQL: "''"}}}},
 			// The id is deliberately absent: it is the primary key the
 			// existing row already owns, and every audit foreign key points
 			// at it.

@@ -9,6 +9,8 @@ import (
 
 	"github.com/simpwf/workflow-engine/internal/workflow/model"
 	"github.com/simpwf/workflow-engine/internal/workflow/repository"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 // TestManyIdentityLessUsersCoexist is the regression test for the partial
@@ -269,5 +271,60 @@ func TestRolePermissionsForeignKeyHolds(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("Seed() accepted a permission for an undefined role")
+	}
+}
+
+// TestUpsertBySubjectSurvivesGenericPlan: the conflict target repeats the
+// partial index predicate, and PostgreSQL proves that match at plan time.
+// After enough executions on one connection the planner switches to a
+// generic plan, which cannot prove a parameterised predicate matches the
+// index — the statement then fails with 42P10 instead of upserting. The
+// predicate must therefore render as a literal. Forcing generic plans on a
+// pinned connection reproduces the production failure deterministically:
+// every authenticated request upserts, so any warm connection trips it.
+func TestUpsertBySubjectSurvivesGenericPlan(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("force generic plans: %v", err)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, "RESET plan_cache_mode") }()
+
+	pinned, err := gorm.Open(postgres.New(postgres.Config{Conn: conn}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewUserRepository(pinned)
+
+	now := time.Now().UTC()
+	first, err := repo.UpsertBySubject(ctx, model.User{
+		ID: "55555555-5555-7555-8555-555555555555", Subject: "generic-1", Issuer: "https://idp.example.test",
+		Name: "Generic", Email: "generic@example.test", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert under a generic plan: %v", err)
+	}
+
+	// The conflict branch takes the same plan path: a repeat sighting must
+	// land on the existing row, not fail inference.
+	again, err := repo.UpsertBySubject(ctx, model.User{
+		ID: "66666666-6666-7666-8666-666666666666", Subject: "generic-1", Issuer: "https://idp.example.test",
+		Name: "Generic Renamed", Email: "generic+2@example.test", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("repeat upsert under a generic plan: %v", err)
+	}
+	if again != first {
+		t.Fatalf("repeat upsert resolved to %s, want %s", again, first)
 	}
 }

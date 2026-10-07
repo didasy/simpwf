@@ -1,0 +1,78 @@
+name: e2e
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16@sha256:65b16a8b326e0cfbdf33fa7e783f2a0cb352a61448616ccccfd616ef42aa0f65
+        env:
+          POSTGRES_USER: gorm
+          POSTGRES_PASSWORD: gorm
+          POSTGRES_DB: gorm
+        ports:
+          - 9921:5432
+        options: >-
+          --health-cmd "pg_isready -U gorm -d gorm"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install harness tools
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@v3.54.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          missing=""
+          command -v psql >/dev/null || missing="$missing postgresql-client"
+          command -v jq >/dev/null || missing="$missing jq"
+          python3 -c "import cryptography" 2>/dev/null || missing="$missing python3-cryptography"
+          if [[ -n "$missing" ]]; then sudo apt-get update && sudo apt-get install -y $missing; fi
+      - name: Run plain e2e suite
+        run: task e2e-full
+
+  e2e-oidc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16@sha256:65b16a8b326e0cfbdf33fa7e783f2a0cb352a61448616ccccfd616ef42aa0f65
+        env:
+          POSTGRES_USER: gorm
+          POSTGRES_PASSWORD: gorm
+          POSTGRES_DB: gorm
+        ports:
+          - 9921:5432
+        options: >-
+          --health-cmd "pg_isready -U gorm -d gorm"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Install harness tools
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@v3.54.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          missing=""
+          command -v psql >/dev/null || missing="$missing postgresql-client"
+          command -v jq >/dev/null || missing="$missing jq"
+          python3 -c "import cryptography" 2>/dev/null || missing="$missing python3-cryptography"
+          if [[ -n "$missing" ]]; then sudo apt-get update && sudo apt-get install -y $missing; fi
+      - name: Run OIDC e2e suite
+        run: task e2e-oidc
