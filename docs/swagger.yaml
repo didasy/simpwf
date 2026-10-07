@@ -45,8 +45,8 @@ definitions:
         type: string
       permissions:
         description: |-
-          Permission is the union of the caller's role permissions, or ["*"]
-          for the service principal.
+          Permission is the union of the caller's role permissions. The service
+          principal reports every known action.
         items:
           type: string
         type: array

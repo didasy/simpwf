@@ -56,7 +56,8 @@ paths:
         is, so this route is authenticated but carries no resource-action
         gate: an authenticated caller is never refused here with 403.
         service is true for the API-token principal, which bypasses every
-        authorization gate and reports the wildcard permission.
+        authorization gate and reports the admin role with every known
+        permission.
       responses:
         "200":
           description: The authenticated caller
@@ -1176,7 +1177,7 @@ components:
         permissions:
           type: array
           items: { type: string }
-          description: Union of the caller's role permissions, or ["*"] for the service principal
+          description: Union of the caller's role permissions; every known action for the service principal
     Role:
       type: object
       required: [name, permissions, created_at, updated_at]
