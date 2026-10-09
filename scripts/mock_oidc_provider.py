@@ -7,14 +7,19 @@ here is a stub: a token minted here is a genuine RS256 JWT.
 
     python3 scripts/mock_oidc_provider.py <issuer-url>
 
+MOCK_OIDC_HOST overrides the bind address (default 127.0.0.1); the compose
+service sets it to 0.0.0.0 so the published port is reachable.
+
 Serves:
     /.well-known/openid-configuration   the discovery document
     /keys                               the JWKS
-    /token/<who>                        a pre-minted token for "finance",
-                                        "manager", or "noroles"
+    /token/<who>                        a pre-minted token for "admin",
+                                        "auditor", "finance", "manager",
+                                        or "noroles"
 """
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -46,6 +51,7 @@ def b64(n: int) -> str:
 def main() -> None:
     issuer = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:9099"
     port = int(issuer.rsplit(":", 1)[-1])
+    bind = os.environ.get("MOCK_OIDC_HOST", "127.0.0.1")
     key = generate_key()
     pub = key.public_key().public_numbers()
 
@@ -68,6 +74,10 @@ def main() -> None:
         })
 
     tokens = {
+        # The shipped catalog's full-access role.
+        "admin": token("amy-admin", ["admin"]),
+        # The shipped catalog's read-only role.
+        "auditor": token("andy-auditor", ["auditor"]),
         # Holds input:deliver but is not the role the example node lists.
         "finance": token("ada-finance", ["finance"]),
         # Holds input:deliver and is the role the example node lists.
@@ -110,7 +120,7 @@ def main() -> None:
             self.end_headers()
             self.wfile.write(body)
 
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    HTTPServer((bind, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

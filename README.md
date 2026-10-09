@@ -146,7 +146,12 @@ curl http://localhost:8080/health/ready
 - Auth is disabled in the compose defaults. To require the service credential,
   set `SIMPWF_AUTH_ENABLED=true` and pass `X-Api-Token: wadidaw` on `/v1` calls.
   To accept human tokens too, set `SIMPWF_AUTH_OIDC_ISSUER` and
-  `SIMPWF_AUTH_OIDC_CLIENT_ID`.
+  `SIMPWF_AUTH_OIDC_CLIENT_ID` — or use the bundled `mock-oidc` service for a
+  zero-setup provider (test only: it mints a JWT for anyone who asks):
+  `SIMPWF_AUTH_OIDC_ENABLED=true SIMPWF_AUTH_OIDC_ISSUER=http://mock-oidc:9099
+  SIMPWF_AUTH_OIDC_CLIENT_ID=simpwf docker compose up --build`, then
+  `curl http://localhost:9099/token/admin` (`auditor`/`finance` cover the other
+  shipped roles). The stack's role catalog mirrors `config.yaml`.
 - Broker-free mode: unset `SIMPWF_INFRA_REDIS_DSN` and
   `SIMPWF_INFRA_RABBITMQ_DSN` on the `app` service.
 

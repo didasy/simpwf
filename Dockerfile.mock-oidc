@@ -1,0 +1,14 @@
+# Mock OIDC provider for local OIDC-mode testing (see scripts/mock_oidc_provider.py).
+# Local testing only: /token/<who> mints a genuine RS256 JWT for anyone who asks,
+# so never expose this beyond localhost.
+FROM python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
+RUN apk add --no-cache openssl \
+    && pip install --no-cache-dir cryptography
+COPY scripts/mock_oidc_provider.py /mock_oidc_provider.py
+# The script defaults to 127.0.0.1, which is unreachable from outside the
+# container; 0.0.0.0 serves the published port (localhost-only via the compose
+# port mapping).
+ENV MOCK_OIDC_HOST=0.0.0.0
+EXPOSE 9099
+ENTRYPOINT ["python", "/mock_oidc_provider.py"]
+CMD ["http://mock-oidc:9099"]
