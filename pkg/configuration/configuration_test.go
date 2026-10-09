@@ -588,6 +588,34 @@ func TestShippedConfigParsesClockSkew(t *testing.T) {
 	}
 }
 
+// Every role the shipped config.yaml grants must have a pre-minted token in
+// scripts/mock_oidc_provider.py, otherwise OIDC-mode testing cannot exercise
+// that role. The mock may offer more (manager serves the e2e catalog in
+// config.e2e-oidc.yaml, noroles the role-less case), but never fewer.
+func TestMockOIDCCoversShippedRoles(t *testing.T) {
+	// Blank out the JSON override so the file catalog is what is checked,
+	// not whatever the ambient environment carries.
+	setenv(t, "SIMPWF_AUTH_ROLE_PERMISSIONS", "")
+	path := filepath.Join("..", "..", "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("shipped config not available: %v", err)
+	}
+	cfg, err := configuration.Load(configuration.WithConfigFile(path))
+	if err != nil {
+		t.Fatalf("Load(%s) error = %v", path, err)
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "scripts", "mock_oidc_provider.py"))
+	if err != nil {
+		t.Fatalf("read mock_oidc_provider.py: %v", err)
+	}
+	// A pre-minted token reads `"name": token("subject", ["roles"])`.
+	for role := range cfg.Auth.RolePermissions {
+		if !strings.Contains(string(raw), `"`+role+`": token(`) {
+			t.Errorf("shipped role %q has no pre-minted mock token (want /token/%s in scripts/mock_oidc_provider.py)", role, role)
+		}
+	}
+}
+
 // The role catalog is a map, which cannot ride Viper's AutomaticEnv, so it
 // is exposed through an explicit post-unmarshal JSON override.
 func TestLoadRolePermissionsFromEnvJSON(t *testing.T) {

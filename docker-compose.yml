@@ -131,6 +131,25 @@ services:
       retries: 3
       start_period: 40s
 
+  # Mock OIDC provider for local OIDC-mode testing (see
+  # scripts/mock_oidc_provider.py). The app discovers it at
+  # http://mock-oidc:9099 over compose DNS; fetch pre-minted tokens from the
+  # host at http://localhost:9099/token/manager (also: admin, auditor,
+  # finance, noroles).
+  # Local testing only: /token/<who> mints a JWT for anyone who asks.
+  mock-oidc:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-oidc
+    ports:
+      - "9099:9099"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9099/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
   app:
     build:
       context: .
@@ -153,13 +172,25 @@ services:
       # at a reachable provider (Zitadel, Keycloak, Authentik, ...) and set
       # the client id it was registered with; the frontend then reads the
       # endpoints from GET /v1/auth/config and runs code+PKCE. The API is a
-      # resource server only, so no client secret belongs here.
-      SIMPWF_AUTH_OIDC_ENABLED: "${SIMPWF_AUTH_OIDC_ENABLED:-false}"
-      SIMPWF_AUTH_OIDC_ISSUER: "${SIMPWF_AUTH_OIDC_ISSUER:-}"
-      SIMPWF_AUTH_OIDC_CLIENT_ID: "${SIMPWF_AUTH_OIDC_CLIENT_ID:-}"
+      # resource server only, so no client secret belongs here. For a
+      # zero-setup provider, use the bundled mock-oidc service:
+      # SIMPWF_AUTH_OIDC_ISSUER=http://mock-oidc:9099,
+      # SIMPWF_AUTH_OIDC_CLIENT_ID=simpwf.
+      SIMPWF_AUTH_OIDC_ENABLED: "${SIMPWF_AUTH_OIDC_ENABLED:-true}"
+      SIMPWF_AUTH_OIDC_ISSUER: "${SIMPWF_AUTH_OIDC_ISSUER:-http://mock-oidc:9099}"
+      SIMPWF_AUTH_OIDC_CLIENT_ID: "${SIMPWF_AUTH_OIDC_CLIENT_ID:-simpwf}"
       SIMPWF_AUTH_OIDC_AUDIENCE: "${SIMPWF_AUTH_OIDC_AUDIENCE:-}"
       SIMPWF_AUTH_OIDC_ROLES_CLAIM: "${SIMPWF_AUTH_OIDC_ROLES_CLAIM:-roles}"
       SIMPWF_AUTH_OIDC_USERNAME_CLAIM: "${SIMPWF_AUTH_OIDC_USERNAME_CLAIM:-name}"
+      # Role catalog: mirrors config.yaml role_permissions so OIDC tokens
+      # asserting the shipped roles grant the shipped permissions. A role a
+      # token carries that is absent here grants nothing (deny by default).
+      SIMPWF_AUTH_ROLE_PERMISSIONS: >-
+        {"admin": ["definitions:read", "definitions:write", "secrets:read", "secrets:write",
+          "instances:create", "instances:read", "instances:update-context", "input:deliver",
+          "instances:control", "statistics:read", "roles:read", "schedules:read", "schedules:write"],
+         "finance": ["instances:read", "input:deliver"],
+         "auditor": ["definitions:read", "instances:read", "statistics:read", "roles:read"]}
       SIMPWF_WORKER_POOL_SIZE: "50"
       # SIMPWF_* is snapshotted per instance under {{ env.* }}, except the
       # denied credentials: SIMPWF_API_TOKEN, SIMPWF_AUTH_*, SIMPWF_SYSTEM_*,
@@ -198,6 +229,8 @@ services:
       rabbitmq:
         condition: service_healthy
       rustfs:
+        condition: service_healthy
+      mock-oidc:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/ready"]
