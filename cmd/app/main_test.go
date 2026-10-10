@@ -260,6 +260,65 @@ func TestDatabasePoolCeiling(t *testing.T) {
 	}
 }
 
+// TestStatusDispatcherOptions pins the config→options mapping: explicit
+// worker/engine values and resolved limits reach the status dispatcher
+// options verbatim, and Load defaults yield 20 / 200ms / 30s / 10 (the
+// original bug: run() built the status dispatcher with empty options, so
+// every config value was silently dropped).
+func TestStatusDispatcherOptions(t *testing.T) {
+	explicit := &configuration.Config{}
+	explicit.Worker.StatusPool.Size = 7
+	explicit.Engine.PollInterval = 111 * time.Millisecond
+	limits := model.DefaultLimits()
+	limits.LeaseDuration = 45 * time.Second
+	limits.ClaimBatchSize = 7
+	if opts := statusDispatcherOptions(explicit, limits); opts.PoolSize != 7 ||
+		opts.PollInterval != 111*time.Millisecond || opts.Lease != 45*time.Second || opts.BatchSize != 7 {
+		t.Fatalf("statusDispatcherOptions() = %+v, want explicit values verbatim", opts)
+	}
+
+	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", "default-dsn")
+	loaded, err := configuration.Load(configuration.WithConfigFile(filepath.Join(t.TempDir(), "does-not-exist.yaml")))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if opts := statusDispatcherOptions(loaded, model.DefaultLimits()); opts.PoolSize != 20 ||
+		opts.PollInterval != 200*time.Millisecond || opts.Lease != 30*time.Second || opts.BatchSize != 10 {
+		t.Errorf("statusDispatcherOptions() from defaults = %+v, want 20/200ms/30s/10", opts)
+	}
+}
+
+// TestEngineDispatcherOptions pins the config→options mapping: the engine
+// dispatcher gets the poll/heartbeat intervals from config, the claim knobs
+// from the resolved limits, and the pool size from worker config (the
+// original bug: run() omitted PollInterval and Heartbeat, so both ran on
+// hardcoded fallbacks no matter the config).
+func TestEngineDispatcherOptions(t *testing.T) {
+	explicit := &configuration.Config{}
+	explicit.Worker.Pool.Size = 11
+	explicit.Engine.PollInterval = 111 * time.Millisecond
+	explicit.Engine.HeartbeatInterval = 7 * time.Second
+	limits := model.DefaultLimits()
+	limits.LeaseDuration = 45 * time.Second
+	limits.ClaimBatchSize = 7
+	if opts := engineDispatcherOptions(explicit, limits); opts.PoolSize != 11 ||
+		opts.PollInterval != 111*time.Millisecond || opts.Heartbeat != 7*time.Second ||
+		opts.Lease != 45*time.Second || opts.BatchSize != 7 {
+		t.Fatalf("engineDispatcherOptions() = %+v, want explicit values verbatim", opts)
+	}
+
+	t.Setenv("SIMPWF_INFRA_POSTGRESQL_DSN", "default-dsn")
+	loaded, err := configuration.Load(configuration.WithConfigFile(filepath.Join(t.TempDir(), "does-not-exist.yaml")))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if opts := engineDispatcherOptions(loaded, model.DefaultLimits()); opts.PoolSize != 1000 ||
+		opts.PollInterval != 200*time.Millisecond || opts.Heartbeat != 5*time.Second ||
+		opts.Lease != 30*time.Second || opts.BatchSize != 10 {
+		t.Errorf("engineDispatcherOptions() from defaults = %+v, want 1000/200ms/5s/30s/10", opts)
+	}
+}
+
 // TestCheckAuthWiringRefusesUnattributableOIDC: with OIDC on, a missing
 // identity resolver or audit actor is refused at boot. The resolver gap
 // strands human principals; the actor gap silently attributes the service
