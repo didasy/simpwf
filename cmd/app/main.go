@@ -174,6 +174,27 @@ func executorLimits(cfg *configuration.Config) executor.Limits {
 	}
 }
 
+// engineDispatcherOptions maps engine and worker config to engine dispatcher options.
+func engineDispatcherOptions(cfg *configuration.Config, limits model.Limits) engine.DispatcherOptions {
+	return engine.DispatcherOptions{
+		PollInterval: cfg.Engine.PollInterval,
+		Lease:        limits.LeaseDuration,
+		BatchSize:    limits.ClaimBatchSize,
+		PoolSize:     cfg.Worker.Pool.Size,
+		Heartbeat:    cfg.Engine.HeartbeatInterval,
+	}
+}
+
+// statusDispatcherOptions maps worker and engine config to status dispatcher options.
+func statusDispatcherOptions(cfg *configuration.Config, limits model.Limits) statusupdate.DispatcherOptions {
+	return statusupdate.DispatcherOptions{
+		PollInterval: cfg.Engine.PollInterval,
+		Lease:        limits.LeaseDuration,
+		BatchSize:    limits.ClaimBatchSize,
+		PoolSize:     cfg.Worker.StatusPool.Size,
+	}
+}
+
 // run starts the HTTP server and the dispatcher, and blocks until ctx is
 // cancelled, then shuts down gracefully. It returns nil on a clean shutdown.
 func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) error {
@@ -427,11 +448,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		}
 	}()
 
-	dispatcher, err := engine.NewDispatcher(ctx, eng, instances, repository.NewParallelRepository(db), "dispatcher-"+hostname, engine.DispatcherOptions{
-		Lease:     limits.LeaseDuration,
-		BatchSize: limits.ClaimBatchSize,
-		PoolSize:  cfg.Worker.Pool.Size,
-	})
+	dispatcher, err := engine.NewDispatcher(ctx, eng, instances, repository.NewParallelRepository(db), "dispatcher-"+hostname, engineDispatcherOptions(cfg, limits))
 	if err != nil {
 		return fmt.Errorf("dispatcher: %w", err)
 	}
@@ -469,7 +486,7 @@ func run(ctx context.Context, cfg *configuration.Config, logger *logrus.Logger) 
 		statusPublishers[model.StatusUpdateTransportRabbitMQ] = statusupdate.NewRabbitPublisher(rabbitPub, cfg.Infra.RabbitMQ.StatusQueue)
 	}
 	statusDispatcher, err := statusupdate.NewDispatcher(ctx, statusUpdates, statusLoader,
-		statusPublishers, "status-"+hostname, statusupdate.DispatcherOptions{})
+		statusPublishers, "status-"+hostname, statusDispatcherOptions(cfg, limits))
 	if err != nil {
 		return fmt.Errorf("status dispatcher: %w", err)
 	}
